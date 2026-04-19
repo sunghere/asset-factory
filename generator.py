@@ -162,16 +162,31 @@ class SDClient:
         raise SDError("SD API 요청 실패", code="unreachable")
 
 
+def _safe_path_segment(value: str) -> str:
+    """파일 경로 세그먼트로 사용할 수 없는 문자를 정리한다."""
+    return value.replace("/", "_").replace("\\", "_").replace("..", "_")
+
+
 def save_generated_image(
     image_bytes: bytes,
     output_root: Path,
     project: str,
     asset_key: str,
+    job_id: str | None = None,
 ) -> Path:
-    """생성 이미지를 후보 디렉토리에 저장한다."""
-    project_dir = output_root / "candidates" / project
+    """생성 이미지를 후보 디렉토리에 저장한다.
+
+    Job ID가 주어지면 generation 별 unique 경로에 저장하여 이전 결과 파일이
+    덮어써지지 않도록 한다(asset_history의 image_path가 디스크에 유지됨)."""
+    safe_project = _safe_path_segment(project)
+    safe_key = _safe_path_segment(asset_key)
+    project_dir = output_root / "candidates" / safe_project
     project_dir.mkdir(parents=True, exist_ok=True)
-    output_path = project_dir / f"{asset_key}.png"
+    if job_id:
+        safe_job = _safe_path_segment(job_id)
+        output_path = project_dir / f"{safe_key}__{safe_job}.png"
+    else:
+        output_path = project_dir / f"{safe_key}.png"
     output_path.write_bytes(image_bytes)
     return output_path
 
@@ -185,8 +200,10 @@ def save_candidate_slot_image(
     slot_index: int,
 ) -> Path:
     """다중 후보 생성 시 슬롯별 파일 경로에 저장한다."""
-    safe_key = asset_key.replace("/", "_").replace("\\", "_")
-    target_dir = output_root / "candidates" / project / safe_key / job_id
+    safe_project = _safe_path_segment(project)
+    safe_key = _safe_path_segment(asset_key)
+    safe_job = _safe_path_segment(job_id)
+    target_dir = output_root / "candidates" / safe_project / safe_key / safe_job
     target_dir.mkdir(parents=True, exist_ok=True)
     output_path = target_dir / f"slot_{slot_index}.png"
     output_path.write_bytes(image_bytes)

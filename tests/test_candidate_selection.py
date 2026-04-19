@@ -36,8 +36,12 @@ def _make_png(path: Path) -> None:
 
 def test_select_candidate_promotes_slot_to_primary(isolated_db: Database, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
     monkeypatch.setattr(server, "api_key", None)
-    main = tmp_path / "main.png"
-    slot1 = tmp_path / "slot1.png"
+    # 모든 경로는 (monkeypatch된) DATA_DIR 하위에 있어야 allowlist를 통과한다.
+    data = server.DATA_DIR
+    main = data / "primary.png"
+    slot_dir = data / "candidates" / "proj" / "char_idle" / "job-test-1"
+    slot_dir.mkdir(parents=True, exist_ok=True)
+    slot1 = slot_dir / "slot_1.png"
     _make_png(main)
     _make_png(slot1)
 
@@ -87,16 +91,20 @@ def test_select_candidate_promotes_slot_to_primary(isolated_db: Database, tmp_pa
     async def check() -> None:
         asset = await isolated_db.get_asset(asset_id)
         assert asset is not None
-        assert asset["image_path"] == str(main)
+        # asset.image_path는 새 unique 경로여야 하며 기존 main 파일은 그대로 보존된다.
+        assert asset["image_path"] != str(main)
+        assert main.exists(), "이전 primary 파일이 보존되어야 한다 (history 보존)"
+        assert Path(asset["image_path"]).exists()
         hist = await isolated_db.list_asset_history(asset_id)
         assert len(hist) == 1
+        assert hist[0]["image_path"] == str(main)
 
     asyncio.run(check())
 
 
 def test_list_project_assets_filter(isolated_db: Database, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
     monkeypatch.setattr(server, "api_key", None)
-    p = tmp_path / "a.png"
+    p = server.DATA_DIR / "a.png"
     _make_png(p)
 
     async def prep() -> None:

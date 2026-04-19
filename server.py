@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from candidate_gc import run_gc_candidates
-from generator import SDClient, save_candidate_slot_image, save_generated_image
+from generator import SDClient, SDError, save_candidate_slot_image, save_generated_image
 from models import Database
 from scanner import scan_directory
 from validator import validate_asset
@@ -29,6 +29,59 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "asset-factory.db"
+
+
+def _allowed_roots() -> list[Path]:
+    """파일 시스템 접근을 허용할 루트 디렉토리 목록.
+
+    `ASSET_FACTORY_ALLOWED_ROOTS` 환경변수(콜론 구분, ``:``)가 있으면 그 값을 사용한다.
+    기본값은 현재 ``DATA_DIR``과 사용자 워크스페이스 자산 디렉토리이다.
+    호출 시점에 동적으로 계산하므로 테스트에서 ``server.DATA_DIR`` 등을
+    monkeypatch 할 수 있다."""
+    extra = os.getenv("ASSET_FACTORY_ALLOWED_ROOTS", "")
+    roots: list[Path] = [DATA_DIR.resolve(), (Path.home() / "workspace" / "assets").resolve()]
+    if extra:
+        for chunk in extra.split(":"):
+            cleaned = chunk.strip()
+            if cleaned:
+                roots.append(Path(cleaned).expanduser().resolve())
+    seen: set[str] = set()
+    deduped: list[Path] = []
+    for root in roots:
+        key = str(root)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(root)
+    return deduped
+
+
+def _is_path_within_allowed(target: Path) -> bool:
+    """대상 경로가 허용된 루트 중 하나의 하위에 있는지 확인."""
+    try:
+        resolved = target.expanduser().resolve()
+    except (OSError, RuntimeError):
+        return False
+    for root in _allowed_roots():
+        try:
+            resolved.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _ensure_path_allowed(target: Path) -> Path:
+    """경로 허용 여부를 검사하고, 통과 시 resolve된 경로를 반환한다."""
+    resolved = target.expanduser().resolve()
+    if not _is_path_within_allowed(resolved):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "허용되지 않은 경로입니다. 환경변수 ASSET_FACTORY_ALLOWED_ROOTS에 "
+                "허용 루트를 추가하세요."
+            ),
+        )
+    return resolved
 
 
 class GenerateRequest(BaseModel):
@@ -94,8 +147,9 @@ class EventBroker:
         self._subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
 
     async def publish(self, event: dict[str, Any]) -> None:
+        # subscribe()/unsubscribe()와 동시에 호출될 수 있으므로 스냅샷을 사용한다.
         dead: list[asyncio.Queue[dict[str, Any]]] = []
-        for queue in self._subscribers:
+        for queue in list(self._subscribers):
             try:
                 queue.put_nowait(event)
             except asyncio.QueueFull:
@@ -221,6 +275,32 @@ def _check_disk_space(path: Path) -> None:
         )
 
 
+def _ensure_disk_space_for_enqueue() -> None:
+    """enqueue API에서 즉시 507 응답으로 변환되는 디스크 가드."""
+    try:
+        _check_disk_space(DATA_DIR)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=507, detail=str(exc)) from exc
+
+
+# 자동 재시도하지 않을 SD 실패 코드(클라이언트 오류, 메모리 부족 등).
+NON_RETRYABLE_SD_CODES: frozenset[str] = frozenset({"sd_client_error", "oom"})
+
+
+def _should_retry_sd_failure(exc: BaseException) -> bool:
+    """SDError 코드 기반 재시도 여부 판정. 비-SDError는 기본적으로 재시도한다."""
+    if isinstance(exc, SDError):
+        return exc.code not in NON_RETRYABLE_SD_CODES
+    return True
+
+
+def _format_task_error(exc: BaseException) -> str:
+    """generation_tasks.last_error에 저장할 사람이 읽을 메시지."""
+    if isinstance(exc, SDError):
+        return f"code:{exc.code} {exc}"
+    return str(exc) or exc.__class__.__name__
+
+
 async def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
     """변경 API에 대한 최소 인증."""
     if not api_key:
@@ -271,11 +351,14 @@ async def handle_task(task: dict[str, Any]) -> None:
                 slot_index=int(candidate_slot),
             )
         else:
+            # Unique 경로에 저장 → 재생성 시 이전 파일이 덮어쓰여지지 않아
+            # asset_history의 image_path가 디스크에 그대로 유지된다.
             output_path = save_generated_image(
                 image_bytes=generation.image_bytes,
                 output_root=DATA_DIR,
                 project=task["project"],
                 asset_key=task["asset_key"],
+                job_id=task["job_id"],
             )
         validation = validate_asset(
             image_path=output_path,
@@ -315,7 +398,10 @@ async def handle_task(task: dict[str, Any]) -> None:
                 generation_prompt=generation.prompt,
                 metadata_json=metadata_json,
             )
-            if int(candidate_slot) == 0:
+            # slot 인덱스 대신 "기존 primary asset 존재 여부"로 승격 판단한다.
+            # 따라서 slot 0이 실패해도 다음 성공 슬롯이 primary가 될 수 있다.
+            already_promoted = await db.has_asset(task["project"], task["asset_key"])
+            if not already_promoted:
                 asset_id = str(uuid.uuid4())
                 await db.finish_task_success(
                     task_id=int(task["id"]),
@@ -376,13 +462,17 @@ async def handle_task(task: dict[str, Any]) -> None:
             }
         )
     except Exception as exc:  # noqa: BLE001
-        await db.retry_or_fail_task(task, str(exc))
+        force_fail = not _should_retry_sd_failure(exc)
+        message = _format_task_error(exc)
+        await db.retry_or_fail_task(task, message, force_fail=force_fail)
         await event_broker.publish(
             {
                 "type": "task_error",
                 "job_id": task["job_id"],
                 "asset_key": task["asset_key"],
-                "error": str(exc),
+                "error": message,
+                "code": exc.code if isinstance(exc, SDError) else None,
+                "retry": not force_fail,
             }
         )
 
@@ -405,6 +495,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     global worker_task, gc_worker_task
     await db.init()
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    # 이전 실행 중 'processing' 상태로 멈춘 태스크를 큐로 복귀시킨다.
+    await db.recover_orphan_tasks()
     worker_task = asyncio.create_task(generation_worker())
     gc_worker_task = asyncio.create_task(_gc_loop())
     try:
@@ -489,6 +581,7 @@ async def list_project_assets(
 @app.post("/api/generate", dependencies=[Depends(require_api_key)])
 async def generate_asset(request: GenerateRequest) -> dict[str, str]:
     """단일 에셋 생성 작업 등록."""
+    _ensure_disk_space_for_enqueue()
     job_id = str(uuid.uuid4())
     await db.create_job(job_id=job_id, job_type="generate_single", payload=request.model_dump())
     await db.enqueue_generation_task(
@@ -518,6 +611,7 @@ async def generate_asset(request: GenerateRequest) -> dict[str, str]:
 @app.post("/api/generate/batch", dependencies=[Depends(require_api_key)])
 async def generate_batch(request: BatchGenerateRequest) -> dict[str, Any]:
     """스펙 기반 배치 생성 작업 등록."""
+    _ensure_disk_space_for_enqueue()
     spec = request.spec
     if spec is None:
         if not request.spec_id:
@@ -547,14 +641,18 @@ async def generate_batch(request: BatchGenerateRequest) -> dict[str, Any]:
 @app.post("/api/projects/scan", dependencies=[Depends(require_api_key)])
 async def scan_project_assets(request: ScanRequest) -> dict[str, Any]:
     """기존 디렉토리를 스캔해 에셋 DB를 동기화한다."""
+    root = _ensure_path_allowed(Path(request.root_path))
     try:
-        scanned = scan_directory(Path(request.root_path))
+        scanned = scan_directory(root)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     inserted = 0
     for item in scanned:
         image_path = Path(item["image_path"])
+        # 스캐너가 반환한 경로도 한 번 더 검증한다(심볼릭 링크 방어).
+        if not _is_path_within_allowed(image_path):
+            continue
         result = validate_asset(image_path=image_path, expected_size=None, max_colors=request.max_colors)
         await db.upsert_scanned_asset(
             project=request.project,
@@ -642,6 +740,7 @@ async def get_asset_image(asset_id: str) -> FileResponse:
     image_path = Path(asset["image_path"])
     if not image_path.exists():
         raise HTTPException(status_code=404, detail="이미지 파일이 존재하지 않습니다.")
+    _ensure_path_allowed(image_path)
     return FileResponse(image_path)
 
 
@@ -681,6 +780,7 @@ async def get_candidate_image_file(
     path = Path(pick["image_path"])
     if not path.exists():
         raise HTTPException(status_code=404, detail="후보 파일이 없습니다.")
+    _ensure_path_allowed(path)
     return FileResponse(path)
 
 
@@ -697,9 +797,16 @@ async def select_asset_candidate(asset_id: str, body: SelectCandidateRequest) ->
     src = Path(pick["image_path"])
     if not src.exists():
         raise HTTPException(status_code=404, detail="후보 파일이 없습니다.")
+    _ensure_path_allowed(src)
 
-    dest = Path(asset["image_path"])
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    # 이전 메인 이미지를 덮어쓰지 않도록 새 unique 경로에 복사한다.
+    # 이렇게 하면 asset_history에 기록된 기존 image_path가 디스크에 그대로 보존된다.
+    safe_project = asset["project"].replace("/", "_").replace("\\", "_").replace("..", "_")
+    safe_key = asset["asset_key"].replace("/", "_").replace("\\", "_").replace("..", "_")
+    safe_job = body.job_id.replace("/", "_").replace("\\", "_").replace("..", "_")
+    dest_dir = DATA_DIR / "candidates" / safe_project
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"{safe_key}__primary__{safe_job}__slot{body.slot_index}.png"
     shutil.copy2(src, dest)
 
     meta: dict[str, Any] = {}
@@ -762,6 +869,7 @@ async def patch_asset(asset_id: str, request: AssetStatusPatch) -> dict[str, boo
 @app.post("/api/assets/{asset_id}/regenerate", dependencies=[Depends(require_api_key)])
 async def regenerate_asset(asset_id: str) -> dict[str, str]:
     """기존 에셋 파라미터를 기반으로 재생성 작업을 등록한다."""
+    _ensure_disk_space_for_enqueue()
     asset = await db.get_asset(asset_id)
     if asset is None:
         raise HTTPException(status_code=404, detail="에셋을 찾을 수 없습니다.")
@@ -852,7 +960,7 @@ async def validate_asset_endpoint(asset_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/validate/all", dependencies=[Depends(require_api_key)])
-async def validate_all_assets(project: str | None = None) -> dict[str, Any]:
+async def validate_all_assets(project: str | None = Query(default=None)) -> dict[str, Any]:
     """전체 에셋 재검증."""
     assets = await db.list_assets(project=project)
     checked = 0
@@ -907,6 +1015,7 @@ async def batch_regenerate_failed(
     project: str | None = Query(default=None),
 ) -> dict[str, Any]:
     """검증 FAIL 에셋에 대해 재생성 작업을 일괄 등록한다."""
+    _ensure_disk_space_for_enqueue()
     assets = await db.list_assets(project=project, validation_status="fail")
     job_ids: list[str] = []
     for asset in assets:

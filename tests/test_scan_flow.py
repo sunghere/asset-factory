@@ -32,6 +32,8 @@ def test_scan_project_assets_updates_db_and_summary(tmp_path: Path, monkeypatch)
 
         monkeypatch.setattr(server, "db", db)
         monkeypatch.setattr(server, "event_broker", _DummyEventBroker())
+        # 임시 디렉토리를 path allowlist에 추가한다.
+        monkeypatch.setenv("ASSET_FACTORY_ALLOWED_ROOTS", str(tmp_path))
 
         result = await server.scan_project_assets(
             server.ScanRequest(project="cat-raising", root_path=str(root), max_colors=32)

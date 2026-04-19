@@ -421,13 +421,21 @@ class Database:
             await conn.commit()
         await self.refresh_job_status(job_id)
 
-    async def retry_or_fail_task(self, task: dict[str, Any], error_message: str) -> None:
-        """실패 태스크를 재시도하거나 최종 실패 처리."""
+    async def retry_or_fail_task(
+        self,
+        task: dict[str, Any],
+        error_message: str,
+        *,
+        force_fail: bool = False,
+    ) -> None:
+        """실패 태스크를 재시도하거나 최종 실패 처리.
+
+        ``force_fail=True``이면 남은 retry가 있어도 즉시 failed로 처리한다."""
         now = utc_now()
         retries = int(task["retries"])
         max_retries = int(task["max_retries"])
         async with aiosqlite.connect(self.db_path) as conn:
-            if retries + 1 < max_retries:
+            if not force_fail and retries + 1 < max_retries:
                 await conn.execute(
                     """
                     UPDATE generation_tasks
@@ -551,6 +559,31 @@ class Database:
             cursor = await conn.execute("SELECT * FROM assets WHERE id=?", (asset_id,))
             row = await cursor.fetchone()
             return dict(row) if row else None
+
+    async def has_asset(self, project: str, asset_key: str) -> bool:
+        """동일 (project, asset_key) 에셋이 이미 존재하는지 확인."""
+        async with aiosqlite.connect(self.db_path) as conn:
+            cursor = await conn.execute(
+                "SELECT 1 FROM assets WHERE project=? AND asset_key=? LIMIT 1",
+                (project, asset_key),
+            )
+            row = await cursor.fetchone()
+            return row is not None
+
+    async def recover_orphan_tasks(self) -> int:
+        """이전 실행 중 'processing' 상태로 멈춘 태스크를 다시 큐로 되돌린다."""
+        now = utc_now()
+        async with aiosqlite.connect(self.db_path) as conn:
+            cursor = await conn.execute(
+                """
+                UPDATE generation_tasks
+                SET status='queued', updated_at=?
+                WHERE status='processing'
+                """,
+                (now,),
+            )
+            await conn.commit()
+            return int(cursor.rowcount or 0)
 
     async def update_asset_validation(
         self,
