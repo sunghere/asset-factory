@@ -44,4 +44,5 @@ jobs:
       - name: Pytest
         env:
           PYTHONDONTWRITEBYTECODE: "1"
+          PYTHONPATH: ${{ github.workspace }}
         run: pytest tests/ -q --maxfail=1 --disable-warnings
