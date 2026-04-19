@@ -135,10 +135,19 @@ def test_queue_endpoint_shape_and_counts(isolated) -> None:
     assert body["total_remaining"] >= 8
 
 
-def test_queue_marks_approved_when_main_asset_exists(isolated) -> None:
-    db, data = isolated
-    asyncio.run(_seed_batch(db, data, batch_id="btc_q4", asset_key="hero_done", n=3))
+def test_queue_marks_approved_only_when_candidate_picked(isolated) -> None:
+    """approved 판정은 ``(project, asset_key)`` 존재 여부가 아니라
+    "이 batch에서 한 장 골랐나"여야 한다.
 
+    회귀 방지: 같은 키로 재생성한 배치가 (이전 배치로 만든) primary가 있다는
+    이유로 자동 approved 처리되어 cherry-pick 큐에서 사라지면 안 된다.
+    """
+    db, data = isolated
+    cand_ids = asyncio.run(_seed_batch(db, data, batch_id="btc_q4", asset_key="hero_done", n=3))
+
+    # 같은 (project, asset_key) 의 메인 asset을 미리 만들어둔다
+    # (예: 어제 배치로 이미 승인된 상태). 이 사실만으로는 오늘 배치를
+    # approved로 봐선 안 된다.
     async def make_main() -> None:
         existing = data / "primary.png"
         _make_png(existing)
@@ -147,12 +156,8 @@ def test_queue_marks_approved_when_main_asset_exists(isolated) -> None:
             asset_key="hero_done",
             category="character",
             image_path=str(existing),
-            width=32,
-            height=32,
-            color_count=4,
-            has_alpha=True,
-            validation_status="pass",
-            validation_message="ok",
+            width=32, height=32, color_count=4, has_alpha=True,
+            validation_status="pass", validation_message="ok",
         )
 
     asyncio.run(make_main())
@@ -160,14 +165,44 @@ def test_queue_marks_approved_when_main_asset_exists(isolated) -> None:
         r = client.get("/api/cherry-pick/queue")
     body = r.json()
     item = next(it for it in body["items"] if it["batch_id"] == "btc_q4")
+    # 메인 asset이 존재해도, 이 batch에서 picked 된 candidate가 없으니 pending
+    assert item["approved"] is False, (
+        "메인 asset 존재만으로 새 batch를 approved로 판정하면 안 된다 "
+        "(codex P1: list_today_batches 회귀)"
+    )
+
+    # 한 장 picked 처리 → 같은 batch가 approved로 바뀌어야 한다
+    asyncio.run(db.mark_candidate_picked(cand_ids[0]))
+    with TestClient(server.app) as client:
+        r = client.get("/api/cherry-pick/queue")
+    body = r.json()
+    item = next(it for it in body["items"] if it["batch_id"] == "btc_q4")
     assert item["approved"] is True
-    # approved batch는 pending_batches에 안 들어감
-    assert all(b["batch_id"] != "btc_q4" or b.get("approved")
-               for b in body["items"])
-    # total_remaining 계산 시 approved batch 제외
+
+    # approved batch는 pending_batches/ total_remaining 집계에서 빠진다
     pending = [b for b in body["items"] if not b.get("approved")]
     assert body["pending_batches"] == len(pending)
     assert body["total_remaining"] == sum(int(b["remaining"]) for b in pending)
+
+
+def test_queue_approved_after_inline_key_edit_still_marks_original_batch(isolated) -> None:
+    """inline asset_key 편집(=approve 시 다른 키로 보냄)으로 새 asset이 만들어져도,
+    원본 batch의 candidate에 picked_at이 박히므로 batch는 approved로 계산된다.
+
+    회귀 방지: codex P1 — "approving a candidate after editing the key inline never
+    marks the original batch as done"."""
+    db, data = isolated
+    cand_ids = asyncio.run(_seed_batch(db, data, batch_id="btc_inline", asset_key="orig_key", n=3))
+
+    # 원본 키와 다른 키로 picked 처리한다 (실 코드는
+    # /api/assets/approve-from-candidate 가 mark_candidate_picked 를 호출).
+    asyncio.run(db.mark_candidate_picked(cand_ids[0]))
+
+    with TestClient(server.app) as client:
+        r = client.get("/api/cherry-pick/queue")
+    body = r.json()
+    item = next(it for it in body["items"] if it["batch_id"] == "btc_inline")
+    assert item["approved"] is True
 
 
 def test_queue_since_filter_excludes_old_batches(isolated) -> None:

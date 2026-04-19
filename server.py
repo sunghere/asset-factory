@@ -103,6 +103,17 @@ def _safe_segment(value: str) -> str:
     return value.replace("/", "_").replace("\\", "_").replace("..", "_")
 
 
+def _approved_dir(project: str) -> Path:
+    """승격된 메인 이미지가 들어가는 디렉토리.
+
+    ``DATA_DIR/candidates/`` 와 분리해야 한다 — ``run_gc_candidates`` 가
+    candidates 트리를 mtime/용량 기준으로 정리하기 때문에, 같은 트리 안에
+    승인본을 두면 GC가 primary asset 파일을 지워서 ``image_path`` 가
+    dangling이 된다.
+    """
+    return DATA_DIR / "approved" / _safe_segment(project)
+
+
 class GenerateRequest(BaseModel):
     """단일 생성 요청."""
 
@@ -1163,10 +1174,9 @@ async def approve_from_candidate(body: ApproveFromCandidateRequest) -> dict[str,
     if not src_path.exists():
         raise HTTPException(status_code=404, detail="후보 파일이 디스크에 없습니다.")
 
-    safe_project = _safe_segment(project)
     safe_key = _safe_segment(asset_key)
     safe_job = _safe_segment(str(candidate.get("job_id") or "nojob"))
-    dest_dir = DATA_DIR / "candidates" / safe_project
+    dest_dir = _approved_dir(project)
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / (
         f"{safe_key}__primary__{safe_job}__cand{int(body.candidate_id)}.png"
@@ -1224,8 +1234,22 @@ async def approve_from_candidate(body: ApproveFromCandidateRequest) -> dict[str,
         if not row:
             raise HTTPException(status_code=500, detail="에셋 등록에 실패했습니다.")
         asset_id = row["id"]
+        # upsert_scanned_asset은 generation_* 필드를 비워둔다. 첫 승인일 때도
+        # candidate가 들고 있던 seed/model/prompt/metadata를 보존해서
+        # /api/assets/{id}/regenerate 가 디폴트로 폴백하지 않게 한다.
+        await db.set_asset_provenance(
+            asset_id,
+            generation_seed=candidate.get("generation_seed"),
+            generation_model=candidate.get("generation_model"),
+            generation_prompt=candidate.get("generation_prompt"),
+            metadata_json=metadata_out,
+        )
     if body.set_status != "pending":
         await db.update_asset_status(asset_id=asset_id, status=body.set_status)
+
+    # batch 완료 추적: 이 batch에서 한 장 골랐다는 표시. inline 키 편집으로
+    # asset_key가 달라져도 candidate.batch_id는 그대로라 원본 batch가 done.
+    await db.mark_candidate_picked(int(body.candidate_id))
 
     await event_broker.publish(
         {
@@ -1411,10 +1435,10 @@ async def select_asset_candidate(asset_id: str, body: SelectCandidateRequest) ->
 
     # 이전 메인 이미지를 덮어쓰지 않도록 새 unique 경로에 복사한다.
     # 이렇게 하면 asset_history에 기록된 기존 image_path가 디스크에 그대로 보존된다.
-    safe_project = _safe_segment(asset["project"])
+    # candidates/ 트리는 GC가 정리하므로 approved/ 트리에 둔다.
     safe_key = _safe_segment(asset["asset_key"])
     safe_job = _safe_segment(body.job_id)
-    dest_dir = DATA_DIR / "candidates" / safe_project
+    dest_dir = _approved_dir(asset["project"])
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / f"{safe_key}__primary__{safe_job}__slot{body.slot_index}.png"
     shutil.copy2(safe_src, dest)
@@ -1455,6 +1479,7 @@ async def select_asset_candidate(asset_id: str, body: SelectCandidateRequest) ->
     )
     if not ok:
         raise HTTPException(status_code=500, detail="에셋 갱신에 실패했습니다.")
+    await db.mark_candidate_picked(int(pick["id"]))
     await event_broker.publish(
         {
             "type": "asset_candidate_selected",

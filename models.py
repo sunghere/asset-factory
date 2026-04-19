@@ -190,6 +190,7 @@ class Database:
                     metadata_json TEXT,
                     batch_id TEXT,
                     is_rejected INTEGER NOT NULL DEFAULT 0,
+                    picked_at TEXT,
                     created_at TEXT NOT NULL,
                     UNIQUE(project, asset_key, slot_index, job_id)
                 )
@@ -203,6 +204,10 @@ class Database:
             if "is_rejected" not in cand_cols:
                 await conn.execute(
                     "ALTER TABLE asset_candidates ADD COLUMN is_rejected INTEGER NOT NULL DEFAULT 0"
+                )
+            if "picked_at" not in cand_cols:
+                await conn.execute(
+                    "ALTER TABLE asset_candidates ADD COLUMN picked_at TEXT"
                 )
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_candidates_batch ON asset_candidates(batch_id)"
@@ -1001,6 +1006,36 @@ class Database:
             await conn.commit()
             return cursor.rowcount > 0
 
+    async def mark_candidate_picked(self, candidate_id: int) -> bool:
+        """이 후보가 메인 asset으로 승격됐다고 표시한다.
+
+        ``list_today_batches`` 의 ``approved`` 판정은 "이 batch에서 한 장이라도
+        picked되었나"로 결정된다 (단순히 ``(project, asset_key)`` 가 존재하는지
+        보던 이전 휴리스틱은, 같은 키 재생성/inline 키 편집 시 잘못 판정함).
+        """
+        now = utc_now()
+        async with aiosqlite.connect(self.db_path) as conn:
+            cursor = await conn.execute(
+                "UPDATE asset_candidates SET picked_at=? WHERE id=?",
+                (now, candidate_id),
+            )
+            await conn.commit()
+            return cursor.rowcount > 0
+
+    async def batch_has_picked_candidate(self, batch_id: str) -> bool:
+        """``batch_id`` 의 후보 중 한 장이라도 ``picked_at IS NOT NULL`` 이면 True."""
+        async with aiosqlite.connect(self.db_path) as conn:
+            cur = await conn.execute(
+                """
+                SELECT 1 FROM asset_candidates
+                WHERE batch_id=? AND picked_at IS NOT NULL
+                LIMIT 1
+                """,
+                (batch_id,),
+            )
+            row = await cur.fetchone()
+            return row is not None
+
     async def count_pending_candidates(self, batch_id: str) -> dict[str, int]:
         """batch에 남아 있는 처리 후보 카운트.
 
@@ -1037,15 +1072,15 @@ class Database:
     ) -> list[dict[str, Any]]:
         """``list_recent_batches`` 의 thin wrapper — 오늘 큐 헤더 전용.
 
-        approved 여부도 함께 채워서 반환한다 (메인 asset 존재 여부로 추정)."""
+        approved 여부는 "이 batch에서 한 장이라도 picked되었나"로 판정한다.
+        같은 ``(project, asset_key)`` 가 다른 경로(이전 batch, 수동 import)로
+        이미 존재하더라도, 새 batch는 사용자가 한 장 골라야 approved가 된다.
+        """
         rows = await self.list_recent_batches(since=since, limit=limit)
         for row in rows:
-            project = row.get("project")
-            asset_key = row.get("asset_key")
-            row["approved"] = bool(
-                project
-                and asset_key
-                and (await self.get_asset_by_key(project, asset_key))
+            batch_id = row.get("batch_id")
+            row["approved"] = (
+                bool(batch_id) and await self.batch_has_picked_candidate(batch_id)
             )
             counts = await self.count_pending_candidates(row["batch_id"])
             row["remaining"] = counts["remaining"]
@@ -1234,6 +1269,46 @@ class Database:
             )
             row = await cursor.fetchone()
             return int(row[0] if row else 0)
+
+    async def set_asset_provenance(
+        self,
+        asset_id: str,
+        *,
+        generation_seed: int | None,
+        generation_model: str | None,
+        generation_prompt: str | None,
+        metadata_json: str | None,
+    ) -> bool:
+        """첫 승인 시 ``upsert_scanned_asset`` 이 비워둔 generation_* 필드를 채운다.
+
+        ``replace_asset_primary_image`` 와 달리 history 행을 생성하지 않는다
+        (이전 primary가 없는 신규 asset 이라 history에 남길 게 없음).
+        ``POST /api/assets/{id}/regenerate`` 같은 후속 기능이 이 정보를 그대로
+        쓰기 위해 필요.
+        """
+        now = utc_now()
+        async with aiosqlite.connect(self.db_path) as conn:
+            cursor = await conn.execute(
+                """
+                UPDATE assets SET
+                    generation_seed=?,
+                    generation_model=?,
+                    generation_prompt=?,
+                    metadata_json=?,
+                    updated_at=?
+                WHERE id=?
+                """,
+                (
+                    generation_seed,
+                    generation_model,
+                    generation_prompt,
+                    metadata_json,
+                    now,
+                    asset_id,
+                ),
+            )
+            await conn.commit()
+            return cursor.rowcount > 0
 
     async def replace_asset_primary_image(
         self,

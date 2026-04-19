@@ -317,6 +317,101 @@ def test_inline_edit_asset_key_creates_new_asset(isolated) -> None:
     asyncio.run(check())
 
 
+def test_approved_image_lives_outside_candidate_gc_tree(isolated) -> None:
+    """승격된 primary 이미지는 ``data/candidates/`` 가 아닌 ``data/approved/`` 에 들어가야 한다.
+
+    회귀 방지: codex P1 — ``/api/assets/approve-from-candidate`` 가 dest를
+    ``DATA_DIR/candidates/...`` 에 두던 시절에는 ``run_gc_candidates`` 가
+    age/size 정책으로 primary 파일을 삭제해서 ``image_path`` 가 dangling이 됐다.
+    """
+    db, data = isolated
+    ids = asyncio.run(_seed_candidates(db, data, "btc_dest_loc"))
+    with TestClient(server.app) as client:
+        r = client.post(
+            "/api/assets/approve-from-candidate",
+            json={"candidate_id": ids[0], "asset_key": "key", "project": "proj"},
+        )
+    assert r.status_code == 200, r.text
+    asset_id = r.json()["asset_id"]
+
+    async def get_primary() -> str:
+        a = await db.get_asset(asset_id)
+        assert a is not None
+        return a["image_path"]
+    primary = Path(asyncio.run(get_primary()))
+    candidates_root = (data / "candidates").resolve()
+    approved_root = (data / "approved").resolve()
+    # primary는 candidates/ 트리 밖 + approved/ 트리 안에 있어야 한다
+    assert approved_root in primary.resolve().parents, primary
+    assert candidates_root not in primary.resolve().parents, primary
+
+    # GC를 공격적으로 돌려도 (max_age=0초 = 모두 노쇠) primary는 살아남아야 한다.
+    # GC가 보는 DB는 별도 핸들이라 같은 SQLite 파일을 가리키게 옮겨준다.
+    target_db = data / "asset-factory.db"
+    target_db.write_bytes(Path(db.db_path).read_bytes())
+    run_gc_candidates(data, max_age_seconds=0, max_total_bytes=0)
+    assert primary.exists(), "approved primary 파일이 GC에 잡혔다 (회귀)"
+
+
+def test_first_time_approval_preserves_generation_provenance(isolated) -> None:
+    """신규 asset 첫 승인이어도 candidate가 들고 있던 seed/model/prompt/metadata 가
+    asset 행에 남아 있어야 한다 (``/api/assets/{id}/regenerate`` 가 디폴트로
+    폴백하지 않게).
+
+    회귀 방지: codex P2 — 첫 승인 경로가 ``upsert_scanned_asset`` 만 호출하고
+    generation_* 필드를 비워두던 버그.
+    """
+    db, data = isolated
+    ids = asyncio.run(_seed_candidates(db, data, "btc_provenance"))
+    with TestClient(server.app) as client:
+        r = client.post(
+            "/api/assets/approve-from-candidate",
+            json={"candidate_id": ids[0], "asset_key": "fresh", "project": "proj"},
+        )
+    assert r.status_code == 200, r.text
+    asset_id = r.json()["asset_id"]
+
+    async def check() -> None:
+        cand = await db.get_candidate_by_id(ids[0])
+        asset = await db.get_asset(asset_id)
+        assert asset is not None and cand is not None
+        assert asset["generation_seed"] == cand["generation_seed"]
+        assert asset["generation_model"] == cand["generation_model"]
+        assert asset["generation_prompt"] == cand["generation_prompt"]
+        assert asset["metadata_json"] == cand["metadata_json"]
+
+    asyncio.run(check())
+
+
+def test_approve_marks_candidate_picked_at(isolated) -> None:
+    """approve-from-candidate 가 candidate 행의 picked_at 을 채워야 한다.
+
+    회귀 방지: codex P1 — batch 완료 추적이 picked_at 기반이 아니라
+    ``(project, asset_key)`` 휴리스틱이던 버그.
+    """
+    db, data = isolated
+    ids = asyncio.run(_seed_candidates(db, data, "btc_picked"))
+    # 승인 전: picked_at 비어있음
+    async def before() -> None:
+        c = await db.get_candidate_by_id(ids[1])
+        assert c is not None and c["picked_at"] is None
+    asyncio.run(before())
+
+    with TestClient(server.app) as client:
+        r = client.post(
+            "/api/assets/approve-from-candidate",
+            json={"candidate_id": ids[1], "asset_key": "k2", "project": "proj"},
+        )
+    assert r.status_code == 200
+
+    async def after() -> None:
+        c = await db.get_candidate_by_id(ids[1])
+        assert c is not None and c["picked_at"] is not None
+        # batch 단위 헬퍼도 True
+        assert await db.batch_has_picked_candidate("btc_picked")
+    asyncio.run(after())
+
+
 def test_gc_prioritizes_rejected_candidates(isolated) -> None:
     """reject된 후보 파일은 mtime이 새것이라도 즉시 GC된다."""
     db, data = isolated
