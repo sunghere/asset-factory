@@ -1210,29 +1210,35 @@
 
     /* ----------------- Empty / Error renderers ----------------- */
 
-    const SAMPLE_CURL = `curl -X POST http://localhost:8000/api/batches \\
+    function buildSampleCurl() {
+      const origin = (typeof window !== "undefined" && window.location && window.location.origin)
+        ? window.location.origin
+        : "http://localhost:8000";
+      return `curl -X POST ${origin}/api/batches \\
   -H 'Content-Type: application/json' \\
   -H 'x-api-key: YOUR_KEY' \\
   -d '{"project":"my-game","asset_key":"hero_idle",
        "prompts":["pixel art hero idle"],"models":["sd_xl"],
        "loras":[[{"name":"pixel_art","weight":0.8}]],
        "seeds_per_combo":20,"common":{"steps":20,"max_colors":32}}'`;
+    }
 
     function renderEmptyQueue() {
       const empty = el("cp-empty");
       empty.hidden = false;
       el("cp-grid").hidden = true;
+      const sampleCurl = buildSampleCurl();
       empty.innerHTML = `
         <h3>오늘 처리할 batch가 없습니다</h3>
         <div>에이전트가 밤새 ${"`"}/api/batches${"`"} 로 요청을 enqueue하면 아침에 여기 나타납니다.</div>
-        <pre id="empty-curl">${escapeHtml(SAMPLE_CURL)}</pre>
+        <pre id="empty-curl">${escapeHtml(sampleCurl)}</pre>
         <div class="cp-empty-actions">
           <button id="empty-copy" type="button">curl 복사</button>
           <button id="empty-retry" type="button">새로고침</button>
         </div>
       `;
       empty.querySelector("#empty-copy").addEventListener("click", () => {
-        navigator.clipboard.writeText(SAMPLE_CURL).then(
+        navigator.clipboard.writeText(sampleCurl).then(
           () => showToast("success", "clipboard 복사됨"),
           () => showToast("error", "clipboard 접근 불가"),
         );
