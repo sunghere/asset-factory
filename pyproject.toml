@@ -1,0 +1,27 @@
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+extend-exclude = [
+    ".venv",
+    "data",
+    "static",
+    ".pytest_cache",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle
+    "F",   # pyflakes
+    "B",   # flake8-bugbear
+]
+ignore = [
+    "E501",  # line length handled by formatter (110)
+    "B008",  # FastAPI Depends() in default args is intentional
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B", "F401"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
