@@ -1,0 +1,35 @@
+# Asset Factory — SD 카탈로그 메타데이터
+#
+# 이 파일은 Asset Factory가 SD WebUI에서 받아온 모델/LoRA 목록에 사람이 큐레이션한
+# 태그/노트/기본값을 덧붙이는 데 사용된다. /api/sd/catalog/* 엔드포인트가 다음을 한다:
+#   1) A1111의 /sdapi/v1/sd-models, /sdapi/v1/loras 호출
+#   2) 각 항목의 이름(model_name 또는 lora 이름)을 이 파일의 키와 매칭
+#   3) 매칭되면 tags/notes/weight_default/weight_range를 덧붙여 반환
+#   4) 매칭 안 되면 항목은 그대로 반환 (메타데이터 없음)
+#
+# 새 LoRA/모델이 SD에 추가되면 여기 한 줄을 추가하면 된다.
+# 키 매칭은 대소문자 무시, 확장자(.safetensors 등) 자동 제거 후 비교한다.
+
+models:
+  # 예시: 도트/픽셀아트 특화 SDXL 체크포인트
+  pixelart_xl_v1.5:
+    tags: [pixel_art, character, sdxl]
+    notes: "도트 캐릭터 idle/walk에 강함. 배경엔 약함. 권장 size 1024x1024."
+
+  deliberate_v3:
+    tags: [general, character, sd1.5]
+    notes: "SD1.5 기반 범용. 캐릭터/풍경 모두 무난. 권장 size 512x512."
+
+loras:
+  # 예시: 군복/캐릭터 의상 LoRA
+  marine_uniform_v2:
+    weight_default: 0.7
+    weight_range: [0.4, 1.0]
+    tags: [character, military, uniform]
+    notes: "weight 0.6 이하로 가면 군복 디테일 사라짐. SDXL 호환."
+
+  sad_face_v1:
+    weight_default: 0.5
+    weight_range: [0.3, 0.8]
+    tags: [face, expression]
+    notes: "표정 LoRA. 다른 캐릭터 LoRA와 stack 가능."

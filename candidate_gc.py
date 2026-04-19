@@ -1,10 +1,32 @@
-"""후보 이미지 디렉토리 GC (보관 기간 / 총 용량 상한)."""
+"""후보 이미지 디렉토리 GC (rejected 우선 → 보관 기간 → 총 용량 상한)."""
 
 from __future__ import annotations
 
 import os
+import sqlite3
 import time
 from pathlib import Path
+
+
+def _load_rejected_paths(data_root: Path) -> set[str]:
+    """``asset_candidates.is_rejected=1`` 인 후보의 image_path를 모은다.
+
+    DB가 없거나 컬럼이 누락된 환경에서는 빈 set을 반환한다 (GC는 계속 동작).
+    """
+    db_path = data_root / "asset-factory.db"
+    if not db_path.exists():
+        return set()
+    try:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            cursor = conn.execute(
+                "SELECT image_path FROM asset_candidates WHERE is_rejected=1"
+            )
+            return {str(row[0]) for row in cursor.fetchall() if row[0]}
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return set()
 
 
 def run_gc_candidates(
@@ -15,6 +37,11 @@ def run_gc_candidates(
 ) -> dict[str, int | float]:
     """
     data/candidates/ 아래 파일을 정리한다.
+
+    삭제 우선순위:
+    1) ``asset_candidates.is_rejected=1`` 로 마킹된 후보 (cherry-pick에서 사람이 거른 것)
+    2) ``CANDIDATE_GC_MAX_AGE_DAYS`` 보다 오래된 파일
+    3) 총 용량이 ``CANDIDATE_GC_MAX_BYTES_GB`` 초과 시 mtime이 오래된 것부터
 
     환경변수:
     - CANDIDATE_GC_MAX_AGE_DAYS (기본 7)
@@ -31,9 +58,31 @@ def run_gc_candidates(
     if not candidates_root.is_dir():
         return {"deleted_files": 0, "freed_bytes": 0, "scanned_files": 0}
 
+    rejected_paths = _load_rejected_paths(data_root)
     now = time.time()
-    files: list[tuple[Path, float, int]] = []
 
+    deleted_files = 0
+    freed_bytes = 0
+
+    # 1) reject된 후보 우선 삭제 (mtime/용량 무시)
+    for raw in rejected_paths:
+        path = Path(raw)
+        if not path.is_file():
+            continue
+        try:
+            resolved = path.resolve()
+            resolved.relative_to(candidates_root.resolve())
+        except (OSError, ValueError):
+            continue
+        try:
+            size = path.stat().st_size
+            path.unlink()
+            deleted_files += 1
+            freed_bytes += size
+        except OSError:
+            pass
+
+    files: list[tuple[Path, float, int]] = []
     for path in candidates_root.rglob("*"):
         if not path.is_file():
             continue
@@ -43,10 +92,7 @@ def run_gc_candidates(
             continue
         files.append((path, st.st_mtime, st.st_size))
 
-    deleted_files = 0
-    freed_bytes = 0
-
-    # 1) 오래된 파일 삭제
+    # 2) 오래된 파일 삭제
     if max_age_seconds > 0:
         for path, mtime, size in files:
             if now - mtime > max_age_seconds:
@@ -57,7 +103,7 @@ def run_gc_candidates(
                 except OSError:
                     pass
 
-    # 2) 남은 파일이 용량 상한 초과 시 오래된 것부터 삭제
+    # 3) 남은 파일이 용량 상한 초과 시 오래된 것부터 삭제
     if max_total_bytes > 0:
         remaining: list[tuple[Path, float, int]] = []
         for path in candidates_root.rglob("*"):

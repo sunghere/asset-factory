@@ -68,6 +68,24 @@ class SDClient:
             "models": [model for model in models if model][:10],
         }
 
+    async def list_models(self) -> list[dict[str, Any]]:
+        """A1111 /sdapi/v1/sd-models 원본 응답."""
+        response = await self._request_json("GET", "/sdapi/v1/sd-models")
+        return [item for item in response if isinstance(item, dict)]
+
+    async def list_loras(self) -> list[dict[str, Any]]:
+        """A1111 /sdapi/v1/loras 원본 응답.
+
+        WebUI 빌드에 따라 엔드포인트가 없으면 빈 리스트를 반환한다.
+        """
+        try:
+            response = await self._request_json("GET", "/sdapi/v1/loras")
+        except SDError as exc:
+            if exc.http_status == 404:
+                return []
+            raise
+        return [item for item in response if isinstance(item, dict)]
+
     async def txt2img(
         self,
         prompt: str,
@@ -78,6 +96,7 @@ class SDClient:
         steps: int = 20,
         cfg_scale: float = 7.0,
         sampler_name: str = "DPM++ 2M",
+        seed: int | None = None,
     ) -> GenerationResult:
         """텍스트 프롬프트로 이미지를 생성한다."""
         payload: dict[str, Any] = {
@@ -91,6 +110,8 @@ class SDClient:
             "n_iter": 1,
             "batch_size": 1,
         }
+        if seed is not None:
+            payload["seed"] = int(seed)
         if model_name:
             payload["override_settings"] = {"sd_model_checkpoint": model_name}
 

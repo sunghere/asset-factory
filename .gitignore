@@ -1,6 +1,10 @@
 .venv/
 data/*.db
+data/*.pid
+data/*.log
+data/candidates/
 __pycache__/
 *.pyc
 .env
 .DS_Store
+.gstack/
