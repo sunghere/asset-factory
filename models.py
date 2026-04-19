@@ -113,6 +113,7 @@ class Database:
                     max_colors INTEGER NOT NULL DEFAULT 32,
                     candidate_slot INTEGER,
                     candidates_total INTEGER,
+                    next_attempt_at TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY(job_id) REFERENCES jobs(id)
@@ -132,6 +133,8 @@ class Database:
                 await conn.execute("ALTER TABLE generation_tasks ADD COLUMN candidate_slot INTEGER")
             if "candidates_total" not in col_names:
                 await conn.execute("ALTER TABLE generation_tasks ADD COLUMN candidates_total INTEGER")
+            if "next_attempt_at" not in col_names:
+                await conn.execute("ALTER TABLE generation_tasks ADD COLUMN next_attempt_at TEXT")
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS asset_history (
@@ -251,7 +254,11 @@ class Database:
             await conn.commit()
 
     async def claim_next_task(self) -> dict[str, Any] | None:
-        """다음 queued 태스크를 processing으로 점유한다."""
+        """다음 queued 태스크를 processing으로 점유한다.
+
+        ``next_attempt_at``이 미래인 태스크는 백오프 대기 중이므로 건너뛴다.
+        """
+        now = utc_now()
         async with aiosqlite.connect(self.db_path) as conn:
             await conn.execute("BEGIN IMMEDIATE")
             conn.row_factory = aiosqlite.Row
@@ -259,9 +266,11 @@ class Database:
                 """
                 SELECT * FROM generation_tasks
                 WHERE status='queued'
+                  AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
                 ORDER BY id ASC
                 LIMIT 1
-                """
+                """,
+                (now,),
             )
             row = await cursor.fetchone()
             if row is None:
@@ -427,10 +436,12 @@ class Database:
         error_message: str,
         *,
         force_fail: bool = False,
+        next_attempt_at: str | None = None,
     ) -> None:
         """실패 태스크를 재시도하거나 최종 실패 처리.
 
-        ``force_fail=True``이면 남은 retry가 있어도 즉시 failed로 처리한다."""
+        ``force_fail=True``이면 남은 retry가 있어도 즉시 failed로 처리한다.
+        ``next_attempt_at``이 주어지면 해당 시각 전까지는 worker가 점유하지 않는다."""
         now = utc_now()
         retries = int(task["retries"])
         max_retries = int(task["max_retries"])
@@ -439,10 +450,10 @@ class Database:
                 await conn.execute(
                     """
                     UPDATE generation_tasks
-                    SET status='queued', retries=?, last_error=?, updated_at=?
+                    SET status='queued', retries=?, last_error=?, updated_at=?, next_attempt_at=?
                     WHERE id=?
                     """,
-                    (retries + 1, error_message, now, task["id"]),
+                    (retries + 1, error_message, now, next_attempt_at, task["id"]),
                 )
             else:
                 await conn.execute(
@@ -569,6 +580,41 @@ class Database:
             )
             row = await cursor.fetchone()
             return row is not None
+
+    async def soonest_due_seconds(self, *, default: float = 1.0) -> float:
+        """다음 실행 가능한 queued 태스크까지 남은 초.
+
+        - 즉시 실행 가능한 태스크가 있으면 0.0
+        - queued 태스크가 없으면 ``default``
+        - 모두 미래에 due이면 (가장 이른 due - now) 초를 양수로 반환
+        """
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.execute(
+                """
+                SELECT MIN(
+                    CASE WHEN next_attempt_at IS NULL THEN '0000-00-00'
+                         ELSE next_attempt_at END
+                ) AS soonest
+                FROM generation_tasks
+                WHERE status='queued'
+                """
+            )
+            row = await cursor.fetchone()
+            if row is None or row["soonest"] is None:
+                return default
+            soonest = str(row["soonest"])
+            if soonest == "0000-00-00":
+                return 0.0
+            try:
+                due_at = datetime.fromisoformat(soonest)
+            except ValueError:
+                return default
+            now = datetime.now(timezone.utc)
+            if due_at.tzinfo is None:
+                due_at = due_at.replace(tzinfo=timezone.utc)
+            delta = (due_at - now).total_seconds()
+            return max(0.0, delta)
 
     async def recover_orphan_tasks(self) -> int:
         """이전 실행 중 'processing' 상태로 멈춘 태스크를 다시 큐로 되돌린다."""

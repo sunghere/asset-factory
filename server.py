@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import random
 import shutil
 import os
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -71,7 +73,15 @@ def _is_path_within_allowed(target: Path) -> bool:
 
 
 def _ensure_path_allowed(target: Path) -> Path:
-    """경로 허용 여부를 검사하고, 통과 시 resolve된 경로를 반환한다."""
+    """경로 허용 여부를 검사하고, 통과 시 resolve된 경로를 반환한다.
+
+    이 함수는 사용자 입력에서 유래한 경로(``request.root_path``, DB의
+    ``image_path``, 쿼리 파라미터 등)에 대한 *경로 정화 함수*(sanitizer)
+    역할을 한다. 모든 파일 시스템 접근은 반드시 이 함수의 *반환 값*
+    (``resolved``)을 사용해야 하며, 정화되지 않은 원본 경로를 직접 사용하면
+    path traversal 위험이 있다. CodeQL의 ``py/path-injection`` 알람을 이
+    함수 이후의 데이터 흐름에 대해서는 false positive로 간주한다.
+    """
     resolved = target.expanduser().resolve()
     if not _is_path_within_allowed(resolved):
         raise HTTPException(
@@ -292,6 +302,20 @@ def _ensure_disk_space_for_enqueue() -> None:
 NON_RETRYABLE_SD_CODES: frozenset[str] = frozenset({"sd_client_error", "oom"})
 
 
+def _compute_next_attempt_at(retries: int) -> str:
+    """재시도까지 대기할 시각(UTC ISO8601)을 계산한다.
+
+    지수 백오프(2^n)에 25% 지터를 더하고 ``TASK_BACKOFF_MAX_SEC``으로 캡한다.
+    ``retries``는 현재까지의 시도 횟수(0-indexed before increment)이다.
+    """
+    base = float(os.getenv("TASK_BACKOFF_BASE_SEC", "2"))
+    cap = float(os.getenv("TASK_BACKOFF_MAX_SEC", "60"))
+    delay = min(cap, base * (2 ** max(0, retries)))
+    jitter = random.uniform(0.0, delay * 0.25)
+    due = datetime.now(timezone.utc) + timedelta(seconds=delay + jitter)
+    return due.isoformat()
+
+
 def _should_retry_sd_failure(exc: BaseException) -> bool:
     """SDError 코드 기반 재시도 여부 판정. 비-SDError는 기본적으로 재시도한다."""
     if isinstance(exc, SDError):
@@ -315,11 +339,16 @@ async def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
 
 
 async def generation_worker() -> None:
-    """DB 큐를 polling 하며 태스크를 처리한다."""
+    """DB 큐를 polling 하며 태스크를 처리한다.
+
+    queued 태스크가 모두 백오프 대기 중이면 가장 이른 due 시각까지(최대 2초)
+    잠들었다가 다시 시도하여 불필요한 폴링을 줄인다.
+    """
     while True:
         task = await db.claim_next_task()
         if task is None:
-            await asyncio.sleep(1.0)
+            wait = await db.soonest_due_seconds(default=1.0)
+            await asyncio.sleep(min(2.0, max(0.05, wait)))
             continue
         await handle_task(task)
 
@@ -469,7 +498,15 @@ async def handle_task(task: dict[str, Any]) -> None:
     except Exception as exc:  # noqa: BLE001
         force_fail = not _should_retry_sd_failure(exc)
         message = _format_task_error(exc)
-        await db.retry_or_fail_task(task, message, force_fail=force_fail)
+        next_attempt_at: str | None = None
+        if not force_fail:
+            next_attempt_at = _compute_next_attempt_at(int(task.get("retries", 0)))
+        await db.retry_or_fail_task(
+            task,
+            message,
+            force_fail=force_fail,
+            next_attempt_at=next_attempt_at,
+        )
         await event_broker.publish(
             {
                 "type": "task_error",
@@ -478,8 +515,28 @@ async def handle_task(task: dict[str, Any]) -> None:
                 "error": message,
                 "code": exc.code if isinstance(exc, SDError) else None,
                 "retry": not force_fail,
+                "next_attempt_at": next_attempt_at,
             }
         )
+
+
+# 운영/디버깅용 GC 상태 스냅샷. ``/api/system/gc/status``로 노출된다.
+_gc_state: dict[str, Any] = {
+    "last_run_at": None,
+    "last_result": None,
+    "last_error": None,
+    "run_count": 0,
+}
+
+
+def _record_gc_run(
+    result: dict[str, int | float] | None, error: str | None
+) -> None:
+    """GC 실행 결과/에러를 모듈 상태에 기록한다."""
+    _gc_state["last_run_at"] = datetime.now(timezone.utc).isoformat()
+    _gc_state["last_result"] = result
+    _gc_state["last_error"] = error
+    _gc_state["run_count"] = int(_gc_state.get("run_count", 0)) + 1
 
 
 async def _gc_loop() -> None:
@@ -488,9 +545,10 @@ async def _gc_loop() -> None:
     await asyncio.sleep(5)
     while True:
         try:
-            run_gc_candidates(DATA_DIR)
-        except Exception:  # noqa: BLE001 — GC 실패는 서버를 죽이지 않음
-            pass
+            result = run_gc_candidates(DATA_DIR)
+            _record_gc_run(result, None)
+        except Exception as exc:  # noqa: BLE001 — GC 실패는 서버를 죽이지 않음
+            _record_gc_run(None, f"{exc.__class__.__name__}: {exc}")
         await asyncio.sleep(max(60, interval))
 
 
@@ -544,6 +602,32 @@ async def health_sd() -> dict[str, Any]:
         return await sd_client.health_check()
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"SD 서버 연결 실패: {exc}") from exc
+
+
+@app.get("/api/system/gc/status")
+async def gc_status() -> dict[str, Any]:
+    """후보 이미지 GC의 마지막 실행 메트릭/시각을 노출한다.
+
+    - ``last_run_at``: ISO8601 UTC, GC가 한 번도 돌지 않았으면 ``null``.
+    - ``last_result``: ``run_gc_candidates``가 반환한 dict (deleted_files,
+      freed_bytes, scanned_files) 또는 ``null``.
+    - ``last_error``: 마지막 GC 실행이 예외로 끝났을 때의 메시지 (없으면 ``null``).
+    - ``run_count``: 누적 실행 횟수(성공/실패 모두 포함).
+    """
+    return dict(_gc_state)
+
+
+@app.post("/api/system/gc/run", dependencies=[Depends(require_api_key)])
+async def gc_run() -> dict[str, Any]:
+    """후보 이미지 GC를 즉시 1회 실행하고 결과를 반환한다 (운영 디버깅용)."""
+    try:
+        result = run_gc_candidates(DATA_DIR)
+        _record_gc_run(result, None)
+        return {"status": "ok", "result": result, "state": dict(_gc_state)}
+    except Exception as exc:  # noqa: BLE001
+        message = f"{exc.__class__.__name__}: {exc}"
+        _record_gc_run(None, message)
+        raise HTTPException(status_code=500, detail=message) from exc
 
 
 @app.get("/api/projects")
@@ -1154,14 +1238,35 @@ async def export_manifest(project: str | None = None) -> dict[str, Any]:
     return {"count": len(items), "items": items}
 
 
+async def sse_event_generator(
+    broker: EventBroker, keepalive_seconds: float
+) -> AsyncIterator[str]:
+    """SSE 본문 프레임을 yield 하는 async generator.
+
+    이벤트가 ``keepalive_seconds`` 동안 없으면 ``: keep-alive`` 코멘트 프레임을
+    보내 프록시/브라우저의 idle timeout을 방지한다. (모듈 외부에서 단위 테스트
+    가능하도록 endpoint 핸들러와 분리하여 정의.)
+    """
+    async with broker.subscribe() as queue:
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=keepalive_seconds)
+            except asyncio.TimeoutError:
+                # SSE 사양: ":"로 시작하는 줄은 코멘트로 무시되며 연결 유지에 사용된다.
+                yield ": keep-alive\n\n"
+                continue
+            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+
 @app.get("/api/events")
 async def stream_events() -> StreamingResponse:
     """SSE 이벤트 스트림."""
-
-    async def event_generator() -> AsyncIterator[str]:
-        async with event_broker.subscribe() as queue:
-            while True:
-                event = await queue.get()
-                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    keepalive = float(os.getenv("SSE_KEEPALIVE_SEC", "15"))
+    return StreamingResponse(
+        sse_event_generator(event_broker, keepalive),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )

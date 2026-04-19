@@ -1,0 +1,12 @@
+name: "Asset Factory CodeQL Config"
+
+# Default 쿼리 슈트 + security-and-quality 추가 (보안 + 코드 품질).
+queries:
+  - uses: security-and-quality
+
+# 분석에서 제외할 경로. 정적 자산/테스트 코드의 노이즈 알람을 억제한다.
+paths-ignore:
+  - "tests/**"
+  - "static/**"
+  - "data/**"
+  - ".venv/**"
