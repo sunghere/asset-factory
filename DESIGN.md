@@ -229,3 +229,104 @@ def scan_directory(root_path):
 - RPG 앱: characters → warrior/mage/archer, items → sword/potion
 - 힐링 앱: characters → plants, backgrounds → seasons
 - 디렉토리 스캔으로 기존 에셋 자동 인식 → 마이그레이션 비용 0
+
+---
+
+## Visual System (v0.1.5+)
+
+v0.1.5는 cherry-pick UI를 redesign했다. 모든 색/타입/모션은 CSS 변수(`static/style.css` 상단 `:root`)에서
+정의되며, 컴포넌트는 변수만 참조한다 (raw hex 금지).
+
+### Design tokens
+
+| 토큰 | 값 | 용도 |
+| --- | --- | --- |
+| `--bg-base` | `#0f1115` | 페이지 배경 |
+| `--bg-elev-1` | `#171b22` | 패널 / topbar |
+| `--bg-elev-2` | `#1d222b` | 칩 / 토스트 |
+| `--bg-elev-3` | `#232a36` | progress bar trough |
+| `--bg-input` | `#0f131a` | 입력 필드 |
+| `--border-subtle` | `#2a313d` | 일반 경계 |
+| `--border-strong` | `#3a4250` | 입력/버튼 경계 |
+| `--text-primary` | `#f0f3f8` | 본문 |
+| `--text-secondary` | `#b8c1d0` | 메타 (4.5:1+) |
+| `--text-muted` | `#8590a3` | 라벨 (4.5:1+) |
+| `--text-faint` | `#6b7484` | 힌트 |
+| `--accent-pick` | `#8fb8ff` | 활성 / 비교담기 / 링크 |
+| `--accent-pick-strong` | `#4c8dff` | 활성 outline |
+| `--accent-approve` | `#f5d76e` | gold pulse (approve) |
+| `--accent-approve-strong` | `#f0b441` | 승인 강조 |
+| `--accent-reject` | `#ff7a7a` | reject |
+| `--accent-reject-bg` | `#3a1f1f` | reject 버튼 배경 |
+| `--accent-success` | `#6ee7a8` | 성공 toast |
+
+### Type scale (Pretendard)
+
+`Pretendard Variable` (CDN: `cdn.jsdelivr.net/gh/orioncactus/pretendard`).
+fallback chain: `-apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif`.
+
+| 토큰 | px | 용도 |
+| --- | --- | --- |
+| `--type-12` | 12 | 칩, 메타, badge |
+| `--type-13` | 13 | 패널 본문 |
+| `--type-14` | 14 | 입력/버튼 |
+| `--type-16` | 16 | 섹션 제목 |
+| `--type-20` | 20 | spacer / 모달 헤더 |
+| `--type-28` | 28 | spacer 카운트 |
+
+### Spacing / Radius / Motion
+
+- spacing: `--space-1..6` = 4 / 8 / 12 / 16 / 24 / 32
+- radius: `--radius-sm` 6, `--radius-md` 10, `--radius-lg` 14, `--radius-pill` 999
+- motion: `--motion-fast` 120ms, `--motion-mid` 200ms, `--motion-slow` 320ms,
+  ease `cubic-bezier(0.2, 0.8, 0.2, 1)`
+- focus ring: `0 0 0 2px rgba(143,184,255,0.55)`
+
+### Cherry-pick morning ritual storyboard
+
+1. **진입 (cold start)** — `/cherry-pick` 열면 `GET /api/cherry-pick/queue` 로 오늘 KST 00:00
+   이후 미픽 batch 목록을 받아 헤더 pill에 `오늘 큐: N batches (M장 남음)` 표시. 첫 pending batch
+   를 자동 선택.
+2. **그리드 (24-48 한눈)** — primary anchor. ≥40장이면 8장씩 60ms stagger fade-in (progressive
+   reveal), ≤24장이면 4열로 즉시 표시.
+3. **reject sweep** — `x` 키 또는 long-press → 200ms shake + swipe-out. 5초 `실행취소` toast가
+   bottom-right에 뜸. DB는 즉시 `is_rejected=1` (취소 시 0으로 토글).
+4. **approve** — `enter` 키 또는 desktop dblclick / mobile tap → gold-pulse 200ms + swipe-out.
+   meta 패널의 `asset_key` `<input>` 값이 `proposedKey`로 사용됨 (prompt() 없음). 다음 후보로
+   active 자동 이동. 5초 `실행취소` toast → `POST /api/assets/{id}/undo-approve` (history 복원
+   또는 신규 asset 삭제).
+5. **batch 끝 spacer** — 모든 후보가 reject/approve 처리되면 spacer 카드. 15초 카운트다운 후 큐의
+   다음 pending batch로 자동 이동. `esc`로 즉시 종료.
+6. **다음 batch** — spacer가 닫히고 새 batch 후보가 grid에 fade-in. `sessionApproved/Rejected`
+   카운터 리셋.
+7. **morning summary** — 큐가 비거나 `esc` → `오늘 cherry-pick 완료 · N장 승인 · M장 거절`.
+   현재 batch 다시 보기 / 대시보드 이동.
+
+### Mobile gesture map (≤768px)
+
+| gesture | action |
+| --- | --- |
+| tap (thumb) | approve (active 후보) |
+| long-press 400ms (thumb) | reject |
+| swipe-right (thumb) | 비교 set 토글 |
+| 하단 drag handle 탭 | side drawer 펼침/접힘 |
+
+side panel은 sticky bottom drawer로 변경, 버튼 min-height 48px (touch target 44px+).
+
+### A11y minimums
+
+- contrast 4.5:1 이상 — 토큰화 단계에서 `--text-secondary/muted` 모두 `bg-base` 대비 ≥4.5:1.
+- focus-visible: 모든 interactive에 `--focus-ring` 적용.
+- modal: 네이티브 `<dialog>` 사용 (auto focus trap, ESC 닫힘).
+- 그리드: container `role="listbox"` + `aria-activedescendant`, thumb `role="option"` +
+  `aria-selected`.
+- progress: `role="progressbar"` + `aria-valuenow/min/max`.
+- toast: 일반은 `aria-live="polite"`, error stack은 `aria-live="assertive"`.
+- `prefers-reduced-motion: reduce` → 애니메이션 1ms로 단축.
+
+### 5초 시야 hierarchy
+
+1. **그리드** (primary anchor)
+2. **활성 후보 미리보기 + 메타 패널** (secondary)
+3. **상단 진행도 + breadcrumb** (tertiary)
+4. **액션 버튼 / 단축키** (quaternary)

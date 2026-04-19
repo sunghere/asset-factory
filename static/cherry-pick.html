@@ -1,0 +1,1382 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Asset Factory — Cherry Pick</title>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/variable/pretendardvariable.css">
+  <link rel="stylesheet" href="/static/style.css" />
+  <style>
+    body {
+      padding: 0;
+      font-family: var(--font-sans);
+      background: var(--bg-base);
+      color: var(--text-primary);
+    }
+    .cp-shell {
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      height: 100vh;
+    }
+    .cp-topbar {
+      display: flex;
+      gap: var(--space-3);
+      align-items: center;
+      padding: 10px var(--space-4);
+      border-bottom: 1px solid var(--border-subtle);
+      background: var(--bg-elev-1);
+      flex-wrap: wrap;
+    }
+    .cp-topbar h1 { font-size: var(--type-16); margin: 0; font-weight: 600; }
+    .cp-topbar a { color: var(--accent-pick); text-decoration: none; font-size: var(--type-13); }
+    .cp-topbar a:hover { text-decoration: underline; }
+    .cp-queue-pill {
+      display: inline-flex; align-items: baseline; gap: 6px;
+      padding: 4px 10px;
+      background: var(--bg-elev-2);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-pill);
+      font-size: var(--type-13); color: var(--text-primary);
+    }
+    .cp-queue-pill b { color: var(--accent-approve-strong); font-weight: 600; }
+    .cp-queue-pill .cp-queue-sub { color: var(--text-secondary); font-size: var(--type-12); }
+    .cp-topbar select, .cp-topbar input { min-width: 120px; }
+    .cp-status-line { color: var(--text-secondary); font-size: var(--type-12); margin-left: auto; }
+    .cp-progress-row {
+      display: flex; align-items: center; gap: var(--space-3);
+      padding: 6px var(--space-4); border-bottom: 1px solid var(--border-subtle);
+      background: #0e1218; font-size: var(--type-12); color: var(--text-secondary);
+    }
+    .cp-progress-bar {
+      flex: 1; height: 6px; background: var(--bg-elev-3);
+      border-radius: var(--radius-pill); overflow: hidden;
+      display: grid; grid-template-columns: var(--p-approved, 0fr) var(--p-rejected, 0fr) var(--p-remaining, 1fr);
+    }
+    .cp-progress-bar > span { height: 100%; display: block; }
+    .cp-progress-bar .seg-approved { background: var(--accent-success); }
+    .cp-progress-bar .seg-rejected { background: var(--accent-reject); }
+    .cp-progress-bar .seg-remaining { background: transparent; }
+    .cp-breadcrumb {
+      font-size: var(--type-12); color: var(--text-secondary);
+      display: flex; gap: 6px; align-items: center;
+    }
+    .cp-breadcrumb b { color: var(--text-primary); font-weight: 600; }
+    .cp-body {
+      display: grid;
+      grid-template-columns: 1fr 380px;
+      overflow: hidden;
+      min-height: 0;
+    }
+    .cp-grid-wrap {
+      overflow: auto;
+      padding: 10px;
+      position: relative;
+    }
+    .cp-grid {
+      display: grid;
+      grid-template-columns: repeat(var(--cp-cols, 5), minmax(0, 1fr));
+      gap: var(--space-2);
+    }
+    .cp-grid.dense-low { --cp-cols: 4; }
+    .cp-grid.dense-high { --cp-cols: 5; }
+    .cp-thumb {
+      position: relative;
+      border: 2px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      overflow: hidden;
+      background: #0c0f14;
+      cursor: pointer;
+      aspect-ratio: 1 / 1;
+      transition: border-color var(--motion-fast), opacity var(--motion-fast),
+                  transform var(--motion-mid) var(--ease-out);
+      animation: cp-fadein var(--motion-mid) var(--ease-out) both;
+      animation-delay: var(--cp-delay, 0ms);
+    }
+    @keyframes cp-fadein { from { opacity: 0; transform: scale(0.96); } to { opacity: 1; transform: scale(1); } }
+    @keyframes cp-pick-pulse {
+      0% { box-shadow: 0 0 0 0 rgba(245, 215, 110, 0.85); border-color: var(--accent-approve); }
+      100% { box-shadow: 0 0 0 24px rgba(245, 215, 110, 0); border-color: var(--accent-approve); }
+    }
+    @keyframes cp-swipe-out {
+      to { transform: translateX(60%) scale(0.85); opacity: 0; }
+    }
+    @keyframes cp-reject-shake {
+      0%, 100% { transform: translateX(0); }
+      30% { transform: translateX(-30%) rotate(-3deg); }
+      60% { transform: translateX(0) rotate(2deg); }
+    }
+    .cp-thumb img {
+      width: 100%; height: 100%;
+      object-fit: contain;
+      image-rendering: pixelated;
+    }
+    .cp-thumb.active {
+      border-color: var(--accent-pick-strong);
+      box-shadow: 0 0 0 2px rgba(76, 141, 255, 0.4);
+    }
+    .cp-thumb.rejected { opacity: 0.35; filter: grayscale(0.8); }
+    .cp-thumb.compare { border-color: var(--accent-approve-strong); }
+    .cp-thumb.is-approving { animation: cp-pick-pulse var(--motion-mid) var(--ease-out) forwards; }
+    .cp-thumb.is-leaving { animation: cp-swipe-out var(--motion-mid) var(--ease-out) forwards; pointer-events: none; }
+    .cp-thumb.is-rejecting { animation: cp-reject-shake 220ms var(--ease-out), cp-swipe-out var(--motion-mid) 200ms var(--ease-out) forwards; pointer-events: none; }
+    .cp-thumb .cp-badge {
+      position: absolute; top: 4px; left: 4px;
+      background: rgba(0, 0, 0, 0.7);
+      font-size: 10px; padding: 2px 5px; border-radius: var(--radius-sm);
+      color: var(--text-primary);
+    }
+    .cp-thumb .cp-badge.r { background: var(--accent-reject-bg); color: #ffdada; }
+    .cp-thumb .cp-lora {
+      position: absolute; top: 4px; right: 4px;
+      display: flex; gap: 2px;
+    }
+    .cp-thumb .cp-lora span {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 16px; height: 16px;
+      font-size: 10px; font-weight: 700;
+      border-radius: 4px;
+      background: rgba(143, 184, 255, 0.18);
+      color: var(--accent-pick);
+      border: 1px solid rgba(143, 184, 255, 0.4);
+    }
+    .cp-thumb .cp-meta {
+      position: absolute; bottom: 0; left: 0; right: 0;
+      background: rgba(0, 0, 0, 0.65);
+      font-size: 10px; padding: 2px 4px;
+      color: #c8d0dc;
+      display: flex; justify-content: space-between;
+    }
+    .cp-side {
+      border-left: 1px solid var(--border-subtle);
+      background: var(--bg-elev-1);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .cp-preview {
+      background: #0c0f14;
+      border-bottom: 1px solid var(--border-subtle);
+      flex: 0 0 auto;
+      padding: 10px;
+      text-align: center;
+      position: relative;
+    }
+    .cp-preview img {
+      max-width: 100%;
+      max-height: 360px;
+      object-fit: contain;
+      image-rendering: pixelated;
+      background: #0c0f14;
+      transition: transform var(--motion-fast);
+    }
+    .cp-preview.zoom img { image-rendering: pixelated; transform: scale(2); transform-origin: center; }
+    .cp-meta-panel {
+      padding: 10px 12px;
+      overflow: auto;
+      flex: 1 1 auto;
+      font-size: var(--type-13);
+      color: var(--text-secondary);
+    }
+    .cp-meta-panel h3 {
+      font-size: 11px; margin: var(--space-3) 0 var(--space-1); color: var(--text-muted);
+      text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600;
+    }
+    .cp-meta-panel .cp-asset-key-row {
+      display: flex; gap: 6px; align-items: center; margin-bottom: 6px;
+    }
+    .cp-meta-panel .cp-asset-key-row input {
+      flex: 1 1 auto; min-width: 0;
+      font-family: var(--font-mono); font-size: var(--type-12);
+    }
+    .cp-meta-panel pre {
+      font-size: 11px; max-height: 160px; overflow: auto; margin: 0;
+      font-family: var(--font-mono);
+    }
+    .cp-meta-panel code {
+      font-family: var(--font-mono); font-size: var(--type-12);
+      color: var(--text-primary);
+    }
+    .cp-color-bar {
+      display: inline-block; width: 80px; height: 6px;
+      background: var(--bg-elev-3); border-radius: var(--radius-pill);
+      vertical-align: middle; margin-left: 6px; overflow: hidden;
+    }
+    .cp-color-bar > span {
+      display: block; height: 100%;
+      background: linear-gradient(90deg, var(--accent-pick), var(--accent-approve-strong));
+    }
+    .cp-actions {
+      display: flex; gap: 6px; flex-wrap: wrap; padding: 10px 12px;
+      border-top: 1px solid var(--border-subtle);
+    }
+    .cp-actions button { flex: 1 1 auto; min-height: 44px; }
+    .cp-actions .danger { background: var(--accent-reject-bg); }
+    .cp-actions .danger:hover { background: #5a2828; }
+    .cp-actions .primary { background: #1c4a7a; }
+    .cp-actions .primary:hover { background: #225fa0; }
+    .cp-shortcuts {
+      padding: 8px 12px; font-size: 11px; color: var(--text-faint);
+      border-top: 1px solid var(--border-subtle); background: #0e1218;
+    }
+    kbd {
+      display: inline-block; min-width: 18px; padding: 1px 4px;
+      border: 1px solid var(--border-strong); border-radius: 3px;
+      background: #1a2030; color: var(--text-primary);
+      font-family: var(--font-mono);
+      font-size: 10px;
+    }
+    .cp-empty {
+      color: var(--text-secondary); padding: var(--space-5);
+      text-align: center; font-size: var(--type-13);
+      max-width: 480px; margin: 0 auto;
+    }
+    .cp-empty h3 { font-size: var(--type-16); margin-bottom: 8px; color: var(--text-primary); }
+    .cp-empty pre {
+      text-align: left; font-size: 11px;
+      background: var(--bg-input); padding: 10px; border-radius: var(--radius-sm);
+      margin-top: 10px; overflow: auto;
+    }
+    .cp-empty .cp-empty-actions { margin-top: 12px; display: flex; gap: 6px; justify-content: center; }
+
+    /* batch spacer card */
+    .cp-spacer {
+      padding: var(--space-6); text-align: center;
+      max-width: 520px; margin: 60px auto;
+      background: var(--bg-elev-1); border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-lg);
+    }
+    .cp-spacer h2 { font-size: var(--type-20); margin-bottom: 6px; }
+    .cp-spacer .cp-spacer-meta { color: var(--text-secondary); margin-bottom: var(--space-4); font-size: var(--type-13); }
+    .cp-spacer .cp-spacer-count {
+      font-size: var(--type-28); color: var(--accent-approve-strong); font-weight: 600;
+    }
+    .cp-spacer .cp-spacer-actions { display: flex; gap: var(--space-2); justify-content: center; margin-top: var(--space-4); }
+    .cp-spacer .cp-countdown {
+      font-size: var(--type-13); color: var(--text-faint); margin-top: var(--space-3);
+    }
+
+    /* compare dialog */
+    dialog.cp-compare {
+      padding: 0; background: transparent; border: none; max-width: 95vw; max-height: 95vh;
+      color: var(--text-primary);
+    }
+    dialog.cp-compare::backdrop { background: rgba(0, 0, 0, 0.85); }
+    .cp-compare-inner {
+      background: var(--bg-elev-1); border: 1px solid var(--border-strong);
+      border-radius: var(--radius-md); padding: var(--space-4);
+      max-width: 95vw; max-height: 95vh; overflow: auto;
+    }
+    .cp-compare-header {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: var(--space-3);
+    }
+    .cp-compare-header .cp-hint { color: var(--text-secondary); font-size: var(--type-12); }
+    .cp-compare-grid {
+      display: grid;
+      grid-template-columns: repeat(var(--cp-compare-cols, 3), minmax(220px, 1fr));
+      gap: var(--space-3);
+    }
+    .cp-compare-grid.cols-2 { --cp-compare-cols: 2; }
+    .cp-compare-grid.cols-3 { --cp-compare-cols: 3; }
+    .cp-compare-grid.cols-5 { --cp-compare-cols: 5; }
+    .cp-compare-grid figure {
+      margin: 0; background: #0c0f14; border: 1px solid var(--border-strong);
+      border-radius: var(--radius-sm); padding: var(--space-2);
+    }
+    .cp-compare-grid img {
+      width: 100%; max-height: 50vh; object-fit: contain;
+      image-rendering: pixelated;
+    }
+    .cp-compare-grid figcaption {
+      font-size: 11px; color: #c8d0dc; margin-top: var(--space-1);
+      display: grid; gap: 2px; font-family: var(--font-mono);
+    }
+
+    /* shortcut cheat-sheet dialog */
+    dialog.cp-cheat {
+      padding: 0; background: transparent; border: none; color: var(--text-primary);
+    }
+    dialog.cp-cheat::backdrop { background: rgba(0, 0, 0, 0.85); }
+    .cp-cheat-inner {
+      background: var(--bg-elev-1); border: 1px solid var(--border-strong);
+      border-radius: var(--radius-md); padding: var(--space-5);
+      max-width: 480px;
+    }
+    .cp-cheat-inner h2 { font-size: var(--type-20); margin-bottom: var(--space-3); }
+    .cp-cheat-inner table { width: 100%; border-collapse: collapse; font-size: var(--type-13); }
+    .cp-cheat-inner td { padding: 6px 0; border-bottom: 1px solid var(--border-subtle); }
+    .cp-cheat-inner td:first-child { width: 100px; }
+
+    .cp-filter-pill {
+      font-size: 11px; padding: 2px 6px; background: #1a2030;
+      border: 1px solid var(--border-strong); border-radius: var(--radius-pill);
+      color: var(--text-secondary);
+    }
+    .cp-filter-pill.active { background: rgba(143, 184, 255, 0.15); color: var(--accent-pick); }
+
+    /* toast */
+    .cp-toast-stack {
+      position: fixed; bottom: var(--space-4); right: var(--space-4);
+      display: flex; flex-direction: column; gap: var(--space-2);
+      z-index: 80; max-width: 360px; pointer-events: none;
+    }
+    .cp-toast {
+      background: var(--bg-elev-2); border: 1px solid var(--border-strong);
+      border-left: 3px solid var(--accent-pick);
+      color: var(--text-primary);
+      border-radius: var(--radius-sm);
+      padding: 10px 14px;
+      font-size: var(--type-13);
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+      pointer-events: auto;
+      display: flex; gap: var(--space-3); align-items: center;
+      animation: cp-toast-in var(--motion-mid) var(--ease-out);
+    }
+    @keyframes cp-toast-in { from { transform: translateX(20px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+    .cp-toast.success { border-left-color: var(--accent-success); }
+    .cp-toast.error { border-left-color: var(--accent-reject); }
+    .cp-toast.info { border-left-color: var(--accent-pick); }
+    .cp-toast .cp-toast-msg { flex: 1 1 auto; }
+    .cp-toast button {
+      background: transparent; border: 1px solid var(--border-strong);
+      color: var(--text-primary); padding: 4px 10px; border-radius: var(--radius-sm);
+      font-size: var(--type-12); cursor: pointer;
+      min-height: 32px;
+    }
+    .cp-toast button:hover { background: var(--bg-elev-3); }
+
+    /* mobile */
+    @media (max-width: 768px) {
+      .cp-body { grid-template-columns: 1fr; grid-template-rows: 1fr auto; }
+      .cp-side {
+        border-left: none;
+        border-top: 1px solid var(--border-subtle);
+        max-height: 50vh;
+        position: sticky; bottom: 0;
+      }
+      .cp-side.cp-drawer-collapsed {
+        max-height: 120px;
+      }
+      .cp-side.cp-drawer-collapsed .cp-meta-panel,
+      .cp-side.cp-drawer-collapsed .cp-shortcuts {
+        display: none;
+      }
+      .cp-drawer-handle {
+        display: flex; justify-content: center; padding: 6px;
+        cursor: pointer; background: var(--bg-elev-2);
+        border-bottom: 1px solid var(--border-subtle);
+      }
+      .cp-drawer-handle::before {
+        content: ""; width: 36px; height: 4px;
+        background: var(--border-strong); border-radius: var(--radius-pill);
+      }
+      .cp-actions button { min-height: 48px; font-size: var(--type-14); }
+      .cp-grid { --cp-cols: 3; }
+      .cp-grid.dense-low { --cp-cols: 3; }
+      .cp-grid.dense-high { --cp-cols: 3; }
+      .cp-shortcuts { display: none; }
+      .cp-topbar { gap: 8px; padding: 8px 10px; }
+      .cp-topbar .cp-status-line { display: none; }
+    }
+    @media (min-width: 769px) {
+      .cp-drawer-handle { display: none; }
+    }
+
+    /* prefers-reduced-motion */
+    @media (prefers-reduced-motion: reduce) {
+      .cp-thumb, .cp-thumb.is-approving, .cp-thumb.is-leaving, .cp-thumb.is-rejecting,
+      .cp-toast { animation-duration: 1ms !important; transition-duration: 1ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <div class="cp-shell">
+    <header class="cp-topbar" role="banner">
+      <h1>Cherry Pick</h1>
+      <a href="/" aria-label="대시보드로 이동">← 대시보드</a>
+      <span id="cp-queue-pill" class="cp-queue-pill" aria-live="polite">
+        오늘 큐 <b id="cp-queue-count">0</b> batches <span class="cp-queue-sub">(<span id="cp-queue-remaining">0</span>장 남음)</span>
+      </span>
+      <label>batch
+        <select id="batch-select" aria-label="batch 선택" style="min-width: 220px"></select>
+      </label>
+      <button id="reload-batches" type="button">새로고침</button>
+      <label>model
+        <select id="filter-model" aria-label="모델 필터"><option value="">전체</option></select>
+      </label>
+      <label>lora
+        <select id="filter-lora" aria-label="LoRA 필터"><option value="">전체</option></select>
+      </label>
+      <label><input id="filter-hide-rejected" type="checkbox" checked /> rejected 숨김</label>
+      <button id="open-compare" type="button">비교 (c)</button>
+      <button id="open-cheat" type="button" aria-label="단축키 도움말">? 단축키</button>
+      <span class="cp-status-line" id="cp-status">batch 선택 대기</span>
+      <input id="api-key" type="password" placeholder="x-api-key" aria-label="API key" style="width: 130px" />
+    </header>
+    <div class="cp-progress-row" role="region" aria-label="batch 진행률">
+      <div class="cp-breadcrumb" id="cp-breadcrumb">
+        <span>오늘 큐</span> › <b id="cp-bc-batch">batch 미선택</b>
+      </div>
+      <div class="cp-progress-bar" id="cp-progress" role="progressbar"
+           aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"
+           aria-label="현재 batch 처리 진행률">
+        <span class="seg-approved"></span>
+        <span class="seg-rejected"></span>
+        <span class="seg-remaining"></span>
+      </div>
+      <span id="cp-progress-text" style="min-width: 100px; text-align: right;">0 / 0</span>
+    </div>
+    <main class="cp-body">
+      <section class="cp-grid-wrap">
+        <div id="cp-grid" class="cp-grid" role="listbox"
+             aria-label="후보 그리드" aria-activedescendant=""></div>
+        <div id="cp-empty" class="cp-empty" hidden></div>
+        <div id="cp-spacer" class="cp-spacer" hidden></div>
+      </section>
+      <aside class="cp-side" id="cp-side" aria-label="선택 후보 상세">
+        <div class="cp-drawer-handle" id="cp-drawer-handle"
+             role="button" aria-label="상세 패널 펼치기/접기" tabindex="0"></div>
+        <div class="cp-preview" id="cp-preview">
+          <div class="cp-empty">미리보기 없음</div>
+        </div>
+        <div class="cp-meta-panel" id="cp-meta">
+          <div class="cp-empty">상세 메타 없음</div>
+        </div>
+        <div class="cp-actions">
+          <button id="act-reject" class="danger" type="button" aria-label="현재 후보 reject">x: reject</button>
+          <button id="act-toggle-compare" type="button" aria-label="비교 담기 토글">v: 비교담기</button>
+          <button id="act-approve" class="primary" type="button" aria-label="현재 후보 승인">enter: 승인</button>
+        </div>
+        <div class="cp-shortcuts">
+          <kbd>j</kbd>/<kbd>k</kbd> 이동 ·
+          <kbd>x</kbd> reject ·
+          <kbd>v</kbd> 비교담기 ·
+          <kbd>c</kbd> 비교 ·
+          <kbd>enter</kbd> 승인 ·
+          <kbd>i</kbd> zoom ·
+          <kbd>?</kbd> 도움말
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <dialog id="compare-dialog" class="cp-compare" aria-label="후보 비교">
+    <div class="cp-compare-inner">
+      <div class="cp-compare-header">
+        <h2 style="font-size: var(--type-16); margin: 0;">후보 비교</h2>
+        <span class="cp-hint" id="compare-hint">최대 6장 권장</span>
+        <button type="button" id="close-compare" aria-label="닫기">닫기 (esc)</button>
+      </div>
+      <div class="cp-compare-grid" id="compare-grid"></div>
+    </div>
+  </dialog>
+
+  <dialog id="cheat-dialog" class="cp-cheat" aria-label="단축키">
+    <div class="cp-cheat-inner">
+      <h2>단축키</h2>
+      <table>
+        <tbody>
+          <tr><td><kbd>j</kbd> / <kbd>→</kbd></td><td>다음 후보</td></tr>
+          <tr><td><kbd>k</kbd> / <kbd>←</kbd></td><td>이전 후보</td></tr>
+          <tr><td><kbd>x</kbd></td><td>현재 후보 reject (5초 안에 toast로 실행취소)</td></tr>
+          <tr><td><kbd>v</kbd></td><td>비교 set 토글</td></tr>
+          <tr><td><kbd>c</kbd></td><td>비교 모달 열기</td></tr>
+          <tr><td><kbd>enter</kbd></td><td>승인 → 다음 후보로 자동 이동</td></tr>
+          <tr><td><kbd>i</kbd></td><td>미리보기 zoom 토글 (pixel-perfect)</td></tr>
+          <tr><td><kbd>m</kbd></td><td>메타 숨김 토글</td></tr>
+          <tr><td><kbd>esc</kbd></td><td>spacer/모달 종료</td></tr>
+          <tr><td><kbd>?</kbd></td><td>이 도움말</td></tr>
+        </tbody>
+      </table>
+      <div style="text-align: right; margin-top: var(--space-3);">
+        <button type="button" id="close-cheat">닫기</button>
+      </div>
+    </div>
+  </dialog>
+
+  <div class="cp-toast-stack" id="cp-toast-stack" aria-live="polite" aria-atomic="false"></div>
+  <div class="cp-toast-stack" id="cp-toast-error-stack"
+       style="bottom: 80px;" aria-live="assertive" aria-atomic="false"></div>
+
+  <script>
+    const state = {
+      apiKey: localStorage.getItem("assetFactoryApiKey") || "",
+      queue: { items: [], pending_batches: 0, total_remaining: 0 },
+      batches: [],
+      currentBatchId: null,
+      candidates: [],
+      filtered: [],
+      activeIndex: 0,
+      compareSet: new Set(),
+      hideMeta: false,
+      zoom: false,
+      sessionApproved: 0,
+      sessionRejected: 0,
+      autoAdvance: true,
+      drawerCollapsed: false,
+      spacerTimer: null,
+    };
+
+    const el = (id) => document.getElementById(id);
+    const $status = () => el("cp-status");
+
+    function authHeaders(extra = {}) {
+      const h = { "Content-Type": "application/json", ...extra };
+      if (state.apiKey) h["x-api-key"] = state.apiKey;
+      return h;
+    }
+
+    async function api(path, opts = {}) {
+      const res = await fetch(path, { headers: authHeaders(opts.headers || {}), ...opts });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`${res.status} ${text}`);
+      }
+      const ct = res.headers.get("content-type") || "";
+      return ct.includes("json") ? res.json() : res.text();
+    }
+
+    function fmtTimeAgo(iso) {
+      if (!iso) return "";
+      const t = new Date(iso).getTime();
+      const diff = Date.now() - t;
+      if (diff < 60_000) return "방금";
+      if (diff < 3600_000) return `${Math.round(diff / 60_000)}분 전`;
+      if (diff < 86400_000) return `${Math.round(diff / 3600_000)}시간 전`;
+      return `${Math.round(diff / 86400_000)}일 전`;
+    }
+
+    /* ----------------- Toast / Dialog 유틸 ----------------- */
+
+    function showToast(kind, msg, opts = {}) {
+      const stackId = kind === "error" ? "cp-toast-error-stack" : "cp-toast-stack";
+      const stack = el(stackId);
+      const t = document.createElement("div");
+      t.className = `cp-toast ${kind}`;
+      t.setAttribute("role", kind === "error" ? "alert" : "status");
+      const msgSpan = document.createElement("span");
+      msgSpan.className = "cp-toast-msg";
+      msgSpan.textContent = msg;
+      t.appendChild(msgSpan);
+      if (opts.action) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = opts.action.label || "실행취소";
+        btn.addEventListener("click", () => {
+          try { opts.action.cb && opts.action.cb(); } catch (_) {}
+          dismiss();
+        });
+        t.appendChild(btn);
+      }
+      stack.appendChild(t);
+      const ttl = opts.ttl || (opts.action ? 5000 : 3000);
+      const dismiss = () => {
+        if (t.parentElement) t.parentElement.removeChild(t);
+      };
+      setTimeout(dismiss, ttl);
+      return dismiss;
+    }
+
+    function reportError(msg, retry) {
+      showToast("error", msg, retry ? { action: { label: "재시도", cb: retry }, ttl: 8000 } : {});
+    }
+
+    /* ----------------- Queue 헤더 ----------------- */
+
+    async function loadQueue() {
+      try {
+        const data = await api("/api/cherry-pick/queue?limit=200");
+        state.queue = {
+          items: (data.items || []).filter((b) => !b.approved),
+          pending_batches: data.pending_batches || 0,
+          total_remaining: data.total_remaining || 0,
+        };
+        el("cp-queue-count").textContent = state.queue.pending_batches;
+        el("cp-queue-remaining").textContent = state.queue.total_remaining;
+      } catch (err) {
+        reportError(`queue 로드 실패: ${err.message}`, loadQueue);
+      }
+    }
+
+    function nextPendingBatchAfter(currentId) {
+      const items = state.queue.items;
+      if (!items.length) return null;
+      const idx = items.findIndex((b) => b.batch_id === currentId);
+      for (let off = 1; off <= items.length; off++) {
+        const cand = items[(idx + off) % items.length];
+        if (cand.batch_id === currentId) continue;
+        if (cand.remaining > 0) return cand;
+      }
+      return null;
+    }
+
+    /* ----------------- Batches ----------------- */
+
+    async function loadBatches() {
+      $status().textContent = "batches 로딩...";
+      try {
+        const data = await api("/api/batches?limit=100");
+        state.batches = data.items || [];
+        const sel = el("batch-select");
+        sel.innerHTML = "";
+        if (!state.batches.length) {
+          const opt = document.createElement("option");
+          opt.value = ""; opt.textContent = "batch 없음";
+          sel.appendChild(opt);
+          renderEmptyQueue();
+          $status().textContent = "batch 없음";
+          return;
+        }
+        state.batches.forEach((b) => {
+          const opt = document.createElement("option");
+          opt.value = b.batch_id;
+          const done = b.done || 0, total = b.total || 0;
+          opt.textContent = `${b.asset_key} · ${done}/${total} · ${b.candidate_total || 0}c · ${fmtTimeAgo(b.first_created_at)}`;
+          sel.appendChild(opt);
+        });
+        if (!state.currentBatchId
+            || !state.batches.find((b) => b.batch_id === state.currentBatchId)) {
+          // 자동 진입: queue에 pending이 있으면 첫 pending, 아니면 첫 batch
+          const firstPending = state.queue.items.find((b) => b.remaining > 0);
+          state.currentBatchId = firstPending
+            ? firstPending.batch_id
+            : state.batches[0].batch_id;
+        }
+        sel.value = state.currentBatchId;
+        await loadCandidates();
+      } catch (err) {
+        reportError(`batches 로드 실패: ${err.message}`, loadBatches);
+        $status().textContent = "batches 로드 실패";
+      }
+    }
+
+    async function loadCandidates() {
+      if (!state.currentBatchId) return;
+      $status().textContent = "candidates 로딩...";
+      hideSpacer();
+      try {
+        const data = await api(`/api/batches/${state.currentBatchId}/candidates`);
+        state.candidates = data.items || [];
+        rebuildFilters();
+        applyFilters();
+        const meta = state.batches.find((b) => b.batch_id === state.currentBatchId);
+        if (meta) el("cp-bc-batch").textContent = `${meta.asset_key} · ${meta.batch_id.slice(0, 12)}…`;
+        $status().textContent = `${state.candidates.length} candidates · ${state.filtered.length} 표시`;
+      } catch (err) {
+        reportError(`candidates 로드 실패: ${err.message}`, loadCandidates);
+        $status().textContent = "candidates 로드 실패";
+      }
+    }
+
+    /* ----------------- 필터 / 메타 ----------------- */
+
+    function parseLoraSummary(json) {
+      if (!json) return "(no lora)";
+      try {
+        const arr = JSON.parse(json);
+        if (!Array.isArray(arr) || !arr.length) return "(no lora)";
+        return arr.map((l) => `${l.name}@${l.weight}`).join(",");
+      } catch { return "?"; }
+    }
+
+    function parseLoras(json) {
+      if (!json) return [];
+      try {
+        const arr = JSON.parse(json);
+        return Array.isArray(arr) ? arr : [];
+      } catch { return []; }
+    }
+
+    function loraCode(name) {
+      if (!name) return "?";
+      const m = String(name).match(/[A-Za-z]/);
+      return (m ? m[0] : String(name)[0]).toUpperCase();
+    }
+
+    function rebuildFilters() {
+      const models = new Set();
+      const loras = new Set();
+      state.candidates.forEach((c) => {
+        if (c.generation_model) models.add(c.generation_model);
+        const sig = parseLoraSummary(c.lora_spec_json || null);
+        if (sig) loras.add(sig);
+      });
+      const fillSelect = (selectEl, set) => {
+        const cur = selectEl.value;
+        selectEl.innerHTML = '<option value="">전체</option>';
+        [...set].sort().forEach((v) => {
+          const o = document.createElement("option");
+          o.value = v; o.textContent = v;
+          selectEl.appendChild(o);
+        });
+        if (cur && set.has(cur)) selectEl.value = cur;
+      };
+      fillSelect(el("filter-model"), models);
+      fillSelect(el("filter-lora"), loras);
+    }
+
+    function applyFilters() {
+      const model = el("filter-model").value;
+      const lora = el("filter-lora").value;
+      const hideRejected = el("filter-hide-rejected").checked;
+      state.filtered = state.candidates.filter((c) => {
+        if (hideRejected && c.is_rejected) return false;
+        if (model && c.generation_model !== model) return false;
+        if (lora && parseLoraSummary(c.lora_spec_json || null) !== lora) return false;
+        return true;
+      });
+      if (state.activeIndex >= state.filtered.length) state.activeIndex = 0;
+      renderGrid();
+      renderActive();
+      renderProgress();
+    }
+
+    /* ----------------- Grid ----------------- */
+
+    function applyDensity() {
+      const grid = el("cp-grid");
+      const n = state.filtered.length;
+      grid.classList.toggle("dense-low", n <= 24);
+      grid.classList.toggle("dense-high", n >= 40);
+    }
+
+    function renderGrid() {
+      const grid = el("cp-grid");
+      const empty = el("cp-empty");
+      grid.innerHTML = "";
+      if (!state.filtered.length) {
+        if (state.candidates.length) {
+          renderEmptyFiltered();
+        } else {
+          renderEmptyBatch();
+        }
+        empty.hidden = false;
+        grid.hidden = true;
+        return;
+      }
+      empty.hidden = true;
+      grid.hidden = false;
+      applyDensity();
+      const reveal = state.filtered.length >= 40;
+      state.filtered.forEach((c, idx) => {
+        const div = document.createElement("div");
+        div.className = "cp-thumb";
+        div.id = `cand-${c.id}`;
+        div.setAttribute("role", "option");
+        div.setAttribute("aria-label",
+          `seed ${c.generation_seed ?? "?"}, ${c.generation_model || "model"}`);
+        if (idx === state.activeIndex) {
+          div.classList.add("active");
+          div.setAttribute("aria-selected", "true");
+          grid.setAttribute("aria-activedescendant", div.id);
+        }
+        if (c.is_rejected) div.classList.add("rejected");
+        if (state.compareSet.has(c.id)) div.classList.add("compare");
+        if (reveal) {
+          const chunk = Math.floor(idx / 8);
+          div.style.setProperty("--cp-delay", `${chunk * 60}ms`);
+        } else {
+          div.style.setProperty("--cp-delay", "0ms");
+        }
+        const loras = parseLoras(c.lora_spec_json);
+        const loraStrip = loras.length
+          ? `<div class="cp-lora">${loras.map((l) =>
+              `<span title="${l.name}@${l.weight}">${loraCode(l.name)}</span>`
+            ).join("")}</div>` : "";
+        div.innerHTML = `
+          <img loading="lazy" src="${c.image_url}" alt="후보 ${c.id} 이미지" />
+          <span class="cp-badge ${c.is_rejected ? "r" : ""}">${c.is_rejected ? "rej" : `#${idx + 1}`}</span>
+          ${loraStrip}
+          <div class="cp-meta">
+            <span>seed ${c.generation_seed ?? "?"}</span>
+            <span>${(c.generation_model || "?").slice(0, 14)}</span>
+          </div>
+        `;
+        attachThumbInteractions(div, idx, c);
+        grid.appendChild(div);
+      });
+      const activeEl = grid.children[state.activeIndex];
+      if (activeEl) activeEl.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }
+
+    function attachThumbInteractions(div, idx, c) {
+      div.addEventListener("click", (e) => {
+        // mobile: tap = approve. desktop: click = select.
+        if (isTouch() && !e.shiftKey) {
+          state.activeIndex = idx; renderActive();
+          if (!c.is_rejected) approveActive();
+          return;
+        }
+        state.activeIndex = idx;
+        renderGrid(); renderActive();
+      });
+      div.addEventListener("dblclick", () => {
+        state.activeIndex = idx; renderActive();
+        approveActive();
+      });
+      // mobile gestures
+      let touchStart = null;
+      let lpTimer = null;
+      div.addEventListener("touchstart", (e) => {
+        touchStart = { x: e.touches[0].clientX, y: e.touches[0].clientY, t: Date.now() };
+        lpTimer = setTimeout(() => {
+          // long-press = reject
+          state.activeIndex = idx; renderActive();
+          rejectActive();
+          touchStart = null;
+        }, 400);
+      }, { passive: true });
+      div.addEventListener("touchmove", (e) => {
+        if (!touchStart) return;
+        const dx = e.touches[0].clientX - touchStart.x;
+        const dy = e.touches[0].clientY - touchStart.y;
+        if (Math.hypot(dx, dy) > 10 && lpTimer) { clearTimeout(lpTimer); lpTimer = null; }
+      }, { passive: true });
+      div.addEventListener("touchend", (e) => {
+        if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; }
+        if (!touchStart) return;
+        const t = e.changedTouches[0];
+        const dx = t.clientX - touchStart.x;
+        const dy = t.clientY - touchStart.y;
+        const dt = Date.now() - touchStart.t;
+        if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) && dx > 0 && dt < 600) {
+          // swipe-right = compare toggle
+          state.activeIndex = idx;
+          toggleCompare();
+          e.preventDefault();
+        }
+        touchStart = null;
+      });
+    }
+
+    function isTouch() {
+      return matchMedia("(hover: none) and (pointer: coarse)").matches;
+    }
+
+    function renderActive() {
+      const c = state.filtered[state.activeIndex];
+      const preview = el("cp-preview");
+      const meta = el("cp-meta");
+      // update aria-activedescendant
+      const grid = el("cp-grid");
+      if (c) grid.setAttribute("aria-activedescendant", `cand-${c.id}`);
+      // remove .active from siblings
+      [...grid.children].forEach((node, i) => {
+        node.classList.toggle("active", i === state.activeIndex);
+        if (i === state.activeIndex) node.setAttribute("aria-selected", "true");
+        else node.removeAttribute("aria-selected");
+      });
+      if (!c) {
+        preview.innerHTML = '<div class="cp-empty">미리보기 없음</div>';
+        meta.innerHTML = '<div class="cp-empty">상세 메타 없음</div>';
+        return;
+      }
+      preview.classList.toggle("zoom", state.zoom);
+      preview.innerHTML = `<img src="${c.image_url}" alt="활성 후보 미리보기" />`;
+      if (state.hideMeta) {
+        meta.innerHTML = "<div class='cp-empty'>메타 숨김 (m 토글)</div>";
+        return;
+      }
+      const loras = parseLoras(c.lora_spec_json);
+      const loraDisplay = loras.length
+        ? loras.map((l) => `<code title="${l.name}">${loraCode(l.name)}</code>=<code>${l.weight}</code>`).join(" · ")
+        : "(no lora)";
+      const metaJson = c.metadata_json || "{}";
+      let metaPretty = metaJson;
+      try { metaPretty = JSON.stringify(JSON.parse(metaJson), null, 2); } catch {}
+      const colorPct = Math.min(100, Math.round((c.color_count || 0) / 256 * 100));
+      meta.innerHTML = `
+        <h3>asset key</h3>
+        <div class="cp-asset-key-row">
+          <input id="meta-asset-key" type="text" value="${escapeHtml(c.asset_key || "")}"
+                 aria-label="asset_key (편집 후 enter로 승인 시 적용됨)" />
+        </div>
+        <h3>요약</h3>
+        <div>candidate <code>#${c.id}</code> · slot ${c.slot_index} ·
+          <span class="cp-filter-pill ${c.is_rejected ? "" : "active"}">
+            ${c.is_rejected ? "rejected" : "active"}
+          </span>
+        </div>
+        <div>project <code>${escapeHtml(c.project)}</code></div>
+        <div>seed <code>${c.generation_seed ?? "?"}</code> · model <code>${escapeHtml(c.generation_model || "?")}</code></div>
+        <div>lora ${loraDisplay}</div>
+        <div>validation ${escapeHtml(c.validation_status || "?")} ·
+          ${c.color_count} colors
+          <span class="cp-color-bar" aria-label="${c.color_count}/256 colors">
+            <span style="width: ${colorPct}%"></span>
+          </span>
+          · ${c.width}×${c.height}
+        </div>
+        <div>created ${escapeHtml(c.created_at || "")}</div>
+        <h3>prompt</h3>
+        <div style="white-space: pre-wrap; word-break: break-word;">${escapeHtml(c.generation_prompt || "")}</div>
+        <h3>metadata_json</h3>
+        <pre>${escapeHtml(metaPretty)}</pre>
+      `;
+      // protect meta input from global keydown
+      const input = el("meta-asset-key");
+      if (input) {
+        input.addEventListener("keydown", (e) => e.stopPropagation());
+      }
+    }
+
+    function escapeHtml(s) {
+      return String(s == null ? "" : s)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    }
+
+    /* ----------------- Progress ----------------- */
+
+    function renderProgress() {
+      const total = state.candidates.length;
+      const rejected = state.candidates.filter((c) => c.is_rejected).length;
+      const approved = state.sessionApproved; // 세션 단위 카운트
+      const remaining = Math.max(total - rejected - approved, 0);
+      const denom = Math.max(total, 1);
+      const bar = el("cp-progress");
+      bar.style.setProperty("--p-approved", `${approved / denom}fr`);
+      bar.style.setProperty("--p-rejected", `${rejected / denom}fr`);
+      bar.style.setProperty("--p-remaining", `${remaining / denom}fr`);
+      bar.setAttribute("aria-valuenow", String(Math.round((approved + rejected) / denom * 100)));
+      el("cp-progress-text").textContent = `${approved + rejected} / ${total} (남음 ${remaining})`;
+    }
+
+    /* ----------------- Reject / Approve / Compare ----------------- */
+
+    async function rejectActive() {
+      const c = state.filtered[state.activeIndex];
+      if (!c || c.is_rejected) return;
+      const thumb = el(`cand-${c.id}`);
+      if (thumb) thumb.classList.add("is-rejecting");
+      // 즉시 DB 호출
+      try {
+        await api(`/api/batches/${state.currentBatchId}/candidates/${c.id}/reject`, {
+          method: "POST",
+        });
+      } catch (err) {
+        if (thumb) thumb.classList.remove("is-rejecting");
+        reportError(`reject 실패: ${err.message || err}`);
+        return;
+      }
+      c.is_rejected = 1;
+      state.compareSet.delete(c.id);
+      state.sessionRejected += 1;
+      // toast undo
+      showToast("info", "거절됨 (5초 안에 실행취소 가능)", {
+        action: {
+          label: "실행취소",
+          cb: async () => {
+            try {
+              await api(`/api/batches/${state.currentBatchId}/candidates/${c.id}/unreject`, {
+                method: "POST",
+              });
+              c.is_rejected = 0;
+              state.sessionRejected = Math.max(0, state.sessionRejected - 1);
+              applyFilters();
+              showToast("success", "reject 되돌림");
+              checkBatchEnd();
+            } catch (err) {
+              reportError(`unreject 실패: ${err.message || err}`);
+            }
+          },
+        },
+      });
+      // swipe-out 후 재렌더
+      setTimeout(() => {
+        if (el("filter-hide-rejected").checked) {
+          applyFilters();
+        } else {
+          renderGrid(); renderActive(); renderProgress();
+        }
+        moveActive(0);
+        checkBatchEnd();
+      }, 220);
+    }
+
+    async function approveActive() {
+      const c = state.filtered[state.activeIndex];
+      if (!c) return;
+      const keyInput = el("meta-asset-key");
+      const proposedKey = (keyInput && keyInput.value.trim()) || c.asset_key;
+      const thumb = el(`cand-${c.id}`);
+      if (thumb) thumb.classList.add("is-approving");
+      let assetId;
+      try {
+        const data = await api("/api/assets/approve-from-candidate", {
+          method: "POST",
+          body: JSON.stringify({
+            candidate_id: c.id,
+            asset_key: proposedKey,
+            project: c.project,
+            category: "character",
+            set_status: "approved",
+          }),
+        });
+        assetId = data.asset_id;
+      } catch (err) {
+        if (thumb) thumb.classList.remove("is-approving");
+        reportError(`승인 실패: ${err.message || err}`);
+        return;
+      }
+      state.sessionApproved += 1;
+      // 그리드에서 제거 (asset_key가 이 batch의 픽이므로)
+      setTimeout(() => {
+        if (thumb) thumb.classList.add("is-leaving");
+      }, 180);
+      setTimeout(() => {
+        // 후보 자체는 남기고 approved를 세션 카운터로만 처리.
+        // 다음 후보 자동 이동.
+        moveActive(1);
+        renderProgress();
+        checkBatchEnd();
+      }, 380);
+      showToast("success", `승인 (${proposedKey})`, {
+        action: {
+          label: "실행취소",
+          cb: async () => {
+            try {
+              await api(`/api/assets/${assetId}/undo-approve`, { method: "POST" });
+              state.sessionApproved = Math.max(0, state.sessionApproved - 1);
+              renderProgress();
+              if (thumb) {
+                thumb.classList.remove("is-approving", "is-leaving");
+              }
+              showToast("success", "승인 되돌림");
+            } catch (err) {
+              reportError(`undo 실패: ${err.message || err}`);
+            }
+          },
+        },
+      });
+    }
+
+    function toggleCompare() {
+      const c = state.filtered[state.activeIndex];
+      if (!c) return;
+      if (state.compareSet.has(c.id)) state.compareSet.delete(c.id);
+      else state.compareSet.add(c.id);
+      renderGrid();
+      const total = state.compareSet.size;
+      showToast("info", `비교 set: ${total}장`, { ttl: 1200 });
+    }
+
+    function openCompareDialog() {
+      const items = state.candidates.filter((c) => state.compareSet.has(c.id));
+      const dialog = el("compare-dialog");
+      const grid = el("compare-grid");
+      const hint = el("compare-hint");
+      grid.innerHTML = "";
+      grid.classList.remove("cols-2", "cols-3", "cols-5");
+      if (!items.length) {
+        showToast("info", "비교할 후보를 v 키 또는 swipe-right로 먼저 담으세요.");
+        return;
+      }
+      const cols = items.length >= 6 ? "cols-2" : (items.length >= 4 ? "cols-3" : "cols-5");
+      grid.classList.add(cols);
+      hint.textContent = items.length >= 6
+        ? `${items.length}장 — 자동 2단 (최대 6장 권장)`
+        : `${items.length}장 비교`;
+      items.forEach((c) => {
+        const fig = document.createElement("figure");
+        const loras = parseLoras(c.lora_spec_json);
+        const loraTxt = loras.length
+          ? loras.map((l) => `${loraCode(l.name)}@${l.weight}`).join(" · ")
+          : "(no lora)";
+        const colorPct = Math.min(100, Math.round((c.color_count || 0) / 256 * 100));
+        fig.innerHTML = `
+          <img src="${c.image_url}" alt="후보 ${c.id}" />
+          <figcaption>
+            <span>#${c.id} · seed ${c.generation_seed ?? "?"}</span>
+            <span>model ${escapeHtml((c.generation_model || "?").slice(0, 30))}</span>
+            <span>lora ${escapeHtml(loraTxt)}</span>
+            <span>colors ${c.color_count}
+              <span class="cp-color-bar" style="width:60px"><span style="width:${colorPct}%"></span></span>
+            </span>
+          </figcaption>
+        `;
+        grid.appendChild(fig);
+      });
+      if (typeof dialog.showModal === "function") dialog.showModal();
+      else dialog.setAttribute("open", "");
+    }
+
+    function closeCompareDialog() {
+      const dialog = el("compare-dialog");
+      if (dialog.open) dialog.close();
+    }
+
+    /* ----------------- Spacer / Morning summary ----------------- */
+
+    function checkBatchEnd() {
+      const remaining = state.candidates.filter((c) => !c.is_rejected).length - state.sessionApproved;
+      if (remaining <= 0) {
+        showSpacer();
+      }
+    }
+
+    function hideSpacer() {
+      el("cp-spacer").hidden = true;
+      if (state.spacerTimer) {
+        clearInterval(state.spacerTimer);
+        state.spacerTimer = null;
+      }
+    }
+
+    function showSpacer() {
+      const spacer = el("cp-spacer");
+      const grid = el("cp-grid");
+      grid.hidden = true;
+      el("cp-empty").hidden = true;
+      spacer.hidden = false;
+      const next = nextPendingBatchAfter(state.currentBatchId);
+      const meta = state.batches.find((b) => b.batch_id === state.currentBatchId);
+      let secs = 15;
+      const renderSpacer = () => {
+        if (!next) {
+          spacer.innerHTML = renderMorningSummaryHtml();
+          const btn = spacer.querySelector("#cp-summary-restart");
+          if (btn) btn.addEventListener("click", () => { hideSpacer(); loadCandidates(); });
+          return;
+        }
+        spacer.innerHTML = `
+          <h2>이번 batch 완료</h2>
+          <div class="cp-spacer-meta">${escapeHtml(meta ? meta.asset_key : "")} 처리 완료</div>
+          <div class="cp-spacer-count">+${state.sessionApproved}장 승인 · ${state.sessionRejected}장 거절</div>
+          <div class="cp-countdown" id="cp-countdown">
+            ${secs}초 후 다음 batch (<b>${escapeHtml(next.asset_key)}</b>)로 자동 이동 ·
+            <kbd>esc</kbd> 종료
+          </div>
+          <div class="cp-spacer-actions">
+            <button id="cp-spacer-now" type="button" class="primary">지금 다음 batch</button>
+            <button id="cp-spacer-stop" type="button">종료 (esc)</button>
+          </div>
+        `;
+        spacer.querySelector("#cp-spacer-now").addEventListener("click", () => advanceToNextBatch(next));
+        spacer.querySelector("#cp-spacer-stop").addEventListener("click", () => { hideSpacer(); endSession(); });
+      };
+      renderSpacer();
+      if (next) {
+        state.spacerTimer = setInterval(() => {
+          secs -= 1;
+          const cd = el("cp-countdown");
+          if (cd) cd.firstChild && (cd.firstChild.textContent = "");
+          if (cd) {
+            cd.innerHTML = `${secs}초 후 다음 batch (<b>${escapeHtml(next.asset_key)}</b>)로 자동 이동 · <kbd>esc</kbd> 종료`;
+          }
+          if (secs <= 0) {
+            clearInterval(state.spacerTimer);
+            state.spacerTimer = null;
+            advanceToNextBatch(next);
+          }
+        }, 1000);
+      }
+    }
+
+    function renderMorningSummaryHtml() {
+      return `
+        <h2>오늘 cherry-pick 완료</h2>
+        <div class="cp-spacer-meta">처리할 batch가 더 이상 없습니다.</div>
+        <div class="cp-spacer-count">${state.sessionApproved}장 승인 · ${state.sessionRejected}장 거절</div>
+        <div class="cp-spacer-actions">
+          <button id="cp-summary-restart" type="button">현재 batch 다시 보기</button>
+          <a class="cp-spacer-link" href="/" style="align-self: center; color: var(--accent-pick);">← 대시보드</a>
+        </div>
+      `;
+    }
+
+    function endSession() {
+      const spacer = el("cp-spacer");
+      spacer.hidden = false;
+      el("cp-grid").hidden = true;
+      el("cp-empty").hidden = true;
+      spacer.innerHTML = renderMorningSummaryHtml();
+      const btn = spacer.querySelector("#cp-summary-restart");
+      if (btn) btn.addEventListener("click", () => { hideSpacer(); loadCandidates(); });
+    }
+
+    function advanceToNextBatch(next) {
+      hideSpacer();
+      state.currentBatchId = next.batch_id;
+      state.activeIndex = 0;
+      state.compareSet.clear();
+      state.sessionApproved = 0;
+      state.sessionRejected = 0;
+      el("batch-select").value = next.batch_id;
+      loadCandidates();
+      loadQueue();
+    }
+
+    /* ----------------- Empty / Error renderers ----------------- */
+
+    const SAMPLE_CURL = `curl -X POST http://localhost:8000/api/batches \\
+  -H 'Content-Type: application/json' \\
+  -H 'x-api-key: YOUR_KEY' \\
+  -d '{"project":"my-game","asset_key":"hero_idle",
+       "prompts":["pixel art hero idle"],"models":["sd_xl"],
+       "loras":[[{"name":"pixel_art","weight":0.8}]],
+       "seeds_per_combo":20,"common":{"steps":20,"max_colors":32}}'`;
+
+    function renderEmptyQueue() {
+      const empty = el("cp-empty");
+      empty.hidden = false;
+      el("cp-grid").hidden = true;
+      empty.innerHTML = `
+        <h3>오늘 처리할 batch가 없습니다</h3>
+        <div>에이전트가 밤새 ${"`"}/api/batches${"`"} 로 요청을 enqueue하면 아침에 여기 나타납니다.</div>
+        <pre id="empty-curl">${escapeHtml(SAMPLE_CURL)}</pre>
+        <div class="cp-empty-actions">
+          <button id="empty-copy" type="button">curl 복사</button>
+          <button id="empty-retry" type="button">새로고침</button>
+        </div>
+      `;
+      empty.querySelector("#empty-copy").addEventListener("click", () => {
+        navigator.clipboard.writeText(SAMPLE_CURL).then(
+          () => showToast("success", "clipboard 복사됨"),
+          () => showToast("error", "clipboard 접근 불가"),
+        );
+      });
+      empty.querySelector("#empty-retry").addEventListener("click", () => {
+        loadQueue(); loadBatches();
+      });
+    }
+
+    function renderEmptyBatch() {
+      const empty = el("cp-empty");
+      empty.innerHTML = `
+        <h3>이 batch에 후보가 없습니다</h3>
+        <div>아직 워커가 후보를 생성 중일 수 있어요. 잠시 후 다시 시도하세요.</div>
+        <div class="cp-empty-actions">
+          <button id="empty-retry" type="button">새로고침</button>
+        </div>
+      `;
+      empty.querySelector("#empty-retry").addEventListener("click", loadCandidates);
+    }
+
+    function renderEmptyFiltered() {
+      const empty = el("cp-empty");
+      empty.innerHTML = `
+        <h3>필터에 일치하는 후보 없음</h3>
+        <div>model/lora 필터를 풀거나 rejected 숨김을 끄세요.</div>
+      `;
+    }
+
+    /* ----------------- 키보드 ----------------- */
+
+    function moveActive(delta) {
+      if (!state.filtered.length) return;
+      state.activeIndex = (state.activeIndex + delta + state.filtered.length) % state.filtered.length;
+      renderGrid(); renderActive();
+    }
+
+    document.addEventListener("keydown", (e) => {
+      if (e.target.matches("input, select, textarea")) return;
+      const compareDlg = el("compare-dialog");
+      const cheatDlg = el("cheat-dialog");
+      if (compareDlg.open) {
+        if (e.key === "Escape" || e.key === "c") { closeCompareDialog(); e.preventDefault(); }
+        return;
+      }
+      if (cheatDlg.open) {
+        if (e.key === "Escape" || e.key === "?") { cheatDlg.close(); e.preventDefault(); }
+        return;
+      }
+      if (!el("cp-spacer").hidden) {
+        if (e.key === "Escape") { hideSpacer(); endSession(); e.preventDefault(); return; }
+        if (e.key === "Enter") {
+          const next = nextPendingBatchAfter(state.currentBatchId);
+          if (next) advanceToNextBatch(next);
+          e.preventDefault();
+          return;
+        }
+        return;
+      }
+      switch (e.key) {
+        case "j": case "ArrowRight": case "ArrowDown": moveActive(1); e.preventDefault(); break;
+        case "k": case "ArrowLeft": case "ArrowUp": moveActive(-1); e.preventDefault(); break;
+        case "x": rejectActive(); e.preventDefault(); break;
+        case "v": toggleCompare(); e.preventDefault(); break;
+        case "c": openCompareDialog(); e.preventDefault(); break;
+        case "Enter": approveActive(); e.preventDefault(); break;
+        case "i": state.zoom = !state.zoom; renderActive(); e.preventDefault(); break;
+        case "m": state.hideMeta = !state.hideMeta; renderActive(); e.preventDefault(); break;
+        case "?": el("cheat-dialog").showModal(); e.preventDefault(); break;
+      }
+    });
+
+    /* ----------------- SSE ----------------- */
+
+    function initSse() {
+      const ev = new EventSource("/api/events");
+      ev.onmessage = (msg) => {
+        try {
+          const data = JSON.parse(msg.data);
+          if (!data) return;
+          if (data.type === "task_done" && data.batch_id === state.currentBatchId) {
+            loadCandidates();
+            loadQueue();
+          } else if (data.type === "design_batch_created") {
+            loadBatches();
+            loadQueue();
+          }
+        } catch {}
+      };
+      ev.onerror = () => { ev.close(); setTimeout(initSse, 3000); };
+    }
+
+    /* ----------------- Init ----------------- */
+
+    function init() {
+      el("api-key").value = state.apiKey;
+      el("api-key").addEventListener("change", (e) => {
+        state.apiKey = e.target.value.trim();
+        localStorage.setItem("assetFactoryApiKey", state.apiKey);
+      });
+      el("reload-batches").addEventListener("click", () => { loadQueue(); loadBatches(); });
+      el("batch-select").addEventListener("change", (e) => {
+        state.currentBatchId = e.target.value;
+        state.activeIndex = 0;
+        state.compareSet.clear();
+        state.sessionApproved = 0;
+        state.sessionRejected = 0;
+        loadCandidates();
+      });
+      ["filter-model", "filter-lora", "filter-hide-rejected"].forEach((id) => {
+        el(id).addEventListener("change", applyFilters);
+      });
+      el("open-compare").addEventListener("click", openCompareDialog);
+      el("close-compare").addEventListener("click", closeCompareDialog);
+      el("open-cheat").addEventListener("click", () => el("cheat-dialog").showModal());
+      el("close-cheat").addEventListener("click", () => el("cheat-dialog").close());
+      el("compare-dialog").addEventListener("click", (e) => {
+        if (e.target.id === "compare-dialog") closeCompareDialog();
+      });
+      el("act-reject").addEventListener("click", rejectActive);
+      el("act-approve").addEventListener("click", approveActive);
+      el("act-toggle-compare").addEventListener("click", toggleCompare);
+
+      // mobile drawer
+      const handle = el("cp-drawer-handle");
+      const side = el("cp-side");
+      const toggleDrawer = () => {
+        state.drawerCollapsed = !state.drawerCollapsed;
+        side.classList.toggle("cp-drawer-collapsed", state.drawerCollapsed);
+      };
+      handle.addEventListener("click", toggleDrawer);
+      handle.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { toggleDrawer(); e.preventDefault(); }
+      });
+
+      // batch_id query param shortcut (e.g. /cherry-pick?batch_id=btc_...)
+      const params = new URLSearchParams(window.location.search);
+      const queried = params.get("batch_id");
+      if (queried) state.currentBatchId = queried;
+
+      loadQueue().then(loadBatches);
+      initSse();
+    }
+    window.addEventListener("DOMContentLoaded", init);
+  </script>
+</body>
+</html>

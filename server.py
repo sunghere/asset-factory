@@ -21,6 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from candidate_gc import run_gc_candidates
+from catalog import load_catalog_yaml, merge_loras, merge_models
 from generator import SDClient, SDError, save_candidate_slot_image, save_generated_image
 from models import Database
 from scanner import scan_directory
@@ -31,6 +32,9 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "asset-factory.db"
+CATALOG_YAML_PATH = Path(
+    os.getenv("SD_CATALOG_PATH", str(BASE_DIR / "config" / "sd_catalog.yml"))
+)
 
 
 def _allowed_roots() -> list[Path]:
@@ -153,6 +157,55 @@ class SelectCandidateRequest(BaseModel):
 
     job_id: str
     slot_index: int = Field(ge=0)
+
+
+class LoraSpec(BaseModel):
+    """곱집합 한 칸을 차지할 LoRA 한 개."""
+
+    name: str
+    weight: float = Field(default=0.7, ge=-2.0, le=2.0)
+
+
+class BatchCommonParams(BaseModel):
+    """배치 모든 task에 공통 적용할 SD 파라미터."""
+
+    steps: int = Field(default=28, ge=1, le=200)
+    cfg: float = Field(default=7.0, ge=0.0, le=30.0)
+    sampler: str = Field(default="DPM++ 2M")
+    width: int | None = Field(default=None, ge=64, le=2048)
+    height: int | None = Field(default=None, ge=64, le=2048)
+    negative_prompt: str | None = None
+    expected_size: int | None = None
+    max_colors: int = Field(default=32, ge=1, le=256)
+    max_retries: int = Field(default=3, ge=0, le=10)
+
+
+class DesignBatchRequest(BaseModel):
+    """에이전트 친화 batch 곱집합 spec.
+
+    내부에서 prompts × models × loras × seeds 곱집합을 expand하여
+    generation_tasks를 enqueue한다. spec은 client agent가 LLM 등으로
+    먼저 풀어서 보내야 한다(AF는 LLM 호출 안 함)."""
+
+    asset_key: str = Field(..., examples=["marine_v2_idle"])
+    project: str = Field(default="default-project")
+    category: str = Field(default="character")
+    prompts: list[str] = Field(default_factory=list)
+    models: list[str] = Field(default_factory=list)
+    loras: list[list[LoraSpec]] = Field(default_factory=list)
+    seeds: list[int] | None = None
+    seeds_per_combo: int = Field(default=1, ge=1, le=64)
+    common: BatchCommonParams = Field(default_factory=BatchCommonParams)
+
+
+class ApproveFromCandidateRequest(BaseModel):
+    """cherry-pick 1장 승인 요청."""
+
+    candidate_id: int = Field(..., ge=1)
+    asset_key: str | None = None
+    project: str | None = None
+    category: str | None = None
+    set_status: str = Field(default="approved", pattern="^(approved|pending)$")
 
 
 class EventBroker:
@@ -279,6 +332,76 @@ def _extract_tasks_from_spec(spec: dict[str, Any], project_override: str | None 
     return project, tasks
 
 
+def _format_lora_suffix(loras: list[LoraSpec] | list[dict[str, Any]]) -> str:
+    """LoRA 스펙을 prompt에 붙일 ``<lora:name:weight>`` 토큰들로 직렬화한다."""
+    parts: list[str] = []
+    for lora in loras:
+        if isinstance(lora, LoraSpec):
+            name, weight = lora.name, lora.weight
+        else:
+            name, weight = str(lora["name"]), float(lora.get("weight", 0.7))
+        if not name:
+            continue
+        parts.append(f"<lora:{name}:{weight:g}>")
+    return (" " + " ".join(parts)) if parts else ""
+
+
+def expand_design_batch(spec: DesignBatchRequest) -> list[dict[str, Any]]:
+    """batch spec → generation_tasks dict 리스트로 expand 한다.
+
+    곱집합: prompts × models × (loras 또는 [[]]) × seeds
+    각 task의 prompt에는 LoRA 토큰이 자동으로 append된다.
+    seeds가 비어있으면 ``seeds_per_combo`` 개의 무작위 시드를 생성한다.
+    """
+    if not spec.prompts:
+        raise ValueError("prompts는 최소 1개 필요합니다.")
+    models: list[str | None] = list(spec.models) if spec.models else [None]
+    lora_combos: list[list[LoraSpec]] = list(spec.loras) if spec.loras else [[]]
+
+    if spec.seeds:
+        seeds: list[int | None] = [int(s) for s in spec.seeds]
+    elif spec.seeds_per_combo > 0:
+        seeds = [random.randint(0, 2**31 - 1) for _ in range(spec.seeds_per_combo)]
+    else:
+        seeds = [None]
+
+    tasks: list[dict[str, Any]] = []
+    for prompt in spec.prompts:
+        for model in models:
+            for lora_combo in lora_combos:
+                lora_suffix = _format_lora_suffix(lora_combo)
+                full_prompt = (prompt + lora_suffix).strip()
+                lora_spec_serialized = json.dumps(
+                    [
+                        {"name": item.name, "weight": item.weight}
+                        for item in lora_combo
+                    ],
+                    ensure_ascii=False,
+                )
+                for seed in seeds:
+                    tasks.append(
+                        {
+                            "project": spec.project,
+                            "asset_key": spec.asset_key,
+                            "category": spec.category,
+                            "prompt": full_prompt,
+                            "negative_prompt": spec.common.negative_prompt,
+                            "model_name": model,
+                            "width": spec.common.width,
+                            "height": spec.common.height,
+                            "steps": spec.common.steps,
+                            "cfg": spec.common.cfg,
+                            "sampler": spec.common.sampler,
+                            "expected_size": spec.common.expected_size,
+                            "max_colors": spec.common.max_colors,
+                            "max_retries": spec.common.max_retries,
+                            "lora_spec_json": lora_spec_serialized,
+                            "seed": seed,
+                        }
+                    )
+    return tasks
+
+
 def _check_disk_space(path: Path) -> None:
     """생성 전 디스크 여유 공간을 검사한다."""
     min_mb = int(os.getenv("MIN_FREE_DISK_MB", "50"))
@@ -371,9 +494,17 @@ async def handle_task(task: dict[str, Any]) -> None:
             steps=int(task.get("steps", 20)),
             cfg_scale=float(task.get("cfg", 7.0)),
             sampler_name=task.get("sampler") or "DPM++ 2M",
+            seed=task.get("seed"),
         )
         candidates_total = int(task.get("candidates_total") or 1)
         candidate_slot = task.get("candidate_slot")
+        batch_id = task.get("batch_id")
+        # design batch (batch_id != None) 는 항상 cherry-pick 모드로 동작:
+        # task.id 를 slot_index 로 써서 모든 시도가 후보로 누적된다.
+        # 자동 primary 승격은 하지 않는다 — 사람이 cherry-pick UI에서 고른다.
+        if batch_id and candidate_slot is None:
+            candidate_slot = int(task["id"])
+            candidates_total = max(candidates_total, 2)
 
         if candidates_total > 1 and candidate_slot is not None:
             output_path = save_candidate_slot_image(
@@ -431,11 +562,13 @@ async def handle_task(task: dict[str, Any]) -> None:
                 generation_model=generation.model,
                 generation_prompt=generation.prompt,
                 metadata_json=metadata_json,
+                batch_id=batch_id,
             )
-            # slot 인덱스 대신 "기존 primary asset 존재 여부"로 승격 판단한다.
-            # 따라서 slot 0이 실패해도 다음 성공 슬롯이 primary가 될 수 있다.
+            # design batch (batch_id != None) 는 사람이 cherry-pick UI에서 고를 때까지
+            # primary로 승격하지 않는다. 기존 spec-batch 흐름(batch_id 없음)은 종전대로
+            # 첫 성공 슬롯을 자동 승격한다.
             already_promoted = await db.has_asset(task["project"], task["asset_key"])
-            if not already_promoted:
+            if not already_promoted and batch_id is None:
                 asset_id = str(uuid.uuid4())
                 await db.finish_task_success(
                     task_id=int(task["id"]),
@@ -589,6 +722,12 @@ async def root() -> FileResponse:
     return FileResponse(BASE_DIR / "static" / "index.html")
 
 
+@app.get("/cherry-pick")
+async def cherry_pick_page() -> FileResponse:
+    """Cherry-pick UI: 한 batch의 후보 N장을 빠르게 1장으로 줄이는 화면."""
+    return FileResponse(BASE_DIR / "static" / "cherry-pick.html")
+
+
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
     """기본 헬스체크."""
@@ -628,6 +767,43 @@ async def gc_run() -> dict[str, Any]:
         message = f"{exc.__class__.__name__}: {exc}"
         _record_gc_run(None, message)
         raise HTTPException(status_code=500, detail=message) from exc
+
+
+@app.get("/api/sd/catalog/models")
+async def sd_catalog_models() -> dict[str, Any]:
+    """A1111 모델 목록 + ``config/sd_catalog.yml`` 메타데이터 병합 반환.
+
+    SD 서버 미연결 시 503, YAML 누락 시 메타데이터 비어있는 채로 200을 반환한다.
+    """
+    try:
+        sd_models = await sd_client.list_models()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"SD 모델 목록 조회 실패: {exc}") from exc
+    catalog = load_catalog_yaml(CATALOG_YAML_PATH)
+    merged = merge_models(sd_models, catalog)
+    return {
+        "count": len(merged),
+        "items": merged,
+        "catalog_path": str(CATALOG_YAML_PATH),
+        "catalog_present": CATALOG_YAML_PATH.exists(),
+    }
+
+
+@app.get("/api/sd/catalog/loras")
+async def sd_catalog_loras() -> dict[str, Any]:
+    """A1111 LoRA 목록 + ``config/sd_catalog.yml`` 메타데이터 병합 반환."""
+    try:
+        sd_loras = await sd_client.list_loras()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"SD LoRA 목록 조회 실패: {exc}") from exc
+    catalog = load_catalog_yaml(CATALOG_YAML_PATH)
+    merged = merge_loras(sd_loras, catalog)
+    return {
+        "count": len(merged),
+        "items": merged,
+        "catalog_path": str(CATALOG_YAML_PATH),
+        "catalog_present": CATALOG_YAML_PATH.exists(),
+    }
 
 
 @app.get("/api/projects")
@@ -725,6 +901,348 @@ async def generate_batch(request: BatchGenerateRequest) -> dict[str, Any]:
     await db.mark_job_running(job_id)
     await event_broker.publish({"type": "batch_job_created", "job_id": job_id, "task_count": len(tasks)})
     return {"job_id": job_id, "project": project, "task_count": len(tasks)}
+
+
+async def _enqueue_design_batch(spec: DesignBatchRequest) -> dict[str, Any]:
+    """``POST /api/batches`` 와 ``POST /api/mcp/design_asset`` 의 공통 로직.
+
+    batch_id를 발급하고 expand된 task들을 generation_tasks에 enqueue한다.
+    예상 ETA는 task당 6초의 거친 추정치이다."""
+    _ensure_disk_space_for_enqueue()
+    try:
+        tasks = expand_design_batch(spec)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not tasks:
+        raise HTTPException(status_code=400, detail="expand 결과가 비어있습니다. spec을 확인하세요.")
+
+    batch_id = f"btc_{uuid.uuid4().hex[:16]}"
+    job_id = str(uuid.uuid4())
+    await db.create_job(
+        job_id=job_id,
+        job_type="design_batch",
+        payload={
+            "batch_id": batch_id,
+            "asset_key": spec.asset_key,
+            "project": spec.project,
+            "expanded_count": len(tasks),
+        },
+    )
+    for task in tasks:
+        await db.enqueue_generation_task(
+            {"job_id": job_id, "batch_id": batch_id, **task}
+        )
+    await db.mark_job_running(job_id)
+    await event_broker.publish(
+        {
+            "type": "design_batch_created",
+            "batch_id": batch_id,
+            "job_id": job_id,
+            "asset_key": spec.asset_key,
+            "expanded_count": len(tasks),
+        }
+    )
+    return {
+        "batch_id": batch_id,
+        "job_id": job_id,
+        "expanded_count": len(tasks),
+        "estimated_eta_seconds": len(tasks) * 6,
+    }
+
+
+@app.post("/api/batches", dependencies=[Depends(require_api_key)])
+async def create_design_batch(spec: DesignBatchRequest) -> dict[str, Any]:
+    """에이전트가 보낸 곱집합 spec을 받아 batch로 enqueue.
+
+    응답: ``batch_id`` (cherry-pick UI가 이 값으로 후보를 묶어 보여줌),
+    ``expanded_count``, 거친 ``estimated_eta_seconds``.
+    """
+    return await _enqueue_design_batch(spec)
+
+
+@app.post("/api/mcp/design_asset", dependencies=[Depends(require_api_key)])
+async def mcp_design_asset(spec: DesignBatchRequest) -> dict[str, Any]:
+    """MCP tool 친화 응답을 가진 batch enqueue.
+
+    HTTP와 동일 로직이지만 응답 본문은 MCP가 받기 좋은 ``content``/``isError`` 형식.
+    Cursor 등에서 MCP wrapper를 두면 이 엔드포인트로 호출해 친화적 텍스트 결과를
+    얻을 수 있다.
+    """
+    result = await _enqueue_design_batch(spec)
+    summary = (
+        f"batch_id={result['batch_id']} expanded={result['expanded_count']} "
+        f"asset={spec.asset_key} eta~{result['estimated_eta_seconds']}s"
+    )
+    return {
+        "isError": False,
+        "content": [{"type": "text", "text": summary}],
+        "structuredContent": result,
+    }
+
+
+@app.get("/api/batches")
+async def list_batches(
+    since: str | None = Query(default=None, description="ISO8601 UTC, 이 시각 이후 생성된 batch만"),
+    limit: int = Query(default=50, ge=1, le=500),
+) -> dict[str, Any]:
+    """최근 design batch 목록 (cherry-pick UI 진입점).
+
+    각 항목: batch_id, asset_key, project, total/done/failed/active task 수,
+    candidate_total, rejected_count, first_created_at, last_updated_at.
+    """
+    rows = await db.list_recent_batches(since=since, limit=limit)
+    return {"count": len(rows), "items": rows}
+
+
+@app.get("/api/batches/{batch_id}/candidates")
+async def list_batch_candidates(batch_id: str) -> dict[str, Any]:
+    """한 batch에 속한 모든 후보 (cherry-pick UI 본 화면).
+
+    rejected가 뒤로 정렬된다. 각 항목은 메타데이터(LoRA spec, seed, model 등)와
+    이미지 URL을 포함한다."""
+    rows = await db.list_batch_candidates(batch_id)
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        items.append(
+            {
+                **row,
+                "image_url": (
+                    "/api/asset-candidates/image?"
+                    + f"project={row['project']}&asset_key={row['asset_key']}"
+                    + f"&job_id={row['job_id']}&slot_index={int(row['slot_index'])}"
+                ),
+            }
+        )
+    return {"batch_id": batch_id, "count": len(items), "items": items}
+
+
+@app.post(
+    "/api/batches/{batch_id}/candidates/{candidate_id}/reject",
+    dependencies=[Depends(require_api_key)],
+)
+async def reject_batch_candidate(batch_id: str, candidate_id: int) -> dict[str, Any]:
+    """후보를 reject 마킹 (GC 우선 대상). 디스크 파일은 즉시 지우지 않는다."""
+    candidate = await db.get_candidate_by_id(candidate_id)
+    if candidate is None or candidate.get("batch_id") != batch_id:
+        raise HTTPException(status_code=404, detail="후보를 찾을 수 없습니다.")
+    ok = await db.reject_candidate(candidate_id)
+    if not ok:
+        raise HTTPException(status_code=500, detail="reject 처리 실패")
+    await event_broker.publish(
+        {
+            "type": "candidate_rejected",
+            "batch_id": batch_id,
+            "candidate_id": candidate_id,
+        }
+    )
+    return {"ok": True, "candidate_id": candidate_id, "is_rejected": True}
+
+
+@app.post(
+    "/api/batches/{batch_id}/candidates/{candidate_id}/unreject",
+    dependencies=[Depends(require_api_key)],
+)
+async def unreject_batch_candidate(batch_id: str, candidate_id: int) -> dict[str, Any]:
+    """reject 마킹을 되돌린다 (cherry-pick UI의 5초 undo toast 용)."""
+    candidate = await db.get_candidate_by_id(candidate_id)
+    if candidate is None or candidate.get("batch_id") != batch_id:
+        raise HTTPException(status_code=404, detail="후보를 찾을 수 없습니다.")
+    ok = await db.unreject_candidate(candidate_id)
+    if not ok:
+        raise HTTPException(status_code=500, detail="unreject 처리 실패")
+    await event_broker.publish(
+        {
+            "type": "candidate_unrejected",
+            "batch_id": batch_id,
+            "candidate_id": candidate_id,
+        }
+    )
+    return {"ok": True, "candidate_id": candidate_id, "is_rejected": False}
+
+
+@app.get("/api/cherry-pick/queue")
+async def get_cherry_pick_queue(
+    since: str | None = Query(default=None, description="ISO8601 UTC. 미지정 시 오늘 KST 00:00."),
+    limit: int = Query(default=200, ge=1, le=500),
+) -> dict[str, Any]:
+    """오늘의 cherry-pick 큐 (헤더 표시용).
+
+    - 각 batch: ``batch_id``, ``project``, ``asset_key``, ``total``, ``remaining``,
+      ``approved`` (이미 메인 asset 픽이 끝났는지), ``first_created_at``.
+    - ``total_remaining``: 모든 batch의 ``remaining`` 합. (rejected 제외, 미픽 후보 수)
+    - ``total_batches`` / ``pending_batches``: 전체/미완료 batch 수.
+    """
+    if since is None:
+        kst = timezone(timedelta(hours=9))
+        today_kst_midnight = datetime.now(kst).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        since = today_kst_midnight.astimezone(timezone.utc).isoformat()
+    rows = await db.list_today_batches(since, limit=limit)
+    pending = [r for r in rows if not r.get("approved")]
+    total_remaining = sum(int(r.get("remaining", 0)) for r in pending)
+    return {
+        "since": since,
+        "total_batches": len(rows),
+        "pending_batches": len(pending),
+        "total_remaining": total_remaining,
+        "items": rows,
+    }
+
+
+@app.post(
+    "/api/assets/{asset_id}/undo-approve",
+    dependencies=[Depends(require_api_key)],
+)
+async def undo_approve(asset_id: str) -> dict[str, Any]:
+    """가장 최근 approve를 되돌린다 (cherry-pick UI의 5초 undo toast 용).
+
+    - 이전 history가 있으면: 해당 history를 primary로 복원하고 history 행 삭제.
+    - history가 없으면 (이번 approve로 신규 생성된 asset): asset 행 자체를 삭제.
+    - 이번 approve가 디스크에 복사한 새 primary 파일은 삭제한다 (history image_path는 보존).
+    """
+    asset = await db.get_asset(asset_id)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="에셋을 찾을 수 없습니다.")
+
+    primary_path_str = asset.get("image_path")
+    history = await db.get_latest_asset_history(asset_id)
+    restored_from = None
+    if history:
+        await db.restore_asset_from_history(asset_id, history)
+        await db.delete_asset_history(int(history["id"]))
+        restored_from = history.get("image_path")
+        new_status = "ok-restored"
+    else:
+        await db.delete_asset(asset_id)
+        new_status = "ok-deleted"
+
+    if primary_path_str and primary_path_str != restored_from:
+        try:
+            primary_path = _ensure_path_allowed(Path(primary_path_str))
+            if primary_path.exists():
+                primary_path.unlink()
+        except HTTPException:
+            pass
+        except OSError:
+            pass
+
+    await event_broker.publish(
+        {
+            "type": "asset_approve_undone",
+            "asset_id": asset_id,
+            "restored_from_history": restored_from is not None,
+        }
+    )
+    return {
+        "ok": True,
+        "asset_id": asset_id,
+        "result": new_status,
+        "restored_from": restored_from,
+    }
+
+
+@app.post("/api/assets/approve-from-candidate", dependencies=[Depends(require_api_key)])
+async def approve_from_candidate(body: ApproveFromCandidateRequest) -> dict[str, Any]:
+    """cherry-pick UI에서 1장 선택 → 메인 asset으로 승격.
+
+    - 기존 메인이 없으면 새 ``assets`` 행을 만든다.
+    - 기존 메인이 있으면 ``replace_asset_primary_image`` 로 교체하면서
+      이전 메인을 ``asset_history`` 에 스냅샷으로 남긴다.
+    - 후보 파일은 unique 경로로 복사해 history image_path가 디스크에 보존되게 한다.
+    """
+    candidate = await db.get_candidate_by_id(body.candidate_id)
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="후보를 찾을 수 없습니다.")
+
+    project = body.project or candidate["project"]
+    asset_key = body.asset_key or candidate["asset_key"]
+    category = body.category or "character"
+
+    src_path = _ensure_path_allowed(Path(candidate["image_path"]))
+    if not src_path.exists():
+        raise HTTPException(status_code=404, detail="후보 파일이 디스크에 없습니다.")
+
+    safe_project = _safe_segment(project)
+    safe_key = _safe_segment(asset_key)
+    safe_job = _safe_segment(str(candidate.get("job_id") or "nojob"))
+    dest_dir = DATA_DIR / "candidates" / safe_project
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / (
+        f"{safe_key}__primary__{safe_job}__cand{int(body.candidate_id)}.png"
+    )
+    shutil.copy2(src_path, dest)
+
+    meta: dict[str, Any] = {}
+    if candidate.get("metadata_json"):
+        try:
+            meta = json.loads(candidate["metadata_json"])
+        except (TypeError, json.JSONDecodeError):
+            meta = {}
+
+    validation = validate_asset(
+        image_path=dest,
+        expected_size=meta.get("expected_size"),
+        max_colors=int(meta.get("max_colors", 32)),
+    )
+
+    metadata_out = candidate.get("metadata_json") or json.dumps(meta, ensure_ascii=False)
+
+    existing = await db.get_asset_by_key(project, asset_key)
+    if existing:
+        asset_id = existing["id"]
+        ok = await db.replace_asset_primary_image(
+            asset_id,
+            image_path=str(dest),
+            width=validation.width,
+            height=validation.height,
+            color_count=validation.color_count,
+            has_alpha=validation.has_alpha,
+            validation_status="pass" if validation.passed else "fail",
+            validation_message=validation.message,
+            generation_seed=candidate.get("generation_seed"),
+            generation_model=candidate.get("generation_model"),
+            generation_prompt=candidate.get("generation_prompt"),
+            metadata_json=metadata_out,
+        )
+        if not ok:
+            raise HTTPException(status_code=500, detail="에셋 갱신에 실패했습니다.")
+    else:
+        await db.upsert_scanned_asset(
+            project=project,
+            asset_key=asset_key,
+            category=category,
+            image_path=str(dest),
+            width=validation.width,
+            height=validation.height,
+            color_count=validation.color_count,
+            has_alpha=validation.has_alpha,
+            validation_status="pass" if validation.passed else "fail",
+            validation_message=validation.message,
+        )
+        row = await db.get_asset_by_key(project, asset_key)
+        if not row:
+            raise HTTPException(status_code=500, detail="에셋 등록에 실패했습니다.")
+        asset_id = row["id"]
+    if body.set_status != "pending":
+        await db.update_asset_status(asset_id=asset_id, status=body.set_status)
+
+    await event_broker.publish(
+        {
+            "type": "asset_approved_from_candidate",
+            "asset_id": asset_id,
+            "candidate_id": body.candidate_id,
+            "batch_id": candidate.get("batch_id"),
+            "status": body.set_status,
+        }
+    )
+    return {
+        "ok": True,
+        "asset_id": asset_id,
+        "image_path": str(dest),
+        "validation_status": "pass" if validation.passed else "fail",
+        "status": body.set_status,
+    }
 
 
 @app.post("/api/projects/scan", dependencies=[Depends(require_api_key)])
