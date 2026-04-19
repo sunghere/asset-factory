@@ -1,0 +1,31 @@
+{
+  "project": "cat-raising",
+  "characters": [
+    {
+      "id": "ksh",
+      "character_prompt": "cute orange tabby cat, pixel art sprite",
+      "stages": [
+        {
+          "stage": "baby",
+          "output_size": 64,
+          "actions": ["idle", "eat", "sleep"]
+        }
+      ]
+    }
+  ],
+  "ui_assets": [
+    {
+      "id": "btn_feed",
+      "prompt_hint": "food bowl icon",
+      "size": 32
+    }
+  ],
+  "generation_config": {
+    "base_prompt": "pixel art, game sprite, transparent background",
+    "negative_prompt": "blurry, realistic, 3d render",
+    "steps": 20,
+    "cfg": 7,
+    "sampler": "DPM++ 2M",
+    "max_colors": 32
+  }
+}
