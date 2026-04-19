@@ -233,11 +233,19 @@ asset-factory/
 ## 운영 메모
 
 - **API Key**: `.env`의 `API_KEY`가 있으면 변경 계열에 필수, 없으면 모두 공개. SSE(`/api/events`)는 현재 인증 없이 열려 있습니다.
-- **GC**: 서비스 시작 후 5초 뒤부터 주기 실행. 선택된 후보도 GC 대상에 포함되므로, 보관 정책을 길게 잡거나 따로 백업하세요.
+- **GC**: 서비스 시작 후 5초 뒤부터 주기 실행. 선택된 후보도 GC 대상에 포함되므로, 보관 정책을 길게 잡거나 따로 백업하세요. `GET /api/system/gc/status`로 마지막 실행 결과(`deleted_files`, `freed_bytes`, `scanned_files`, `last_run_at`, `last_error`, `run_count`)를 확인하고, 운영 디버깅 시 `POST /api/system/gc/run`으로 즉시 1회 실행할 수 있습니다(`API_KEY` 보호).
 - **디스크 여유**: `MIN_FREE_DISK_MB` 미만이면 생성/내보내기에서 `RuntimeError → 500/507`로 응답합니다.
 - **SD 실패 분류**: `SDError.code`가 `timeout`, `oom`, `unreachable`, `sd_server_error`, `sd_client_error` 중 하나로 노출되어 `task.last_error`에 기록됩니다.
+- **재시도 백오프**: 재시도 가능한 SD 오류는 task-level 지수 백오프(2^n + 25% 지터, `TASK_BACKOFF_BASE_SEC`/`TASK_BACKOFF_MAX_SEC`로 조정)로 다음 시도가 예약되며, `oom`/`sd_client_error` 같은 비복구 오류는 즉시 `failed`로 처리됩니다. 워커는 다음 due 시각까지(최대 2초) 잠들어 폴링 비용을 줄입니다.
+- **SSE keep-alive**: `/api/events`는 idle 상태에서 `SSE_KEEPALIVE_SEC`(기본 15초)마다 `: keep-alive` 코멘트 프레임을 보내고 `X-Accel-Buffering: no` 헤더로 프록시 버퍼링을 차단합니다.
 - **로컬 모델 변경**: 단일/스펙 요청에서 `model_name`을 보내면 `override_settings.sd_model_checkpoint`로 SD에 전달.
 - **재현성**: 재생성 시 기존 에셋의 `metadata_json`을 그대로 사용하므로, 동일 프롬프트/스텝/CFG/샘플러로 다시 만들 수 있습니다.
+
+---
+
+## 보안 (Path 정화 / CodeQL 운영 가이드)
+
+사용자 입력에서 유래한 모든 파일 시스템 경로(스캔 루트, DB의 `image_path`, 후보 슬롯 쿼리, export 출력 디렉토리)는 [`server._ensure_path_allowed`](server.py)를 통해 **허용 루트 기반 정화(sanitizer)** 를 거친 뒤 사용합니다. 허용 루트는 기본값(`DATA_DIR`, `~/workspace/assets`)에 환경변수 `ASSET_FACTORY_ALLOWED_ROOTS`(콜론 구분)로 추가할 수 있고, 모든 file-serving / copy 동작은 정화 함수의 *반환 값*(`resolved`)을 사용해 path traversal을 차단합니다. 경로 세그먼트는 `_safe_segment`로 `/`, `\`, `..`을 제거합니다. CodeQL `py/path-injection` 알람이 이 함수 이후의 데이터 흐름에서 잔존하는 경우는 사용자 정의 sanitizer를 정적 분석이 인식하지 못한 false positive로 분류하고, GitHub Security 탭에서 "Won't fix"로 정리합니다. 새로 추가하는 엔드포인트는 반드시 (a) 입력 경로에 `_ensure_path_allowed`를 호출하고 (b) 반환된 `Path` 객체만 file open / copy / serve에 사용해야 합니다.
 
 ---
 
