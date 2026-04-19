@@ -1542,6 +1542,34 @@ async def regenerate_asset(asset_id: str) -> dict[str, str]:
     return {"job_id": job_id}
 
 
+@app.post("/api/validate/all", dependencies=[Depends(require_api_key)])
+async def validate_all_assets(project: str | None = Query(default=None)) -> dict[str, Any]:
+    """전체 에셋 재검증.
+
+    NOTE: 반드시 ``/api/validate/{asset_id}`` 보다 먼저 선언되어야 한다. FastAPI
+    는 라우트를 선언 순서대로 매칭하므로, 순서가 뒤바뀌면 ``all`` 이 ``asset_id``
+    로 빠져 404 가 난다 (실제로 발생했던 버그).
+    """
+    assets = await db.list_assets(project=project)
+    checked = 0
+    failed = 0
+    for asset in assets:
+        result = validate_asset(image_path=Path(asset["image_path"]))
+        await db.update_asset_validation(
+            asset["id"],
+            width=result.width,
+            height=result.height,
+            color_count=result.color_count,
+            has_alpha=result.has_alpha,
+            validation_status="pass" if result.passed else "fail",
+            validation_message=result.message,
+        )
+        if not result.passed:
+            failed += 1
+        checked += 1
+    return {"checked": checked, "failed": failed, "project": project}
+
+
 @app.post("/api/validate/{asset_id}", dependencies=[Depends(require_api_key)])
 async def validate_asset_endpoint(asset_id: str) -> dict[str, Any]:
     """단일 에셋 재검증."""
@@ -1567,29 +1595,6 @@ async def validate_asset_endpoint(asset_id: str) -> dict[str, Any]:
         "color_count": result.color_count,
         "has_alpha": result.has_alpha,
     }
-
-
-@app.post("/api/validate/all", dependencies=[Depends(require_api_key)])
-async def validate_all_assets(project: str | None = Query(default=None)) -> dict[str, Any]:
-    """전체 에셋 재검증."""
-    assets = await db.list_assets(project=project)
-    checked = 0
-    failed = 0
-    for asset in assets:
-        result = validate_asset(image_path=Path(asset["image_path"]))
-        await db.update_asset_validation(
-            asset["id"],
-            width=result.width,
-            height=result.height,
-            color_count=result.color_count,
-            has_alpha=result.has_alpha,
-            validation_status="pass" if result.passed else "fail",
-            validation_message=result.message,
-        )
-        if not result.passed:
-            failed += 1
-        checked += 1
-    return {"checked": checked, "failed": failed, "project": project}
 
 
 @app.post("/api/batch/revalidate-failed", dependencies=[Depends(require_api_key)])
