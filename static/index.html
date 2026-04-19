@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Asset Factory</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <h1>Asset Factory</h1>
+        <p>생성 → 검증 → 리뷰 워크플로우</p>
+    </header>
+
+    <section class="panel">
+        <h2>API 설정</h2>
+        <div class="row">
+            <label for="api-key">API Key</label>
+            <input id="api-key" type="password" placeholder="없으면 비워두세요">
+            <button id="save-api-key">저장</button>
+            <button id="check-sd">SD 상태 확인</button>
+            <span id="sd-status"></span>
+        </div>
+    </section>
+
+    <section class="panel">
+        <h2>단일 생성</h2>
+        <form id="generate-form" class="form-grid">
+            <input name="project" placeholder="project" value="cat-raising" required>
+            <input name="asset_key" placeholder="asset_key (예: ksh_baby_idle)" required>
+            <input name="category" placeholder="category" value="character">
+            <input name="prompt" placeholder="prompt" required>
+            <button type="submit">생성 시작</button>
+        </form>
+        <p id="generate-result"></p>
+    </section>
+
+    <section class="panel">
+        <h2>배치 생성 (Spec)</h2>
+        <div class="row">
+            <select id="spec-select"></select>
+            <button id="refresh-specs">Spec 목록 새로고침</button>
+            <button id="generate-batch">배치 생성 시작</button>
+        </div>
+        <p id="batch-result"></p>
+    </section>
+
+    <section class="panel">
+        <h2>스캔 / 내보내기</h2>
+        <div class="row">
+            <input id="scan-project" placeholder="project" value="cat-raising">
+            <input id="scan-root" placeholder="scan root path (예: /Users/.../assets)">
+            <button id="run-scan">디렉토리 스캔</button>
+        </div>
+        <p id="scan-result"></p>
+        <div class="row" style="margin-top:8px;">
+            <input id="export-project" placeholder="project (비우면 전체)">
+            <input id="export-dir" placeholder="export dir (기본: ~/workspace/assets)">
+            <label for="save-manifest">manifest 저장</label>
+            <input id="save-manifest" type="checkbox" checked>
+            <button id="run-export">승인본 내보내기</button>
+        </div>
+        <p id="export-result"></p>
+    </section>
+
+    <section class="panel">
+        <div class="row between">
+            <h2>요약 대시보드</h2>
+            <button id="refresh-summary">요약 새로고침</button>
+        </div>
+        <div id="summary-cards" class="summary-cards"></div>
+        <div id="summary-by-category" class="summary-list"></div>
+    </section>
+
+    <section class="panel">
+        <div class="row between">
+            <h2>최근 작업 타임라인</h2>
+            <button id="refresh-jobs">작업 새로고침</button>
+        </div>
+        <div id="recent-jobs" class="summary-list"></div>
+    </section>
+
+    <section class="panel">
+        <div class="row between">
+            <h2>에셋 갤러리</h2>
+            <div class="row">
+                <input id="filter-project" placeholder="project 필터">
+                <select id="filter-status">
+                    <option value="">전체 승인 상태</option>
+                    <option value="pending">pending</option>
+                    <option value="approved">approved</option>
+                    <option value="rejected">rejected</option>
+                </select>
+                <select id="filter-category">
+                    <option value="">전체 카테고리</option>
+                    <option value="character">character</option>
+                    <option value="ui">ui</option>
+                    <option value="background">background</option>
+                    <option value="item">item</option>
+                    <option value="sprite">sprite</option>
+                </select>
+                <select id="filter-validation">
+                    <option value="">전체 검증</option>
+                    <option value="pass">검증 PASS</option>
+                    <option value="fail">검증 FAIL</option>
+                </select>
+                <button id="refresh-assets">새로고침</button>
+            </div>
+        </div>
+        <div class="row" style="margin-top:8px; gap:10px;">
+            <button id="batch-revalidate-fail" type="button">FAIL 일괄 재검증</button>
+            <button id="batch-regenerate-fail" type="button">FAIL 일괄 재생성</button>
+        </div>
+        <div id="detail-panel" class="detail-panel hidden">
+            <h3>선택 에셋 상세</h3>
+            <div id="detail-meta" class="detail-meta"></div>
+            <div class="row between" style="margin-top:8px;">
+                <h4>이력</h4>
+                <button type="button" id="close-detail">닫기</button>
+            </div>
+            <div id="detail-history" class="detail-history"></div>
+            <h4>후보 슬롯</h4>
+            <p class="hint" id="detail-candidates-hint">배치 후보가 있으면 아래에서 슬롯을 고릅니다.</p>
+            <div id="detail-candidates" class="detail-candidates"></div>
+        </div>
+        <div id="assets-grid" class="assets-grid"></div>
+    </section>
+
+    <section class="panel">
+        <h2>작업 상태</h2>
+        <div class="row">
+            <input id="job-id-input" placeholder="job id 입력">
+            <button id="check-job">조회</button>
+        </div>
+        <pre id="job-result"></pre>
+    </section>
+
+    <script src="app.js"></script>
+</body>
+</html>
