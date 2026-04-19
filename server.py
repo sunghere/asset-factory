@@ -84,6 +84,11 @@ def _ensure_path_allowed(target: Path) -> Path:
     return resolved
 
 
+def _safe_segment(value: str) -> str:
+    """파일 경로 세그먼트 안전화 (경로 구분자/상위 디렉토리 표기 제거)."""
+    return value.replace("/", "_").replace("\\", "_").replace("..", "_")
+
+
 class GenerateRequest(BaseModel):
     """단일 생성 요청."""
 
@@ -649,16 +654,17 @@ async def scan_project_assets(request: ScanRequest) -> dict[str, Any]:
 
     inserted = 0
     for item in scanned:
-        image_path = Path(item["image_path"])
-        # 스캐너가 반환한 경로도 한 번 더 검증한다(심볼릭 링크 방어).
-        if not _is_path_within_allowed(image_path):
+        # 스캐너가 반환한 경로도 한 번 더 sanitizer를 거친다(심볼릭 링크 방어).
+        try:
+            safe_image_path = _ensure_path_allowed(Path(item["image_path"]))
+        except HTTPException:
             continue
-        result = validate_asset(image_path=image_path, expected_size=None, max_colors=request.max_colors)
+        result = validate_asset(image_path=safe_image_path, expected_size=None, max_colors=request.max_colors)
         await db.upsert_scanned_asset(
             project=request.project,
             asset_key=item["asset_key"],
             category=item["category"],
-            image_path=str(image_path),
+            image_path=str(safe_image_path),
             width=result.width,
             height=result.height,
             color_count=result.color_count,
@@ -737,11 +743,10 @@ async def get_asset_image(asset_id: str) -> FileResponse:
     asset = await db.get_asset(asset_id)
     if asset is None:
         raise HTTPException(status_code=404, detail="에셋을 찾을 수 없습니다.")
-    image_path = Path(asset["image_path"])
-    if not image_path.exists():
+    safe_path = _ensure_path_allowed(Path(asset["image_path"]))
+    if not safe_path.exists():
         raise HTTPException(status_code=404, detail="이미지 파일이 존재하지 않습니다.")
-    _ensure_path_allowed(image_path)
-    return FileResponse(image_path)
+    return FileResponse(safe_path)
 
 
 @app.get("/api/assets/{asset_id}/history")
@@ -777,11 +782,10 @@ async def get_candidate_image_file(
     pick = next((r for r in rows if int(r["slot_index"]) == slot_index), None)
     if pick is None:
         raise HTTPException(status_code=404, detail="후보를 찾을 수 없습니다.")
-    path = Path(pick["image_path"])
-    if not path.exists():
+    safe_path = _ensure_path_allowed(Path(pick["image_path"]))
+    if not safe_path.exists():
         raise HTTPException(status_code=404, detail="후보 파일이 없습니다.")
-    _ensure_path_allowed(path)
-    return FileResponse(path)
+    return FileResponse(safe_path)
 
 
 @app.post("/api/assets/{asset_id}/select-candidate", dependencies=[Depends(require_api_key)])
@@ -794,20 +798,19 @@ async def select_asset_candidate(asset_id: str, body: SelectCandidateRequest) ->
     pick = next((r for r in rows if int(r["slot_index"]) == body.slot_index), None)
     if pick is None:
         raise HTTPException(status_code=404, detail="후보를 찾을 수 없습니다.")
-    src = Path(pick["image_path"])
-    if not src.exists():
+    safe_src = _ensure_path_allowed(Path(pick["image_path"]))
+    if not safe_src.exists():
         raise HTTPException(status_code=404, detail="후보 파일이 없습니다.")
-    _ensure_path_allowed(src)
 
     # 이전 메인 이미지를 덮어쓰지 않도록 새 unique 경로에 복사한다.
     # 이렇게 하면 asset_history에 기록된 기존 image_path가 디스크에 그대로 보존된다.
-    safe_project = asset["project"].replace("/", "_").replace("\\", "_").replace("..", "_")
-    safe_key = asset["asset_key"].replace("/", "_").replace("\\", "_").replace("..", "_")
-    safe_job = body.job_id.replace("/", "_").replace("\\", "_").replace("..", "_")
+    safe_project = _safe_segment(asset["project"])
+    safe_key = _safe_segment(asset["asset_key"])
+    safe_job = _safe_segment(body.job_id)
     dest_dir = DATA_DIR / "candidates" / safe_project
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / f"{safe_key}__primary__{safe_job}__slot{body.slot_index}.png"
-    shutil.copy2(src, dest)
+    shutil.copy2(safe_src, dest)
 
     meta: dict[str, Any] = {}
     if pick.get("metadata_json"):
@@ -1080,20 +1083,25 @@ async def export_assets(request: ExportRequest) -> dict[str, Any]:
     if not approved:
         return {"exported_count": 0, "output_dir": request.output_dir}
 
-    output_root = Path(request.output_dir).expanduser().resolve()
-    output_root.mkdir(parents=True, exist_ok=True)
+    # 사용자 입력 output_dir을 allowlist 내부로 제한한다(없는 디렉토리는 미리 만든다).
+    raw_root = Path(request.output_dir).expanduser()
+    raw_root.mkdir(parents=True, exist_ok=True)
+    output_root = _ensure_path_allowed(raw_root)
     try:
         _check_disk_space(output_root)
     except RuntimeError as exc:
         raise HTTPException(status_code=507, detail=str(exc)) from exc
     exported_count = 0
     for asset in approved:
-        project = asset["project"]
-        category = asset["category"]
+        project = _safe_segment(asset["project"])
+        category = _safe_segment(asset["category"])
+        asset_key = _safe_segment(asset["asset_key"])
+        # 정제된 세그먼트만 사용 → 결과 경로는 항상 output_root 하위에 머문다.
         target_dir = output_root / project / category
         target_dir.mkdir(parents=True, exist_ok=True)
-        target_path = target_dir / f"{asset['asset_key']}.png"
-        shutil.copy2(asset["image_path"], target_path)
+        target_path = target_dir / f"{asset_key}.png"
+        src_image = _ensure_path_allowed(Path(asset["image_path"]))
+        shutil.copy2(src_image, target_path)
         exported_count += 1
 
     manifest_path: str | None = None

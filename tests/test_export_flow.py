@@ -54,6 +54,8 @@ def test_export_copies_only_approved_assets_and_writes_manifest(tmp_path: Path, 
 
         monkeypatch.setattr(server, "db", db)
         monkeypatch.setattr(server, "event_broker", _DummyEventBroker())
+        # tmp_path를 path allowlist에 추가한다.
+        monkeypatch.setenv("ASSET_FACTORY_ALLOWED_ROOTS", str(tmp_path))
 
         output_dir = tmp_path / "exported"
         result = await server.export_assets(
