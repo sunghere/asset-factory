@@ -1282,6 +1282,17 @@ async def scan_project_assets(request: ScanRequest) -> dict[str, Any]:
     return {"project": request.project, "scanned_count": inserted}
 
 
+@app.get("/api/jobs/recent")
+async def recent_jobs(limit: int = Query(default=10, ge=1, le=100)) -> list[dict[str, Any]]:
+    """최근 작업 타임라인.
+
+    NOTE: ``/api/jobs/recent`` 는 반드시 ``/api/jobs/{job_id}`` 보다 먼저 선언되어야
+    한다. FastAPI 는 라우트를 선언 순서대로 매칭하므로, 순서가 뒤바뀌면 ``recent``
+    가 ``job_id`` 로 빠져 404 가 난다 (실제로 발생했던 버그).
+    """
+    return await db.list_recent_jobs(limit=limit)
+
+
 @app.get("/api/jobs/{job_id}")
 async def get_job(job_id: str) -> dict[str, Any]:
     """작업 상태 조회."""
@@ -1331,12 +1342,6 @@ async def get_asset_detail(asset_id: str) -> dict[str, Any]:
     if asset is None:
         raise HTTPException(status_code=404, detail="에셋을 찾을 수 없습니다.")
     return asset
-
-
-@app.get("/api/jobs/recent")
-async def recent_jobs(limit: int = Query(default=10, ge=1, le=100)) -> list[dict[str, Any]]:
-    """최근 작업 타임라인."""
-    return await db.list_recent_jobs(limit=limit)
 
 
 @app.get("/api/assets/{asset_id}/image")
