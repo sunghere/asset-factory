@@ -1128,6 +1128,12 @@ async def undo_approve(asset_id: str) -> dict[str, Any]:
         await db.delete_asset(asset_id)
         new_status = "ok-deleted"
 
+    # 이 approve가 candidate-기반(approve-from-candidate / select-candidate)이었다면
+    # 해당 candidate의 picked_at/picked_asset_id 마킹을 풀어서 batch가 다시
+    # cherry-pick 큐에 pending으로 돌아오게 한다. 풀지 않으면 batch가 영구히
+    # approved로 남아 큐에서 사라진 채 복구 안 됨.
+    await db.unmark_candidates_picked_for_asset(asset_id)
+
     if primary_path_str and primary_path_str != restored_from:
         try:
             primary_path = _ensure_path_allowed(Path(primary_path_str))
@@ -1249,7 +1255,8 @@ async def approve_from_candidate(body: ApproveFromCandidateRequest) -> dict[str,
 
     # batch 완료 추적: 이 batch에서 한 장 골랐다는 표시. inline 키 편집으로
     # asset_key가 달라져도 candidate.batch_id는 그대로라 원본 batch가 done.
-    await db.mark_candidate_picked(int(body.candidate_id))
+    # asset_id를 같이 박아둬서 undo-approve가 역추적해 풀 수 있게 한다.
+    await db.mark_candidate_picked(int(body.candidate_id), asset_id)
 
     await event_broker.publish(
         {
@@ -1479,7 +1486,7 @@ async def select_asset_candidate(asset_id: str, body: SelectCandidateRequest) ->
     )
     if not ok:
         raise HTTPException(status_code=500, detail="에셋 갱신에 실패했습니다.")
-    await db.mark_candidate_picked(int(pick["id"]))
+    await db.mark_candidate_picked(int(pick["id"]), asset_id)
     await event_broker.publish(
         {
             "type": "asset_candidate_selected",

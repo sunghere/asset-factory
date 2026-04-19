@@ -191,6 +191,7 @@ class Database:
                     batch_id TEXT,
                     is_rejected INTEGER NOT NULL DEFAULT 0,
                     picked_at TEXT,
+                    picked_asset_id TEXT,
                     created_at TEXT NOT NULL,
                     UNIQUE(project, asset_key, slot_index, job_id)
                 )
@@ -209,8 +210,15 @@ class Database:
                 await conn.execute(
                     "ALTER TABLE asset_candidates ADD COLUMN picked_at TEXT"
                 )
+            if "picked_asset_id" not in cand_cols:
+                await conn.execute(
+                    "ALTER TABLE asset_candidates ADD COLUMN picked_asset_id TEXT"
+                )
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_candidates_batch ON asset_candidates(batch_id)"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_candidates_picked_asset ON asset_candidates(picked_asset_id)"
             )
             await conn.commit()
 
@@ -1006,21 +1014,42 @@ class Database:
             await conn.commit()
             return cursor.rowcount > 0
 
-    async def mark_candidate_picked(self, candidate_id: int) -> bool:
-        """이 후보가 메인 asset으로 승격됐다고 표시한다.
+    async def mark_candidate_picked(self, candidate_id: int, asset_id: str) -> bool:
+        """이 후보가 ``asset_id`` 메인 asset으로 승격됐다고 표시한다.
 
         ``list_today_batches`` 의 ``approved`` 판정은 "이 batch에서 한 장이라도
         picked되었나"로 결정된다 (단순히 ``(project, asset_key)`` 가 존재하는지
         보던 이전 휴리스틱은, 같은 키 재생성/inline 키 편집 시 잘못 판정함).
+        ``picked_asset_id`` 는 undo-approve가 어떤 candidate를 풀어야 하는지
+        역추적할 때 쓴다.
         """
         now = utc_now()
         async with aiosqlite.connect(self.db_path) as conn:
             cursor = await conn.execute(
-                "UPDATE asset_candidates SET picked_at=? WHERE id=?",
-                (now, candidate_id),
+                "UPDATE asset_candidates SET picked_at=?, picked_asset_id=? WHERE id=?",
+                (now, asset_id, candidate_id),
             )
             await conn.commit()
             return cursor.rowcount > 0
+
+    async def unmark_candidates_picked_for_asset(self, asset_id: str) -> int:
+        """``asset_id`` 와 묶인 모든 candidate의 picked 마킹을 해제한다.
+
+        ``/api/assets/{id}/undo-approve`` 가 호출. 풀지 않으면 batch가
+        영구히 ``approved`` 로 남아 cherry-pick 큐에서 사라진 채 복구 안 됨.
+        반환값: 영향받은 행 수 (0이면 해당 asset이 candidate-기반 승인이
+        아니었거나 이미 풀린 상태)."""
+        async with aiosqlite.connect(self.db_path) as conn:
+            cursor = await conn.execute(
+                """
+                UPDATE asset_candidates
+                SET picked_at=NULL, picked_asset_id=NULL
+                WHERE picked_asset_id=?
+                """,
+                (asset_id,),
+            )
+            await conn.commit()
+            return int(cursor.rowcount)
 
     async def batch_has_picked_candidate(self, batch_id: str) -> bool:
         """``batch_id`` 의 후보 중 한 장이라도 ``picked_at IS NOT NULL`` 이면 True."""

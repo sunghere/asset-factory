@@ -172,7 +172,7 @@ def test_queue_marks_approved_only_when_candidate_picked(isolated) -> None:
     )
 
     # 한 장 picked 처리 → 같은 batch가 approved로 바뀌어야 한다
-    asyncio.run(db.mark_candidate_picked(cand_ids[0]))
+    asyncio.run(db.mark_candidate_picked(cand_ids[0], "asset_dummy_q4"))
     with TestClient(server.app) as client:
         r = client.get("/api/cherry-pick/queue")
     body = r.json()
@@ -196,7 +196,7 @@ def test_queue_approved_after_inline_key_edit_still_marks_original_batch(isolate
 
     # 원본 키와 다른 키로 picked 처리한다 (실 코드는
     # /api/assets/approve-from-candidate 가 mark_candidate_picked 를 호출).
-    asyncio.run(db.mark_candidate_picked(cand_ids[0]))
+    asyncio.run(db.mark_candidate_picked(cand_ids[0], "asset_dummy_inline"))
 
     with TestClient(server.app) as client:
         r = client.get("/api/cherry-pick/queue")

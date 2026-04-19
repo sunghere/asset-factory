@@ -383,6 +383,42 @@ def test_first_time_approval_preserves_generation_provenance(isolated) -> None:
     asyncio.run(check())
 
 
+def test_undo_approve_clears_candidate_picked_marks(isolated) -> None:
+    """undo-approve 후에는 candidate.picked_at / picked_asset_id 가 풀려야 한다.
+
+    회귀 방지: codex 라운드 2 P1 — undo가 picked_at 을 안 풀면
+    ``list_today_batches`` 가 batch를 영구히 approved로 보고 cherry-pick
+    큐에서 사라진다.
+    """
+    db, data = isolated
+    ids = asyncio.run(_seed_candidates(db, data, "btc_undo_picked"))
+    with TestClient(server.app) as client:
+        approve = client.post(
+            "/api/assets/approve-from-candidate",
+            json={"candidate_id": ids[0], "asset_key": "k_undo", "project": "proj"},
+        )
+        assert approve.status_code == 200
+        asset_id = approve.json()["asset_id"]
+
+        async def picked() -> None:
+            c = await db.get_candidate_by_id(ids[0])
+            assert c is not None and c["picked_at"] is not None
+            assert c["picked_asset_id"] == asset_id
+            assert await db.batch_has_picked_candidate("btc_undo_picked")
+        asyncio.run(picked())
+
+        undo = client.post(f"/api/assets/{asset_id}/undo-approve")
+        assert undo.status_code == 200, undo.text
+
+    async def unpicked() -> None:
+        c = await db.get_candidate_by_id(ids[0])
+        assert c is not None
+        assert c["picked_at"] is None, "undo-approve가 picked_at을 안 풀었다"
+        assert c["picked_asset_id"] is None
+        assert not await db.batch_has_picked_candidate("btc_undo_picked")
+    asyncio.run(unpicked())
+
+
 def test_approve_marks_candidate_picked_at(isolated) -> None:
     """approve-from-candidate 가 candidate 행의 picked_at 을 채워야 한다.
 
@@ -407,6 +443,8 @@ def test_approve_marks_candidate_picked_at(isolated) -> None:
     async def after() -> None:
         c = await db.get_candidate_by_id(ids[1])
         assert c is not None and c["picked_at"] is not None
+        # picked_asset_id가 채워져야 undo-approve가 역추적 가능
+        assert c["picked_asset_id"], "picked_asset_id가 채워지지 않았다"
         # batch 단위 헬퍼도 True
         assert await db.batch_has_picked_candidate("btc_picked")
     asyncio.run(after())

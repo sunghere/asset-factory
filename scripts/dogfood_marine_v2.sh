@@ -38,14 +38,16 @@ read -r -d '' SPEC <<'JSON' || true
     "deliberate_v3"
   ],
   "loras": [
-    {"name": "marine_uniform_v2", "weight": 0.7},
-    {"name": "sad_face_v1", "weight": 0.5}
+    [
+      {"name": "marine_uniform_v2", "weight": 0.7},
+      {"name": "sad_face_v1", "weight": 0.5}
+    ]
   ],
   "seeds_per_combo": 25,
   "common": {
     "steps": 28,
-    "cfg_scale": 7.0,
-    "sampler_name": "DPM++ 2M Karras",
+    "cfg": 7.0,
+    "sampler": "DPM++ 2M Karras",
     "negative_prompt": "blurry, lowres, jpeg artifacts, watermark",
     "expected_size": 1024,
     "max_colors": 64

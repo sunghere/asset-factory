@@ -1002,6 +1002,10 @@
       const proposedKey = (keyInput && keyInput.value.trim()) || c.asset_key;
       const thumb = el(`cand-${c.id}`);
       if (thumb) thumb.classList.add("is-approving");
+      // batch가 들고 있는 진짜 category를 보낸다 (이전엔 "character"
+      // 하드코딩이었어서 item/background batch가 잘못 분류됐다).
+      const batchMeta = state.batches.find((b) => b.batch_id === state.currentBatchId);
+      const batchCategory = (batchMeta && batchMeta.category) || c.category || "character";
       let assetId;
       try {
         const data = await api("/api/assets/approve-from-candidate", {
@@ -1010,7 +1014,7 @@
             candidate_id: c.id,
             asset_key: proposedKey,
             project: c.project,
-            category: "character",
+            category: batchCategory,
             set_status: "approved",
           }),
         });
