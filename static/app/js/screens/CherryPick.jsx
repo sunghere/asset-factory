@@ -59,6 +59,9 @@ function CherryPick({ batchId }) {
   const gridRef = useRefCP(null);
   const sentinelRef = useRefCP(null);
   const toasts = window.useToasts();
+  const track = window.useAnalytics('cherrypick');
+  const sessionStartRef = useRefCP(null);
+  const sessionCountsRef = useRefCP({ approved: 0, rejected: 0 });
 
   // Settings 에서 저장한 'on'/'off' (또는 legacy 'true'/'false') 어느 쪽이든 해석.
   // af_auto_advance 기본값 on: Enter/x 후 자동으로 다음 후보로 이동.
@@ -73,6 +76,31 @@ function CherryPick({ batchId }) {
     setItems(list);
     setCursor((c) => Math.min(c, Math.max(0, list.length - 1)));
   }, [candidates.data]);
+
+  // Cherry-pick session bracket — opt-in analytics only.
+  // Emits:
+  //   session.open  {batchId, total}          on first candidates load
+  //   session.close {batchId, approved, rejected, duration_ms} on unmount
+  useEffectCP(() => {
+    if (!candidates.data) return undefined;
+    if (sessionStartRef.current != null) return undefined;
+    sessionStartRef.current = Date.now();
+    sessionCountsRef.current = { approved: 0, rejected: 0 };
+    track('session.open', { batchId, total: (candidates.data.items || []).length });
+    return () => {
+      // React StrictMode runs cleanup twice in dev; ensure we only fire once.
+      if (sessionStartRef.current == null) return;
+      const duration_ms = Date.now() - sessionStartRef.current;
+      track('session.close', {
+        batchId,
+        approved: sessionCountsRef.current.approved,
+        rejected: sessionCountsRef.current.rejected,
+        duration_ms,
+      });
+      sessionStartRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [candidates.data, batchId]);
 
   // SSE — candidate_added / rejected / unrejected 발생 시 목록을 부드럽게 재로드.
   window.useSSE((batch) => {
@@ -193,6 +221,8 @@ function CherryPick({ batchId }) {
     setStatusLocal(cur.id, 'rejected');
     try {
       await window.api.rejectCandidate(batchId, cur.id);
+      sessionCountsRef.current.rejected += 1;
+      track('pick', { verdict: 'reject', id: cur.id, cursor });
       const shortId = String(cur.id).slice(0, 8);
       toasts.push({
         kind: 'warning',
@@ -208,7 +238,7 @@ function CherryPick({ batchId }) {
       setStatusLocal(cur.id, prev);
       toasts.push({ kind: 'error', message: `반려 실패: ${err.message || err}` });
     }
-  }, [cur, batchId, setStatusLocal, toasts, autoAdvance, move]);
+  }, [cur, batchId, setStatusLocal, toasts, autoAdvance, move, track, cursor]);
 
   const toggleCompare = useCallbackCP(() => {
     if (!cur) return;
@@ -245,11 +275,13 @@ function CherryPick({ batchId }) {
         } : undefined,
       });
       setStatusLocal(cur.id, 'approved');
+      sessionCountsRef.current.approved += 1;
+      track('pick', { verdict: 'approve', id: cur.id, cursor, asset_key: assetKey });
       if (autoAdvance) move(1);
     } catch (err) {
       toasts.push({ kind: 'error', message: `확정 실패: ${err.message || err}` });
     }
-  }, [cur, meta, setStatusLocal, toasts, autoAdvance, move]);
+  }, [cur, meta, setStatusLocal, toasts, autoAdvance, move, track, cursor]);
 
   const toggleLoraFilterByIndex = useCallbackCP((idx) => {
     const lora = loraCatalog[idx - 1];

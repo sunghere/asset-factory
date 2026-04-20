@@ -5,6 +5,7 @@
      af_auto_advance      — 'on' | 'off'  — whether Enter/x advances to the next candidate
      af_keymap            — 'on' | 'off'  — global keyboard shortcuts in CherryPick
      af_motion            — 'full' | 'reduced' | 'none' — user-level motion preference
+     af_analytics         — 'on' | 'off'  — opt-in console.debug analytics (local-only)
    None of these are sent to the backend; we only use them to style the SPA. */
 
 const { useState, useEffect } = React;
@@ -15,6 +16,7 @@ const LS_KEYS = {
   autoAdvance: 'af_auto_advance',
   keymap: 'af_keymap',
   motion: 'af_motion',
+  analytics: 'af_analytics',
 };
 
 function mask(s) {
@@ -38,12 +40,14 @@ function Settings() {
   const [autoAdvance, setAutoAdvance] = useState(() => normalizeOnOff(window.localStorage.getItem(LS_KEYS.autoAdvance), 'on'));
   const [keymap, setKeymap] = useState(() => normalizeOnOff(window.localStorage.getItem(LS_KEYS.keymap), 'on'));
   const [motion, setMotion] = useState(() => window.localStorage.getItem(LS_KEYS.motion) || 'full');
+  const [analytics, setAnalytics] = useState(() => normalizeOnOff(window.localStorage.getItem(LS_KEYS.analytics), 'off'));
 
   // Debounced autosave for the simple toggles (API key saved explicitly).
   useEffect(() => { window.localStorage.setItem(LS_KEYS.gridCols, gridCols); }, [gridCols]);
   useEffect(() => { window.localStorage.setItem(LS_KEYS.autoAdvance, autoAdvance); }, [autoAdvance]);
   useEffect(() => { window.localStorage.setItem(LS_KEYS.keymap, keymap); }, [keymap]);
   useEffect(() => { window.localStorage.setItem(LS_KEYS.motion, motion); }, [motion]);
+  useEffect(() => { window.localStorage.setItem(LS_KEYS.analytics, analytics); }, [analytics]);
 
   function saveApiKey() {
     const v = apiKeyDraft.trim();
@@ -129,9 +133,17 @@ function Settings() {
                 <option value="none">none (모든 애니메이션 끄기)</option>
               </select>
             </label>
+            <label style={{ gridColumn: 'span 2' }}>
+              <span>analytics (opt-in · console.debug)</span>
+              <select className="input" value={analytics} onChange={(e) => setAnalytics(e.target.value)}>
+                <option value="off">off (기본 · 아무 것도 기록하지 않음)</option>
+                <option value="on">on (개발자 도구 콘솔에 af· 로그 출력)</option>
+              </select>
+            </label>
           </div>
           <p style={{ color: 'var(--text-faint)', fontSize: 11, marginTop: 10 }}>
-            자동 저장. CSS 변수는 다음 새로고침에 반영됩니다.
+            자동 저장. CSS 변수는 다음 새로고침에 반영됩니다. analytics 는
+            서버 전송 없이 <code>console.debug</code> 로만 남으므로 QA 용입니다.
           </p>
         </div>
 

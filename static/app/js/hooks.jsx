@@ -647,11 +647,40 @@ function PageToolbar({ left, right, info }) {
   );
 }
 
+// ─── useAnalytics ──────────────────────────────────────────────────
+// Opt-in analytics stub. No network, no storage side-effects — we just
+// emit console.debug lines when localStorage('af_analytics') === 'on'
+// so QA can peek at engagement signals (cherrypick session stats,
+// bulk action usage, …) without wiring a third-party SDK yet.
+//
+// Usage:
+//   const track = window.useAnalytics('cherrypick');
+//   track('session.open', { batchId, total: 40 });
+//   track('pick', { verdict: 'approve', slot: 0 });
+//
+// The returned function is stable for the component's lifetime.
+function useAnalytics(namespace = 'app') {
+  return useCallback((event, payload = {}) => {
+    let enabled = false;
+    try {
+      enabled = window.localStorage?.getItem('af_analytics') === 'on';
+    } catch { /* storage disabled — treat as off */ }
+    if (!enabled) return;
+    const stamp = new Date().toISOString().slice(11, 23);
+    // Keep the log line short; a single object on the end makes devtools
+    // click-to-expand cheap. No deep clone — payload is expected to be
+    // serialisable scalars.
+    // eslint-disable-next-line no-console
+    console.debug(`[af·${namespace}] ${stamp} ${event}`, payload);
+  }, [namespace]);
+}
+
 Object.assign(window, {
   useAsync,
   useInterval,
   useKeyboard,
   useSSE,
+  useAnalytics,
   ToastProvider,
   useToasts,
   ErrorBoundary,
