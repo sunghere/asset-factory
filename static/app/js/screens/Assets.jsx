@@ -125,12 +125,13 @@ function Assets() {
             <input type="radio" checked={!project} onChange={() => setProject('')}/>
             <span>전체</span>
           </label>
-          {(projects.data || []).map((p) => {
+          {(projects.data?.items || []).map((p) => {
             const id = typeof p === 'string' ? p : (p.id ?? p.name ?? String(p));
+            const label = typeof p === 'string' ? p : (p.name ?? p.id ?? String(p));
             return (
               <label key={id} className="row">
                 <input type="radio" checked={project === id} onChange={() => setProject(id)}/>
-                <span>{id}</span>
+                <span>{label}</span>
               </label>
             );
           })}

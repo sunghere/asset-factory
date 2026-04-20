@@ -287,6 +287,157 @@ function PageInfo({ title, text }) {
   );
 }
 
+// ─── Dialog ────────────────────────────────────────────────────────
+// 접근성 기본(focus trap, Escape 닫기, backdrop 클릭 닫기, role=dialog,
+// aria-modal, labelledby/describedby)을 한 번만 구현해두고 화면들이 가져다
+// 쓴다. 내부적으로 React portal 없이 DOM 에 고정 위치로 렌더링한다.
+//
+// props:
+//   open        : boolean
+//   onClose()   : 닫기 요청 (ESC / backdrop / ✕ 버튼)
+//   title       : string | ReactNode (h2 로 렌더)
+//   description : string | ReactNode (선택, subtitle)
+//   footer      : ReactNode (선택, 우하단 액션 row)
+//   size        : 'sm' | 'md' | 'lg' (기본 md = 520px)
+//   children    : 본문
+function Dialog({ open, onClose, title, description, footer, size = 'md', children }) {
+  const backdropRef = useRef(null);
+  const panelRef = useRef(null);
+  const lastActiveRef = useRef(null);
+  const titleId = useMemo(
+    () => `dlg-title-${Math.random().toString(36).slice(2, 8)}`,
+    []
+  );
+  const descId = useMemo(
+    () => `dlg-desc-${Math.random().toString(36).slice(2, 8)}`,
+    []
+  );
+
+  useEffect(() => {
+    if (!open) return undefined;
+    lastActiveRef.current = document.activeElement;
+
+    // 첫 포커싱 가능한 요소에 포커스 이동.
+    const t = setTimeout(() => {
+      const panel = panelRef.current;
+      if (!panel) return;
+      const focusable = panel.querySelector(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      );
+      (focusable || panel).focus();
+    }, 0);
+
+    function onKey(e) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onClose && onClose();
+        return;
+      }
+      if (e.key !== 'Tab') return;
+      const panel = panelRef.current;
+      if (!panel) return;
+      const nodes = panel.querySelectorAll(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      );
+      if (!nodes.length) return;
+      const first = nodes[0];
+      const last = nodes[nodes.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    }
+
+    document.addEventListener('keydown', onKey);
+    // body 스크롤 잠금(간단).
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
+    return () => {
+      clearTimeout(t);
+      document.removeEventListener('keydown', onKey);
+      document.body.style.overflow = prevOverflow;
+      const prev = lastActiveRef.current;
+      if (prev && prev.focus) prev.focus();
+    };
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  const widths = { sm: 360, md: 520, lg: 880 };
+  const width = widths[size] || widths.md;
+
+  return (
+    <div
+      ref={backdropRef}
+      className="dlg-backdrop"
+      onMouseDown={(e) => {
+        if (e.target === backdropRef.current) onClose && onClose();
+      }}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(10,12,16,0.62)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        zIndex: 1000,
+      }}
+    >
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={title ? titleId : undefined}
+        aria-describedby={description ? descId : undefined}
+        tabIndex={-1}
+        className="dlg-panel panel-card"
+        style={{
+          width,
+          maxWidth: 'calc(100vw - 32px)',
+          maxHeight: 'calc(100vh - 48px)',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 14,
+          padding: 20,
+        }}
+      >
+        {(title || onClose) && (
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+            <div style={{ flex: 1 }}>
+              {title && <h2 id={titleId} style={{ margin: 0, fontSize: 18 }}>{title}</h2>}
+              {description && (
+                <div
+                  id={descId}
+                  style={{ marginTop: 4, color: 'var(--text-faint)', fontSize: 13 }}
+                >{description}</div>
+              )}
+            </div>
+            {onClose && (
+              <button
+                type="button"
+                className="btn ghost"
+                onClick={onClose}
+                aria-label="닫기"
+                style={{ padding: '4px 10px' }}
+              >✕</button>
+            )}
+          </div>
+        )}
+        <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>{children}</div>
+        {footer && (
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+            {footer}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── PageToolbar ──────────────────────────────────────────────────
 // 일반 페이지 상단의 얇은 툴바. 큰 타이틀/디스크립션을 대체.
 // left: 카운트 chip 등, right: 액션 버튼 + PageInfo.
@@ -313,6 +464,7 @@ Object.assign(window, {
   EmptyState,
   Skeleton,
   Thumb,
+  Dialog,
   PageInfo,
   PageToolbar,
 });

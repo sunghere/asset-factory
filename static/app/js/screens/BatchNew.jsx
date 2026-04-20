@@ -154,11 +154,12 @@ function BatchNew() {
           <div className="form-grid">
             <label>
               <span>project</span>
-              {projects.data && projects.data.length > 0 ? (
+              {projects.data?.items?.length ? (
                 <select className="input" value={project} onChange={(e) => setProject(e.target.value)}>
-                  {projects.data.map((p) => {
+                  {projects.data.items.map((p) => {
                     const id = typeof p === 'string' ? p : (p.id ?? p.name ?? String(p));
-                    return <option key={id} value={id}>{id}</option>;
+                    const label = typeof p === 'string' ? p : (p.name ?? p.id ?? String(p));
+                    return <option key={id} value={id}>{label}</option>;
                   })}
                 </select>
               ) : (

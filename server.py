@@ -799,7 +799,30 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Asset Factory", version="0.1.0", lifespan=lifespan)
-app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+
+
+class _CachedStaticFiles(StaticFiles):
+    """``StaticFiles`` + short-TTL Cache-Control.
+
+    SPA 번들은 CDN 없이 /static 에서 바로 서빙되므로, 매 탐색마다 jsx 를
+    재다운로드하면 체감이 느리다. 그렇다고 immutable 로 두면 hot-reload 가
+    망가진다 → 1분 TTL + ``must-revalidate`` 로 타협한다.
+    """
+
+    async def get_response(self, path: str, scope):  # type: ignore[override]
+        response = await super().get_response(path, scope)
+        if response.status_code == 200:
+            response.headers.setdefault(
+                "Cache-Control", "public, max-age=60, must-revalidate"
+            )
+        return response
+
+
+app.mount(
+    "/static",
+    _CachedStaticFiles(directory=str(BASE_DIR / "static")),
+    name="static",
+)
 
 
 @app.get("/")
@@ -999,15 +1022,31 @@ async def sd_catalog_loras() -> dict[str, Any]:
 
 
 @app.get("/api/projects")
-async def list_projects() -> list[dict[str, str]]:
-    """specs 디렉토리의 프로젝트 스펙 목록."""
+async def list_projects() -> dict[str, Any]:
+    """specs 디렉토리의 프로젝트 스펙 목록.
+
+    v0.2 스펙 §4 의 list-endpoint 규약에 맞춰 ``{"items": [...]}`` 래퍼로
+    반환한다. 각 항목은 ``{id, name, path}``. ``name`` 은 spec.json 내부의
+    ``name`` / ``project`` 필드 → 파일명(stem) 순으로 폴백한다.
+    """
     specs_dir = BASE_DIR / "specs"
-    if not specs_dir.exists():
-        return []
-    results: list[dict[str, str]] = []
-    for file_path in sorted(specs_dir.glob("*.json")):
-        results.append({"id": file_path.stem, "path": str(file_path.relative_to(BASE_DIR))})
-    return results
+    items: list[dict[str, str]] = []
+    if specs_dir.exists():
+        for file_path in sorted(specs_dir.glob("*.json")):
+            display = file_path.stem
+            try:
+                data = json.loads(file_path.read_text(encoding="utf-8"))
+                display = str(data.get("name") or data.get("project") or file_path.stem)
+            except (json.JSONDecodeError, OSError):
+                pass
+            items.append(
+                {
+                    "id": file_path.stem,
+                    "name": display,
+                    "path": str(file_path.relative_to(BASE_DIR)),
+                }
+            )
+    return {"items": items}
 
 
 @app.get("/api/projects/{project_id}/spec")

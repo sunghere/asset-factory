@@ -114,10 +114,10 @@ function Regen() {
           <div className="form-grid">
             <label>
               <span>project</span>
-              {projects.data && projects.data.length > 0 ? (
+              {projects.data?.items?.length ? (
                 <select className="input" value={project} onChange={(e) => setProject(e.target.value)}>
-                  {projects.data.map((p) => (
-                    <option key={p.id || p.name || p} value={p.id || p.name || p}>{p.id || p.name || p}</option>
+                  {projects.data.items.map((p) => (
+                    <option key={p.id || p.name || p} value={p.id || p.name || p}>{p.name || p.id || p}</option>
                   ))}
                 </select>
               ) : (
