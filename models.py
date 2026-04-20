@@ -1097,6 +1097,130 @@ class Database:
             "spec": spec,
         }
 
+    async def system_stats(self) -> dict[str, Any]:
+        """System.jsx DB 블록용 row count / sqlite 파일 메타.
+
+        파일 크기/경로는 server.py 측에서 주입하고, 여기서는 순수 DB 쿼리만 한다.
+        """
+        out: dict[str, Any] = {}
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            for table in ("jobs", "generation_tasks", "asset_candidates", "assets"):
+                cur = await conn.execute(f"SELECT COUNT(*) AS n FROM {table}")
+                row = await cur.fetchone()
+                out[table] = int(row["n"] or 0) if row else 0
+            # Worker 가 현재 붙잡고 있을 수 있는 태스크 / 큐 깊이 등
+            cur = await conn.execute(
+                "SELECT COUNT(*) AS n FROM generation_tasks "
+                "WHERE status='queued' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)",
+                (utc_now(),),
+            )
+            row = await cur.fetchone()
+            out["queued_due"] = int(row["n"] or 0) if row else 0
+            cur = await conn.execute(
+                "SELECT COUNT(*) AS n FROM generation_tasks WHERE status='queued'"
+            )
+            row = await cur.fetchone()
+            out["queued_total"] = int(row["n"] or 0) if row else 0
+            cur = await conn.execute(
+                "SELECT COUNT(*) AS n FROM generation_tasks WHERE status='processing'"
+            )
+            row = await cur.fetchone()
+            out["processing"] = int(row["n"] or 0) if row else 0
+            cur = await conn.execute(
+                "SELECT COUNT(*) AS n FROM generation_tasks WHERE status='failed'"
+            )
+            row = await cur.fetchone()
+            out["failed"] = int(row["n"] or 0) if row else 0
+        return out
+
+    async def list_batch_tasks(self, batch_id: str) -> list[dict[str, Any]]:
+        """한 batch 의 ``generation_tasks`` 행을 UI 에서 필요한 컬럼만 반환한다.
+
+        BatchDetail Tasks 탭에서 `id/model/seed/status/attempts/last_error/
+        next_attempt_at/updated_at` 을 표로 그리기 위한 엔드포인트.
+        """
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cur = await conn.execute(
+                """
+                SELECT
+                    id,
+                    model_name,
+                    seed,
+                    status,
+                    retries,
+                    max_retries,
+                    last_error,
+                    next_attempt_at,
+                    created_at,
+                    updated_at
+                FROM generation_tasks
+                WHERE batch_id=?
+                ORDER BY
+                    CASE status
+                        WHEN 'failed' THEN 0
+                        WHEN 'processing' THEN 1
+                        WHEN 'queued' THEN 2
+                        WHEN 'done' THEN 3
+                        ELSE 4
+                    END,
+                    created_at ASC
+                """,
+                (batch_id,),
+            )
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def retry_failed_batch_tasks(self, batch_id: str) -> list[int]:
+        """해당 batch 에서 ``status='failed'`` 인 태스크를 큐로 되돌린다.
+
+        retry 카운터는 보존하되 ``status='queued'`` + ``next_attempt_at=now`` 로
+        놓아 워커가 다음 tick 에 곧바로 claim 하게 만든다. 되돌린 task id 리스트
+        반환.
+        """
+        now = utc_now()
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cur = await conn.execute(
+                "SELECT id, job_id FROM generation_tasks WHERE batch_id=? AND status='failed'",
+                (batch_id,),
+            )
+            rows = [dict(r) for r in await cur.fetchall()]
+            if not rows:
+                return []
+            ids = [int(r["id"]) for r in rows]
+            job_ids = list({r["job_id"] for r in rows if r.get("job_id")})
+            placeholders = ",".join("?" * len(ids))
+            await conn.execute(
+                f"""
+                UPDATE generation_tasks
+                SET status='queued',
+                    last_error=NULL,
+                    next_attempt_at=?,
+                    updated_at=?
+                WHERE id IN ({placeholders})
+                """,
+                (now, now, *ids),
+            )
+            # 연결된 jobs.failed_count 를 재계산해서 상태가 따라 오도록 한다.
+            for job_id in job_ids:
+                await conn.execute(
+                    """
+                    UPDATE jobs
+                    SET failed_count = (
+                        SELECT COUNT(*) FROM generation_tasks
+                        WHERE job_id=? AND status='failed'
+                    ),
+                    updated_at=?
+                    WHERE id=?
+                    """,
+                    (job_id, now, job_id),
+                )
+            await conn.commit()
+        for job_id in job_ids:
+            await self.refresh_job_status(job_id)
+        return ids
+
     async def get_candidate_by_id(self, candidate_id: int) -> dict[str, Any] | None:
         """후보 단건 조회 (id 기준)."""
         async with aiosqlite.connect(self.db_path) as conn:

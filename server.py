@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import random
+import re
 import shutil
 import os
 import uuid
@@ -15,14 +16,15 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
-from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from candidate_gc import run_gc_candidates
 from catalog import load_catalog_yaml, merge_loras, merge_models
 from generator import SDClient, SDError, save_candidate_slot_image, save_generated_image
+from lib import events as ev
 from models import Database
 from scanner import scan_directory
 from validator import validate_asset
@@ -253,6 +255,54 @@ api_key = os.getenv("API_KEY")
 worker_task: asyncio.Task[Any] | None = None
 gc_worker_task: asyncio.Task[Any] | None = None
 
+# System.jsx Worker 블록용 런타임 상태. 프로세스 수명 내에서만 의미 있음.
+_worker_state: dict[str, Any] = {
+    "last_heartbeat_at": None,  # ISO8601 UTC — 워커 루프가 한 번 돌 때마다 갱신
+    "current_task": None,  # 현재 claim 된 태스크 (id/batch_id/status)
+    "last_task_id": None,
+    "processed_count": 0,
+}
+
+
+def _worker_heartbeat(current_task: dict[str, Any] | None = None) -> None:
+    """generation_worker 루프에서 1 tick 마다 호출."""
+    _worker_state["last_heartbeat_at"] = datetime.now(timezone.utc).isoformat()
+    if current_task is not None:
+        _worker_state["current_task"] = {
+            "id": int(current_task["id"]),
+            "batch_id": current_task.get("batch_id"),
+            "asset_key": current_task.get("asset_key"),
+            "status": current_task.get("status"),
+        }
+        _worker_state["last_task_id"] = int(current_task["id"])
+    else:
+        _worker_state["current_task"] = None
+
+
+def _worker_tick_done() -> None:
+    """handle_task 가 끝나면 호출해 current_task 를 비우고 카운터 증가."""
+    _worker_state["current_task"] = None
+    _worker_state["processed_count"] = int(_worker_state.get("processed_count", 0)) + 1
+    _worker_state["last_heartbeat_at"] = datetime.now(timezone.utc).isoformat()
+
+
+# System.jsx Logs 블록용 in-memory ring buffer.
+# 파일 로그를 재해석 하기보다는, 서버 내부에서 발생한 error/warn 을 직접 수집한다.
+_LOG_RING_MAX = 500
+_log_ring: list[dict[str, Any]] = []
+
+
+def _push_log(level: str, message: str, *, context: dict[str, Any] | None = None) -> None:
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "level": level,
+        "message": message,
+        "context": context or {},
+    }
+    _log_ring.append(entry)
+    if len(_log_ring) > _LOG_RING_MAX:
+        del _log_ring[: len(_log_ring) - _LOG_RING_MAX]
+
 
 def _extract_tasks_from_spec(spec: dict[str, Any], project_override: str | None = None) -> tuple[str, list[dict[str, Any]]]:
     """스펙 JSON에서 생성 태스크 목록을 추출한다."""
@@ -479,12 +529,17 @@ async def generation_worker() -> None:
     잠들었다가 다시 시도하여 불필요한 폴링을 줄인다.
     """
     while True:
+        _worker_heartbeat(None)
         task = await db.claim_next_task()
         if task is None:
             wait = await db.soonest_due_seconds(default=1.0)
             await asyncio.sleep(min(2.0, max(0.05, wait)))
             continue
-        await handle_task(task)
+        _worker_heartbeat(task)
+        try:
+            await handle_task(task)
+        finally:
+            _worker_tick_done()
 
 
 async def handle_task(task: dict[str, Any]) -> None:
@@ -558,7 +613,7 @@ async def handle_task(task: dict[str, Any]) -> None:
         )
 
         if candidates_total > 1 and candidate_slot is not None:
-            await db.insert_asset_candidate(
+            candidate_id = await db.insert_asset_candidate(
                 project=task["project"],
                 asset_key=task["asset_key"],
                 slot_index=int(candidate_slot),
@@ -575,6 +630,16 @@ async def handle_task(task: dict[str, Any]) -> None:
                 metadata_json=metadata_json,
                 batch_id=batch_id,
             )
+            if batch_id is not None:
+                await event_broker.publish(
+                    {
+                        "type": ev.EVT_CANDIDATE_ADDED,
+                        "batch_id": batch_id,
+                        "candidate_id": int(candidate_id),
+                        "slot_index": int(candidate_slot),
+                        "validation_status": "pass" if validation.passed else "fail",
+                    }
+                )
             # design batch (batch_id != None) 는 사람이 cherry-pick UI에서 고를 때까지
             # primary로 승격하지 않는다. 기존 spec-batch 흐름(batch_id 없음)은 종전대로
             # 첫 성공 슬롯을 자동 승격한다.
@@ -633,7 +698,7 @@ async def handle_task(task: dict[str, Any]) -> None:
             )
         await event_broker.publish(
             {
-                "type": "task_done",
+                "type": ev.EVT_TASK_DONE,
                 "job_id": task["job_id"],
                 "asset_key": task["asset_key"],
                 "validation_status": "pass" if validation.passed else "fail",
@@ -651,9 +716,19 @@ async def handle_task(task: dict[str, Any]) -> None:
             force_fail=force_fail,
             next_attempt_at=next_attempt_at,
         )
+        _push_log(
+            "error",
+            f"task#{task.get('id')} {message}",
+            context={
+                "task_id": task.get("id"),
+                "batch_id": task.get("batch_id"),
+                "asset_key": task.get("asset_key"),
+                "retry": not force_fail,
+            },
+        )
         await event_broker.publish(
             {
-                "type": "task_error",
+                "type": ev.EVT_TASK_ERROR,
                 "job_id": task["job_id"],
                 "asset_key": task["asset_key"],
                 "error": message,
@@ -733,17 +808,24 @@ async def root() -> RedirectResponse:
     return RedirectResponse(url="/app/", status_code=302)
 
 
+# CodeQL: URL redirection from remote source (py/url-redirection).
+# ``batch_id`` 는 사용자 입력 쿼리이므로 그대로 redirect URL 에 끼우면
+# open redirect 가 된다. batch_id 가 우리 ID 포맷(영문/숫자/-/_ 1–64자)을
+#만족할 때만 deep-link 하고, 아니면 안전 기본 경로로 떨어뜨린다.
+_SAFE_BATCH_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
 @app.get("/cherry-pick")
 async def cherry_pick_redirect(batch_id: str | None = Query(default=None)) -> RedirectResponse:
     """옛 ``/cherry-pick`` 북마크 호환.
 
-    - ``/cherry-pick?batch_id=XYZ`` → ``/app/cherry-pick/XYZ``
-    - ``/cherry-pick``              → ``/app/queue``
+    - ``/cherry-pick?batch_id=<safe_id>`` → ``/app/cherry-pick/<safe_id>``
+    - ``/cherry-pick`` · 잘못된 batch_id  → ``/app/queue``
 
     구 HTML/JS (``static/index.html`` · ``static/cherry-pick.html`` · ``static/app.js`` ·
     ``static/style.css``) 는 2026-04-20 삭제. 회귀 시 git 히스토리에서 복원.
     """
-    if batch_id:
+    if batch_id and _SAFE_BATCH_ID.match(batch_id):
         return RedirectResponse(url=f"/app/cherry-pick/{batch_id}", status_code=302)
     return RedirectResponse(url="/app/queue", status_code=302)
 
@@ -803,6 +885,80 @@ async def gc_run() -> dict[str, Any]:
         message = f"{exc.__class__.__name__}: {exc}"
         _record_gc_run(None, message)
         raise HTTPException(status_code=500, detail=message) from exc
+
+
+@app.get("/api/system/db")
+async def system_db() -> dict[str, Any]:
+    """System.jsx DB 블록 소스.
+
+    응답: ``path`` (sqlite 절대경로), ``size_bytes`` (파일 존재 시),
+    ``tables`` (jobs/generation_tasks/asset_candidates/assets row count) +
+    큐 관련 집계.
+    """
+    stats = await db.system_stats()
+    try:
+        size = DB_PATH.stat().st_size if DB_PATH.exists() else 0
+    except OSError:
+        size = 0
+    return {
+        "path": str(DB_PATH),
+        "exists": DB_PATH.exists(),
+        "size_bytes": int(size),
+        "tables": {
+            "jobs": stats.get("jobs", 0),
+            "generation_tasks": stats.get("generation_tasks", 0),
+            "asset_candidates": stats.get("asset_candidates", 0),
+            "assets": stats.get("assets", 0),
+        },
+        "queue": {
+            "queued_total": stats.get("queued_total", 0),
+            "queued_due": stats.get("queued_due", 0),
+            "processing": stats.get("processing", 0),
+            "failed": stats.get("failed", 0),
+        },
+    }
+
+
+@app.get("/api/system/worker")
+async def system_worker() -> dict[str, Any]:
+    """System.jsx Worker 블록 소스.
+
+    - ``alive``: worker_task 가 살아있는지 (lifespan 이 걸어둠).
+    - ``last_heartbeat_at``: generation_worker 루프의 최신 tick 시각.
+    - ``current_task``: 현재 claim 된 태스크 요약 (없으면 null).
+    - ``processed_count``: 프로세스 시작 이후 완료한 태스크 수.
+    - ``queue_depth``: ``/api/system/db`` 의 queued_total 과 동일.
+    """
+    stats = await db.system_stats()
+    return {
+        "alive": worker_task is not None and not worker_task.done(),
+        "last_heartbeat_at": _worker_state.get("last_heartbeat_at"),
+        "current_task": _worker_state.get("current_task"),
+        "last_task_id": _worker_state.get("last_task_id"),
+        "processed_count": int(_worker_state.get("processed_count", 0)),
+        "queue_depth": int(stats.get("queued_total", 0)),
+        "queue_due": int(stats.get("queued_due", 0)),
+        "processing": int(stats.get("processing", 0)),
+        "failed": int(stats.get("failed", 0)),
+    }
+
+
+@app.get("/api/system/logs/recent")
+async def system_logs_recent(
+    level: str | None = Query(
+        default=None,
+        description="'error' 이면 error 레벨만, 미지정이면 전부",
+    ),
+    limit: int = Query(default=50, ge=1, le=500),
+) -> dict[str, Any]:
+    """System.jsx Logs 블록 소스.
+
+    프로세스 시작 후 발생한 에러/경고 기록을 ring buffer 에 쌓아 뒤에서부터 ``limit`` 개를 돌려준다.
+    파일 로깅과 별개로, 운영 중 관측만 목적으로 한다.
+    """
+    allowed = ("error", "warn", "info") if level is None else (level,)
+    items = [e for e in _log_ring if e["level"] in allowed]
+    return {"count": len(items[-limit:]), "items": list(reversed(items[-limit:]))}
 
 
 @app.get("/api/sd/catalog/models")
@@ -905,7 +1061,7 @@ async def generate_asset(request: GenerateRequest) -> dict[str, str]:
         }
     )
     await db.mark_job_running(job_id)
-    await event_broker.publish({"type": "job_created", "job_id": job_id})
+    await event_broker.publish({"type": ev.EVT_JOB_CREATED, "job_id": job_id})
     return {"job_id": job_id}
 
 
@@ -935,7 +1091,7 @@ async def generate_batch(request: BatchGenerateRequest) -> dict[str, Any]:
     for task in tasks:
         await db.enqueue_generation_task({"job_id": job_id, **task})
     await db.mark_job_running(job_id)
-    await event_broker.publish({"type": "batch_job_created", "job_id": job_id, "task_count": len(tasks)})
+    await event_broker.publish({"type": ev.EVT_BATCH_JOB_CREATED, "job_id": job_id, "task_count": len(tasks)})
     return {"job_id": job_id, "project": project, "task_count": len(tasks)}
 
 
@@ -971,7 +1127,7 @@ async def _enqueue_design_batch(spec: DesignBatchRequest) -> dict[str, Any]:
     await db.mark_job_running(job_id)
     await event_broker.publish(
         {
-            "type": "design_batch_created",
+            "type": ev.EVT_DESIGN_BATCH_CREATED,
             "batch_id": batch_id,
             "job_id": job_id,
             "asset_key": spec.asset_key,
@@ -1048,6 +1204,62 @@ async def get_batch_detail(batch_id: str) -> dict[str, Any]:
     return detail
 
 
+@app.get("/api/batches/{batch_id}/tasks")
+async def list_batch_tasks_api(batch_id: str) -> dict[str, Any]:
+    """BatchDetail Tasks 탭 소스.
+
+    ``generation_tasks`` 의 ``id / model_name / seed / status / retries /
+    max_retries / last_error / next_attempt_at`` 컬럼을 그대로 반환한다.
+    실패/진행 중/대기/완료 순으로 정렬한다.
+    """
+    if not await db.get_batch_detail(batch_id):
+        raise HTTPException(status_code=404, detail=f"batch not found: {batch_id}")
+    rows = await db.list_batch_tasks(batch_id)
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        items.append(
+            {
+                "id": int(row["id"]),
+                "model": row.get("model_name"),
+                "seed": row.get("seed"),
+                "status": row.get("status"),
+                "attempts": int(row.get("retries") or 0),
+                "max_retries": int(row.get("max_retries") or 0),
+                "last_error": row.get("last_error"),
+                "next_attempt_at": row.get("next_attempt_at"),
+                "created_at": row.get("created_at"),
+                "updated_at": row.get("updated_at"),
+            }
+        )
+    failed = sum(1 for it in items if it["status"] == "failed")
+    return {
+        "batch_id": batch_id,
+        "count": len(items),
+        "failed_count": failed,
+        "items": items,
+    }
+
+
+@app.post(
+    "/api/batches/{batch_id}/retry-failed",
+    dependencies=[Depends(require_api_key)],
+)
+async def retry_failed_batch_tasks_api(batch_id: str) -> dict[str, Any]:
+    """배치 내 ``failed`` 태스크만 골라 큐로 되돌린다."""
+    if not await db.get_batch_detail(batch_id):
+        raise HTTPException(status_code=404, detail=f"batch not found: {batch_id}")
+    retried = await db.retry_failed_batch_tasks(batch_id)
+    if retried:
+        await event_broker.publish(
+            {
+                "type": ev.EVT_BATCH_RETRY_FAILED,
+                "batch_id": batch_id,
+                "retried_count": len(retried),
+            }
+        )
+    return {"batch_id": batch_id, "retried_count": len(retried), "task_ids": retried}
+
+
 @app.get("/api/batches/{batch_id}/candidates")
 async def list_batch_candidates(batch_id: str) -> dict[str, Any]:
     """한 batch에 속한 모든 후보 (cherry-pick UI 본 화면).
@@ -1084,7 +1296,7 @@ async def reject_batch_candidate(batch_id: str, candidate_id: int) -> dict[str, 
         raise HTTPException(status_code=500, detail="reject 처리 실패")
     await event_broker.publish(
         {
-            "type": "candidate_rejected",
+            "type": ev.EVT_CANDIDATE_REJECTED,
             "batch_id": batch_id,
             "candidate_id": candidate_id,
         }
@@ -1106,7 +1318,7 @@ async def unreject_batch_candidate(batch_id: str, candidate_id: int) -> dict[str
         raise HTTPException(status_code=500, detail="unreject 처리 실패")
     await event_broker.publish(
         {
-            "type": "candidate_unrejected",
+            "type": ev.EVT_CANDIDATE_UNREJECTED,
             "batch_id": batch_id,
             "candidate_id": candidate_id,
         }
@@ -1189,7 +1401,7 @@ async def undo_approve(asset_id: str) -> dict[str, Any]:
 
     await event_broker.publish(
         {
-            "type": "asset_approve_undone",
+            "type": ev.EVT_ASSET_APPROVE_UNDONE,
             "asset_id": asset_id,
             "restored_from_history": restored_from is not None,
         }
@@ -1303,7 +1515,7 @@ async def approve_from_candidate(body: ApproveFromCandidateRequest) -> dict[str,
 
     await event_broker.publish(
         {
-            "type": "asset_approved_from_candidate",
+            "type": ev.EVT_ASSET_APPROVED_FROM_CANDIDATE,
             "asset_id": asset_id,
             "candidate_id": body.candidate_id,
             "batch_id": candidate.get("batch_id"),
@@ -1351,7 +1563,7 @@ async def scan_project_assets(request: ScanRequest) -> dict[str, Any]:
         inserted += 1
 
     await event_broker.publish(
-        {"type": "scan_completed", "project": request.project, "count": inserted, "root_path": request.root_path}
+        {"type": ev.EVT_SCAN_COMPLETED, "project": request.project, "count": inserted, "root_path": request.root_path}
     )
     return {"project": request.project, "scanned_count": inserted}
 
@@ -1451,14 +1663,59 @@ async def get_asset_candidates(
     return await db.list_asset_candidates(asset["project"], asset["asset_key"], job_id)
 
 
+_THUMB_ALLOWED_SIZES: frozenset[int] = frozenset({128, 192, 256, 384, 512})
+_THUMB_CACHE_DIR = DATA_DIR / "thumbs"
+
+
+def _thumb_cache_path(safe_path: Path, size: int) -> Path:
+    """썸네일 캐시 파일 경로 (원본 path + size 의 sha1 기반)."""
+    key = hashlib.sha1(f"{safe_path}|{size}".encode("utf-8")).hexdigest()
+    return _THUMB_CACHE_DIR / f"{key[:2]}" / f"{key}.webp"
+
+
+def _ensure_thumb(safe_path: Path, size: int) -> Path:
+    """원본 PNG 에서 ``size x size`` 이하의 webp 썸네일을 생성(캐시)해서
+    경로를 돌려준다.
+
+    - 원본 mtime 이 캐시 파일보다 최신이면 재생성.
+    - Pillow 가 여기서만 호출되므로 썸네일 요청이 없는 경로에는 영향 없음.
+    """
+    from PIL import Image  # local import: 이미지 요청 핫패스 외부 영향 없음
+
+    cache_path = _thumb_cache_path(safe_path, size)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        src_mtime = safe_path.stat().st_mtime
+        if cache_path.exists() and cache_path.stat().st_mtime >= src_mtime:
+            return cache_path
+    except OSError:
+        pass
+    with Image.open(safe_path) as im:
+        im.thumbnail((size, size), Image.LANCZOS)
+        tmp = cache_path.with_suffix(".tmp.webp")
+        im.save(tmp, format="WEBP", quality=85, method=4)
+        tmp.replace(cache_path)
+    return cache_path
+
+
 @app.get("/api/asset-candidates/image")
 async def get_candidate_image_file(
+    request: Request,
     project: str = Query(..., description="프로젝트 id"),
     asset_key: str = Query(...),
     job_id: str = Query(...),
     slot_index: int = Query(..., ge=0),
-) -> FileResponse:
-    """후보 슬롯 이미지 파일 (DB 등록 경로만 허용)."""
+    size: int | None = Query(
+        default=None,
+        description="썸네일 variant 요청 크기 (128/192/256/384/512). 미지정 시 원본 PNG.",
+    ),
+) -> Response:
+    """후보 슬롯 이미지 파일 (DB 등록 경로만 허용).
+
+    ``size`` 가 지정되면 ``data/thumbs/`` 아래에 webp 썸네일을 캐시해 반환하고
+    ``ETag`` / ``Cache-Control: public, max-age=31536000, immutable`` 을 건다.
+    원본 요청은 변동 가능성이 있으므로 weak cache 만 붙인다.
+    """
     rows = await db.list_asset_candidates(project, asset_key, job_id)
     pick = next((r for r in rows if int(r["slot_index"]) == slot_index), None)
     if pick is None:
@@ -1466,7 +1723,44 @@ async def get_candidate_image_file(
     safe_path = _ensure_path_allowed(Path(pick["image_path"]))
     if not safe_path.exists():
         raise HTTPException(status_code=404, detail="후보 파일이 없습니다.")
-    return FileResponse(safe_path)
+
+    if size is None:
+        return FileResponse(
+            safe_path,
+            headers={"Cache-Control": "public, max-age=300"},
+        )
+
+    if size not in _THUMB_ALLOWED_SIZES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"size 는 {sorted(_THUMB_ALLOWED_SIZES)} 중 하나여야 합니다.",
+        )
+    try:
+        thumb_path = await asyncio.to_thread(_ensure_thumb, safe_path, size)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"썸네일 생성 실패: {exc}") from exc
+
+    try:
+        stat = thumb_path.stat()
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"썸네일 stat 실패: {exc}") from exc
+    etag = f'W/"{int(stat.st_mtime)}-{stat.st_size}-{size}"'
+    if request.headers.get("if-none-match") == etag:
+        return Response(
+            status_code=304,
+            headers={
+                "ETag": etag,
+                "Cache-Control": "public, max-age=31536000, immutable",
+            },
+        )
+    return FileResponse(
+        thumb_path,
+        media_type="image/webp",
+        headers={
+            "ETag": etag,
+            "Cache-Control": "public, max-age=31536000, immutable",
+        },
+    )
 
 
 @app.post("/api/assets/{asset_id}/select-candidate", dependencies=[Depends(require_api_key)])
@@ -1532,7 +1826,7 @@ async def select_asset_candidate(asset_id: str, body: SelectCandidateRequest) ->
     await db.mark_candidate_picked(int(pick["id"]), asset_id)
     await event_broker.publish(
         {
-            "type": "asset_candidate_selected",
+            "type": ev.EVT_ASSET_CANDIDATE_SELECTED,
             "asset_id": asset_id,
             "job_id": body.job_id,
             "slot_index": body.slot_index,
@@ -1547,7 +1841,7 @@ async def patch_asset(asset_id: str, request: AssetStatusPatch) -> dict[str, boo
     updated = await db.update_asset_status(asset_id=asset_id, status=request.status)
     if not updated:
         raise HTTPException(status_code=404, detail="에셋을 찾을 수 없습니다.")
-    await event_broker.publish({"type": "asset_status_changed", "asset_id": asset_id, "status": request.status})
+    await event_broker.publish({"type": ev.EVT_ASSET_STATUS_CHANGED, "asset_id": asset_id, "status": request.status})
     return {"ok": True}
 
 
@@ -1608,7 +1902,7 @@ async def regenerate_asset(asset_id: str) -> dict[str, str]:
     await db.mark_job_running(job_id)
     await event_broker.publish(
         {
-            "type": "asset_regenerate_queued",
+            "type": ev.EVT_ASSET_REGENERATE_QUEUED,
             "asset_id": asset_id,
             "job_id": job_id,
             "source_seed": metadata.get("seed"),
@@ -1695,7 +1989,7 @@ async def batch_revalidate_failed(
         if not result.passed:
             still_fail += 1
     await event_broker.publish(
-        {"type": "batch_revalidate_failed_done", "count": updated, "project": project}
+        {"type": ev.EVT_BATCH_REVALIDATE_FAILED_DONE, "count": updated, "project": project}
     )
     return {"revalidated": updated, "still_fail": still_fail, "project": project}
 
@@ -1758,7 +2052,7 @@ async def batch_regenerate_failed(
         await db.mark_job_running(job_id)
         job_ids.append(job_id)
     await event_broker.publish(
-        {"type": "batch_regenerate_failed_queued", "jobs": len(job_ids), "project": project}
+        {"type": ev.EVT_BATCH_REGENERATE_FAILED_QUEUED, "jobs": len(job_ids), "project": project}
     )
     return {"queued_jobs": len(job_ids), "job_ids": job_ids, "project": project}
 
@@ -1814,7 +2108,7 @@ async def export_assets(request: ExportRequest) -> dict[str, Any]:
         manifest_path = str(manifest_file)
 
     await event_broker.publish(
-        {"type": "export_completed", "count": exported_count, "output_dir": str(output_root), "manifest_path": manifest_path}
+        {"type": ev.EVT_EXPORT_COMPLETED, "count": exported_count, "output_dir": str(output_root), "manifest_path": manifest_path}
     )
     return {"exported_count": exported_count, "output_dir": str(output_root), "manifest_path": manifest_path}
 
