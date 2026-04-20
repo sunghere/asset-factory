@@ -1027,6 +1027,34 @@ async def sd_catalog_loras() -> dict[str, Any]:
     }
 
 
+@app.get("/api/sd/catalog/usage")
+async def sd_catalog_usage() -> dict[str, Any]:
+    """Catalog 카드에 노출할 model/LoRA 사용 역참조.
+
+    Frontend 는 이 엔드포인트 결과를 ``/api/sd/catalog/models`` · ``/loras`` 와
+    join 하여 "N batches · 마지막 사용 X분 전" 형태로 표시한다.
+    """
+    usage = await db.aggregate_catalog_usage()
+    return usage
+
+
+@app.get("/api/sd/catalog/usage/batches")
+async def sd_catalog_usage_batches(
+    model: str | None = Query(default=None),
+    lora: str | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> dict[str, Any]:
+    """특정 model 혹은 LoRA 를 사용한 최근 batch 목록.
+
+    Catalog 상세 패널의 "최근 배치" 리스트 소스. ``model`` 과 ``lora`` 중
+    하나만 보내도 되고, 둘 다 보내면 AND 로 좁혀진다.
+    """
+    items = await db.list_batches_using_catalog(
+        model_name=model, lora_name=lora, limit=limit
+    )
+    return {"count": len(items), "items": items}
+
+
 @app.get("/api/projects")
 async def list_projects() -> dict[str, Any]:
     """specs 디렉토리의 프로젝트 스펙 목록.

@@ -5,7 +5,22 @@
    Backed by DesignBatchRequest (loras: LoraSpec[][]). 곱집합:
      prompts × models × lora_groups × seeds. */
 
-const { useState, useMemo } = React;
+const { useState, useMemo, useEffect } = React;
+
+// URL ?model=X&lora=Y 파싱 — Catalog 상세 패널의 "이 모델/LoRA 로 batch 만들기"
+// 프리필 링크 지원용. pathname 라우팅은 기존 그대로고, 쿼리만 따로 읽는다.
+function _readPrefill() {
+  try {
+    const sp = new URLSearchParams(window.location.search || '');
+    return {
+      model: sp.get('model') || null,
+      lora: sp.get('lora') || null,
+      project: sp.get('project') || null,
+      asset_key: sp.get('asset_key') || null,
+      category: sp.get('category') || null,
+    };
+  } catch (_) { return {}; }
+}
 
 const PRESETS = [
   { id: 'fast',     label: 'fast',     steps: 22, cfg: 6.5, seeds_per_combo: 1 },
@@ -45,6 +60,35 @@ function BatchNew() {
 
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState(null);
+
+  // Catalog 에서 넘어온 prefill (?model / ?lora / ?project / ?asset_key / ?category).
+  // 이름이 카탈로그에 존재해야 선반영; 없는 이름이면 조용히 무시 (사용자 오입력 방지).
+  useEffect(() => {
+    const pf = _readPrefill();
+    if (pf.project) setProject(pf.project);
+    if (pf.category) setCategory(pf.category);
+    if (pf.asset_key) setAssetKey(pf.asset_key);
+    if (pf.model && models.data?.items) {
+      if (models.data.items.some((m) => m.name === pf.model)) {
+        setSelectedModels((xs) => xs.includes(pf.model) ? xs : [...xs, pf.model]);
+      }
+    }
+    if (pf.lora && loras.data?.items) {
+      const match = loras.data.items.find((l) => l.name === pf.lora);
+      if (match) {
+        const w = match.weight_default ?? 0.7;
+        setLoraGroups((gs) => {
+          if (gs.some((g) => g.some((l) => l.name === pf.lora))) return gs;
+          if (gs.length === 1 && gs[0].length === 0) {
+            return [[{ name: pf.lora, weight: w }]];
+          }
+          return [...gs, [{ name: pf.lora, weight: w }]];
+        });
+      }
+    }
+    // asset_key 혹은 model/lora 프리필이 있으면 곧바로 step 2 로 점프.
+    if (pf.model || pf.lora) setStep(2);
+  }, [models.data, loras.data]);
 
   const seedList = useMemo(() => {
     if (seedMode !== 'fixed') return null;

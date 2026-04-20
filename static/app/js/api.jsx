@@ -44,6 +44,14 @@ const api = {
   // Catalog
   models: () => request('GET', '/api/sd/catalog/models'),
   loras: () => request('GET', '/api/sd/catalog/loras'),
+  catalogUsage: () => request('GET', '/api/sd/catalog/usage'),
+  catalogUsageBatches: ({ model, lora, limit = 20 } = {}) => {
+    const qs = new URLSearchParams();
+    if (model) qs.set('model', model);
+    if (lora) qs.set('lora', lora);
+    qs.set('limit', String(limit));
+    return request('GET', `/api/sd/catalog/usage/batches?${qs.toString()}`);
+  },
 
   // Projects
   listProjects: () => request('GET', '/api/projects'),

@@ -1134,6 +1134,120 @@ class Database:
             out["failed"] = int(row["n"] or 0) if row else 0
         return out
 
+    async def aggregate_catalog_usage(self) -> dict[str, Any]:
+        """Catalog 카드에 노출할 모델/LoRA 사용 통계.
+
+        ``generation_tasks`` 전체를 스캔해서 다음을 집계한다:
+
+        * ``models`` — ``model_name`` 별 ``task_count`` · ``batch_count`` ·
+          ``last_used_at`` (가장 최근 ``updated_at``).
+        * ``loras`` — ``lora_spec_json`` 을 파싱해 각 ``name`` 별 동일 통계.
+
+        집계는 프로세스 메모리에서 이뤄지므로 수십만 row 까지는 단순 집계로 버틴다
+        (운영 체감 · v0.2 규모). 그 이상이면 인덱스/마테리얼라이즈 고려.
+        """
+        models: dict[str, dict[str, Any]] = {}
+        loras: dict[str, dict[str, Any]] = {}
+
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cur = await conn.execute(
+                """
+                SELECT model_name, lora_spec_json, batch_id, updated_at
+                FROM generation_tasks
+                """
+            )
+            rows = await cur.fetchall()
+
+        def _bump(bucket: dict[str, dict[str, Any]], name: str, batch_id: str | None, updated_at: str | None) -> None:
+            slot = bucket.setdefault(
+                name, {"task_count": 0, "batch_ids": set(), "last_used_at": None}
+            )
+            slot["task_count"] += 1
+            if batch_id:
+                slot["batch_ids"].add(batch_id)
+            if updated_at and (slot["last_used_at"] is None or updated_at > slot["last_used_at"]):
+                slot["last_used_at"] = updated_at
+
+        for r in rows:
+            name = r["model_name"]
+            if name:
+                _bump(models, str(name), r["batch_id"], r["updated_at"])
+            raw = r["lora_spec_json"]
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(data, list):
+                continue
+            # 고유 lora 이름만 집계 (같은 task 가 동일 lora 를 중복 언급해도 1회).
+            seen_names: set[str] = set()
+            for spec in data:
+                if isinstance(spec, dict):
+                    nm = spec.get("name")
+                elif isinstance(spec, str):
+                    nm = spec
+                else:
+                    nm = None
+                if isinstance(nm, str) and nm and nm not in seen_names:
+                    seen_names.add(nm)
+                    _bump(loras, nm, r["batch_id"], r["updated_at"])
+
+        def _finalize(bucket: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+            out: dict[str, dict[str, Any]] = {}
+            for k, v in bucket.items():
+                out[k] = {
+                    "task_count": v["task_count"],
+                    "batch_count": len(v["batch_ids"]),
+                    "last_used_at": v["last_used_at"],
+                }
+            return out
+
+        return {"models": _finalize(models), "loras": _finalize(loras)}
+
+    async def list_batches_using_catalog(
+        self,
+        *,
+        model_name: str | None = None,
+        lora_name: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """특정 model/LoRA 를 사용한 최근 batch 역참조 목록.
+
+        Catalog 상세 패널의 "최근 배치" 리스트에서 사용. ``model_name`` 은
+        ``generation_tasks.model_name`` 과 정확 일치, ``lora_name`` 은
+        ``lora_spec_json`` LIKE 매칭 (JSON 내부 ``"name":"<val>"``).
+        """
+        if not model_name and not lora_name:
+            return []
+        clauses: list[str] = []
+        params: list[Any] = []
+        if model_name:
+            clauses.append("model_name = ?")
+            params.append(model_name)
+        if lora_name:
+            clauses.append("lora_spec_json LIKE ?")
+            params.append(f'%"name": "{lora_name}"%')
+        where = " AND ".join(clauses)
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cur = await conn.execute(
+                f"""
+                SELECT batch_id, asset_key, project,
+                       MAX(updated_at) AS last_updated_at,
+                       COUNT(*) AS task_count
+                FROM generation_tasks
+                WHERE {where} AND batch_id IS NOT NULL
+                GROUP BY batch_id
+                ORDER BY last_updated_at DESC
+                LIMIT ?
+                """,
+                (*params, int(limit)),
+            )
+            return [dict(r) for r in await cur.fetchall()]
+
     async def list_batch_tasks(self, batch_id: str) -> list[dict[str, Any]]:
         """한 batch 의 ``generation_tasks`` 행을 UI 에서 필요한 컬럼만 반환한다.
 
