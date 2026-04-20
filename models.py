@@ -1233,35 +1233,77 @@ class Database:
 
         Catalog 상세 패널의 "최근 배치" 리스트에서 사용. ``model_name`` 은
         ``generation_tasks.model_name`` 과 정확 일치, ``lora_name`` 은
-        ``lora_spec_json`` LIKE 매칭 (JSON 내부 ``"name":"<val>"``).
+        ``lora_spec_json`` 을 JSON 파싱해서 ``name`` 필드를 비교한다.
+
+        과거에는 문자열 LIKE(``"name": "foo"``)에 의존했는데, 이 방식은
+        compact JSON(``{"name":"foo"}``)처럼 공백 직렬화가 다르면 누락된다.
+        여기서는 row 단위로 안전하게 파싱해 whitespace/직렬화 차이에 무관하게
+        동일 semantic payload 를 매칭한다.
         """
         if not model_name and not lora_name:
             return []
-        clauses: list[str] = []
-        params: list[Any] = []
-        if model_name:
-            clauses.append("model_name = ?")
-            params.append(model_name)
-        if lora_name:
-            clauses.append("lora_spec_json LIKE ?")
-            params.append(f'%"name": "{lora_name}"%')
-        where = " AND ".join(clauses)
+
         async with aiosqlite.connect(self.db_path) as conn:
             conn.row_factory = aiosqlite.Row
             cur = await conn.execute(
-                f"""
-                SELECT batch_id, asset_key, project,
-                       MAX(updated_at) AS last_updated_at,
-                       COUNT(*) AS task_count
+                """
+                SELECT batch_id, asset_key, project, model_name, lora_spec_json, updated_at
                 FROM generation_tasks
-                WHERE {where} AND batch_id IS NOT NULL
-                GROUP BY batch_id
-                ORDER BY last_updated_at DESC
-                LIMIT ?
-                """,
-                (*params, int(limit)),
+                WHERE batch_id IS NOT NULL
+                ORDER BY updated_at DESC
+                """
             )
-            return [dict(r) for r in await cur.fetchall()]
+            rows = await cur.fetchall()
+
+        def _row_has_lora(raw: Any, needle: str) -> bool:
+            if not raw:
+                return False
+            try:
+                data = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                return False
+            if not isinstance(data, list):
+                return False
+            for spec in data:
+                if isinstance(spec, dict) and spec.get("name") == needle:
+                    return True
+                if isinstance(spec, str) and spec == needle:
+                    return True
+            return False
+
+        grouped: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            batch_id = row["batch_id"]
+            if not batch_id:
+                continue
+            if model_name and row["model_name"] != model_name:
+                continue
+            if lora_name and not _row_has_lora(row["lora_spec_json"], lora_name):
+                continue
+
+            slot = grouped.setdefault(
+                str(batch_id),
+                {
+                    "batch_id": str(batch_id),
+                    "asset_key": row["asset_key"],
+                    "project": row["project"],
+                    "last_updated_at": row["updated_at"],
+                    "task_count": 0,
+                },
+            )
+            slot["task_count"] += 1
+            updated_at = row["updated_at"]
+            if updated_at and (
+                slot.get("last_updated_at") is None or updated_at > slot["last_updated_at"]
+            ):
+                slot["last_updated_at"] = updated_at
+
+        items = sorted(
+            grouped.values(),
+            key=lambda it: it.get("last_updated_at") or "",
+            reverse=True,
+        )
+        return items[: int(limit)]
 
     async def list_batch_tasks(self, batch_id: str) -> list[dict[str, Any]]:
         """한 batch 의 ``generation_tasks`` 행을 UI 에서 필요한 컬럼만 반환한다.

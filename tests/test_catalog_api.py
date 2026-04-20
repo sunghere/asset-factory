@@ -169,3 +169,41 @@ def test_models_endpoint_returns_503_when_sd_unreachable(isolated, monkeypatch) 
     with TestClient(server.app) as client:
         r = client.get("/api/sd/catalog/models")
     assert r.status_code == 503
+
+
+def test_catalog_usage_batches_matches_compact_lora_json(isolated) -> None:  # noqa: ANN001
+    async def seed() -> None:
+        await isolated.create_job("job_usage", "generation", None)
+        await isolated.enqueue_generation_task(
+            {
+                "job_id": "job_usage",
+                "project": "proj",
+                "asset_key": "hero_idle",
+                "category": "character",
+                "prompt": "pixel hero idle",
+                "negative_prompt": None,
+                "model_name": "pixelart_xl_v1.5",
+                "width": 64,
+                "height": 64,
+                "steps": 20,
+                "cfg": 7.0,
+                "sampler": "DPM++ 2M",
+                "expected_size": 64,
+                "max_colors": 32,
+                "max_retries": 3,
+                "batch_id": "btc_usage_1",
+                "seed": 42,
+                # compact separators: same semantic JSON, different whitespace.
+                "lora_spec_json": '[{"name":"marine_uniform_v2","weight":0.7}]',
+            }
+        )
+
+    asyncio.run(seed())
+
+    with TestClient(server.app) as client:
+        r = client.get("/api/sd/catalog/usage/batches", params={"lora": "marine_uniform_v2"})
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["count"] == 1
+    assert body["items"][0]["batch_id"] == "btc_usage_1"
