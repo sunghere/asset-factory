@@ -12,6 +12,14 @@ function Batches() {
   const [q, setQ] = useState('');
   const [filter, setFilter] = useState('all');
 
+  window.useSSE((events) => {
+    if (events.some((e) => [
+      'batch_job_created', 'design_batch_created', 'task_done', 'task_error',
+      'candidate_added', 'candidate_rejected', 'candidate_unrejected',
+      'batch_retry_failed', 'batch_regenerate_failed_queued',
+    ].includes(e.type))) batches.reload();
+  });
+
   const items = batches.data?.items || [];
 
   const rows = useMemo(() => {

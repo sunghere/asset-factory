@@ -16,6 +16,26 @@ function Dashboard() {
   const summary = window.useAsync(() => window.api.assetSummary(), []);
   const recentJobs = window.useAsync(() => window.api.recentJobs(8), []);
 
+  // SSE — 실시간 큐/써머리 업데이트. 폴링 제거.
+  window.useSSE((batch) => {
+    let needQueue = false, needSummary = false, needJobs = false;
+    for (const e of batch) {
+      if (['candidate_added', 'candidate_rejected', 'candidate_unrejected',
+        'task_done', 'batch_job_created', 'design_batch_created',
+        'batch_retry_failed', 'batch_regenerate_failed_queued'].includes(e.type)) needQueue = true;
+      if (['asset_approved_from_candidate', 'asset_status_changed',
+        'asset_approve_undone', 'validation_updated'].includes(e.type)) {
+        needSummary = true; needQueue = true;
+      }
+      if (['job_created', 'task_done', 'task_error',
+        'batch_job_created', 'design_batch_created',
+        'scan_completed', 'export_completed'].includes(e.type)) needJobs = true;
+    }
+    if (needQueue) queue.reload();
+    if (needSummary) summary.reload();
+    if (needJobs) recentJobs.reload();
+  });
+
   // Group batches by project so each row is a "today board" for one project.
   const projects = useMemo(() => {
     const items = queue.data?.items || [];

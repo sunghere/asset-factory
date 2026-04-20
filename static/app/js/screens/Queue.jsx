@@ -8,6 +8,16 @@ function Queue() {
   const [filter, setFilter] = useState('all');
   const [search, setSearch] = useState('');
 
+  window.useSSE((batch) => {
+    if (batch.some((e) => [
+      'candidate_added', 'candidate_rejected', 'candidate_unrejected',
+      'task_done', 'batch_job_created', 'design_batch_created',
+      'asset_approved_from_candidate', 'asset_approve_undone',
+      'batch_retry_failed', 'batch_regenerate_failed_queued',
+      'validation_updated',
+    ].includes(e.type))) queue.reload();
+  });
+
   const projects = useMemo(() => {
     const items = queue.data?.items || [];
     return Array.from(new Set(items.map((b) => b.project || 'default')));

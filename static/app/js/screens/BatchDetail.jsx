@@ -1,16 +1,13 @@
 /* BatchDetail — inspect a single design batch.
-   Tabs:
+   Tabs (spec §6.6):
+     - tasks       : per-task status / attempts / last_error + "retry failed"
      - candidates  : grid of all candidate images with reject badge
-     - spec        : aggregated spec for the whole batch, sourced from
-                     GET /api/batches/{id} (generation_tasks distinct values)
-   "Tasks" tab from the spec doc is not rendered separately because the
-   candidates tab already shows every task's output; the spec tab shows the
-   input side. */
+     - spec        : aggregated spec for the whole batch */
 
-const { useState } = React;
+const { useState: useStateBD } = React;
 
 function BatchDetail({ batchId }) {
-  const [tab, setTab] = useState('candidates');
+  const [tab, setTab] = useStateBD('tasks');
   const toasts = window.useToasts();
 
   const candidates = window.useAsync(
@@ -21,11 +18,49 @@ function BatchDetail({ batchId }) {
     () => window.api.getBatchDetail(batchId),
     [batchId],
   );
+  const tasks = window.useAsync(
+    () => window.api.listBatchTasks(batchId),
+    [batchId],
+  );
+
+  // 실시간 업데이트 — 이 배치와 관련된 모든 이벤트에 세 소스 중 영향 받는 것 reload.
+  window.useSSE((events) => {
+    let refreshCands = false, refreshTasks = false, refreshDetail = false;
+    for (const e of events) {
+      if (e.batch_id && e.batch_id !== batchId) continue;
+      if (['candidate_added', 'candidate_rejected', 'candidate_unrejected',
+        'validation_updated'].includes(e.type)) refreshCands = true;
+      if (['task_done', 'task_error', 'batch_retry_failed',
+        'batch_regenerate_failed_queued', 'batch_revalidate_failed_done'].includes(e.type)) {
+        refreshTasks = true; refreshDetail = true;
+      }
+    }
+    if (refreshCands) candidates.reload();
+    if (refreshTasks) tasks.reload();
+    if (refreshDetail) detail.reload();
+  });
 
   const batchRow = detail.data;
   const items = candidates.data?.items || [];
   const rejectedCount = items.filter((c) => c.is_rejected).length;
   const activeCount = items.length - rejectedCount;
+  const taskRows = tasks.data?.items || [];
+  const failedTaskCount = taskRows.filter((t) => t.status === 'failed').length;
+
+  async function onRetryFailed() {
+    if (failedTaskCount === 0) return;
+    try {
+      const resp = await window.api.retryFailedTasks(batchId);
+      toasts.push({
+        kind: 'success',
+        message: `실패 ${resp.retried_count ?? failedTaskCount} 건 재큐잉`,
+      });
+      tasks.reload();
+      detail.reload();
+    } catch (e) {
+      toasts.push({ kind: 'error', message: 'retry 실패: ' + (e.message || e) });
+    }
+  }
 
   async function onReject(cand) {
     // Optimistic feedback + undo — same pattern as cherry-pick.
@@ -79,6 +114,12 @@ function BatchDetail({ batchId }) {
       )}
 
       <div className="tabs">
+        <button className={`tab ${tab === 'tasks' ? 'active' : ''}`} onClick={() => setTab('tasks')}>
+          /tasks <span style={{ color: 'var(--text-faint)' }}>({taskRows.length})</span>
+          {failedTaskCount > 0 && (
+            <span className="pill pill-fail" style={{ marginLeft: 6 }}>fail {failedTaskCount}</span>
+          )}
+        </button>
         <button className={`tab ${tab === 'candidates' ? 'active' : ''}`} onClick={() => setTab('candidates')}>
           /candidates <span style={{ color: 'var(--text-faint)' }}>({items.length})</span>
         </button>
@@ -86,6 +127,14 @@ function BatchDetail({ batchId }) {
           /spec
         </button>
       </div>
+
+      {tab === 'tasks' && (
+        <TasksView
+          tasks={tasks}
+          failedCount={failedTaskCount}
+          onRetryFailed={onRetryFailed}
+        />
+      )}
 
       {candidates.loading && !candidates.data && <window.Skeleton height={200}/>}
       {candidates.error && (
@@ -286,6 +335,102 @@ function renderValue(v) {
   if (v == null || v === '') return <span style={{ color: 'var(--text-faint)' }}>—</span>;
   if (typeof v === 'object') return <pre style={{ margin: 0, fontSize: 11 }}>{JSON.stringify(v, null, 2)}</pre>;
   return String(v);
+}
+
+function TasksView({ tasks, failedCount, onRetryFailed }) {
+  if (tasks.loading && !tasks.data) return <window.Skeleton height={200}/>;
+  if (tasks.error) {
+    return <div className="error-banner">
+      <span>⚠</span><span>{String(tasks.error.message || tasks.error)}</span>
+    </div>;
+  }
+  const rows = tasks.data?.items || [];
+  if (rows.length === 0) {
+    return <window.EmptyState title="태스크 없음" hint="이 배치에는 아직 태스크가 없습니다."/>;
+  }
+
+  const byStatus = { queued: 0, running: 0, done: 0, failed: 0 };
+  for (const t of rows) byStatus[t.status] = (byStatus[t.status] || 0) + 1;
+
+  return (
+    <div>
+      <div style={{
+        display: 'flex', gap: 10, alignItems: 'center', marginBottom: 10,
+        fontFamily: 'var(--font-mono)', fontSize: 12,
+      }}>
+        <span className="pill">queued <b style={{ marginLeft: 4 }}>{byStatus.queued || 0}</b></span>
+        <span className="pill pill-warn">running <b style={{ marginLeft: 4 }}>{byStatus.running || 0}</b></span>
+        <span className="pill pill-ok">done <b style={{ marginLeft: 4 }}>{byStatus.done || 0}</b></span>
+        <span className="pill pill-fail">failed <b style={{ marginLeft: 4 }}>{byStatus.failed || 0}</b></span>
+        <div style={{ flex: 1 }}/>
+        <button
+          className="btn btn-primary"
+          disabled={failedCount === 0}
+          onClick={onRetryFailed}
+          title={failedCount ? `${failedCount} 건 재큐잉` : '실패 태스크 없음'}
+        >↻ 실패만 재생성 ({failedCount})</button>
+      </div>
+
+      <div className="panel-card" style={{ padding: 0, overflow: 'auto' }}>
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th style={{ width: 60 }}>id</th>
+              <th style={{ width: 100 }}>status</th>
+              <th>model</th>
+              <th style={{ width: 100 }}>seed</th>
+              <th style={{ width: 100 }}>attempts</th>
+              <th>last_error</th>
+              <th style={{ width: 150 }}>updated</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((t) => (
+              <tr key={t.id} className={t.status === 'failed' ? 'row-fail' : undefined}>
+                <td style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>{t.id}</td>
+                <td><TaskStatusPill status={t.status}/></td>
+                <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, wordBreak: 'break-all' }}>
+                  {t.model || '—'}
+                </td>
+                <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-muted)' }}>
+                  {t.seed ?? '—'}
+                </td>
+                <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+                  {t.attempts ?? 0}{t.max_retries ? <span style={{ color: 'var(--text-faint)' }}> / {t.max_retries}</span> : null}
+                </td>
+                <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--accent-reject)' }}>
+                  {t.last_error ? (
+                    <details>
+                      <summary style={{ cursor: 'pointer' }}>
+                        {String(t.last_error).slice(0, 60)}
+                        {String(t.last_error).length > 60 ? '…' : ''}
+                      </summary>
+                      <pre style={{
+                        whiteSpace: 'pre-wrap', marginTop: 4, padding: 6,
+                        background: 'var(--bg-recess)', borderRadius: 4,
+                        color: 'var(--text-primary)',
+                      }}>{t.last_error}</pre>
+                    </details>
+                  ) : '—'}
+                </td>
+                <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>
+                  {(t.updated_at || t.created_at || '').slice(0, 19).replace('T', ' ')}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function TaskStatusPill({ status }) {
+  const cls = status === 'done' ? 'pill-ok'
+    : status === 'running' ? 'pill-warn'
+    : status === 'failed' ? 'pill-fail'
+    : '';
+  return <span className={`pill ${cls}`}>{status || '—'}</span>;
 }
 
 window.BatchDetail = BatchDetail;

@@ -45,8 +45,10 @@ function CherryPick({ batchId }) {
   const [loraFilters, setLoraFilters] = useStateCP(() => new Set()); // 활성 lora id 집합
   const [compareSet, setCompareSet] = useStateCP(() => new Set()); // candidate id 집합
   const [filterQuery, setFilterQuery] = useStateCP('');
+  const [visibleLimit, setVisibleLimit] = useStateCP(60); // 1차 렌더 상한 — IO 로 확장.
   const filterInputRef = useRefCP(null);
   const gridRef = useRefCP(null);
+  const sentinelRef = useRefCP(null);
   const toasts = window.useToasts();
 
   const autoAdvance = cpReadSetting('af_auto_advance', 'true') !== 'false';
@@ -111,6 +113,44 @@ function CherryPick({ batchId }) {
   // cursor는 visibleItems 기준. 원본 items 인덱스를 보존하지 않아도 OK.
   const cur = visibleItems[cursor] || null;
   const remaining = visibleItems.filter((c) => c.status !== 'rejected' && c.status !== 'approved').length;
+
+  // 필터가 바뀌면 visible limit 리셋. 그래야 필터 결과가 60 이하일 때 전체 노출.
+  useEffectCP(() => { setVisibleLimit(60); }, [hideRejected, filterQuery, loraFilters]);
+
+  // cursor 가 현재 렌더된 범위 너머로 이동하면 limit 확장.
+  useEffectCP(() => {
+    if (cursor >= visibleLimit - 2) {
+      setVisibleLimit((n) => Math.min(visibleItems.length, n + 60));
+    }
+  }, [cursor, visibleLimit, visibleItems.length]);
+
+  // sentinel 기반 IntersectionObserver — 마지막 행이 보이면 60개 추가 렌더.
+  useEffectCP(() => {
+    if (!sentinelRef.current) return undefined;
+    if (visibleLimit >= visibleItems.length) return undefined;
+    const obs = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) {
+        setVisibleLimit((n) => Math.min(visibleItems.length, n + 60));
+      }
+    }, { rootMargin: '200px' });
+    obs.observe(sentinelRef.current);
+    return () => obs.disconnect();
+  }, [visibleLimit, visibleItems.length]);
+
+  // cursor ±2 prefetch — 다음/이전 후보 풀사이즈 이미지 미리 로드.
+  useEffectCP(() => {
+    if (!cur) return;
+    const prefetchIdxs = [cursor - 2, cursor - 1, cursor + 1, cursor + 2];
+    for (const i of prefetchIdxs) {
+      const c = visibleItems[i];
+      if (!c) continue;
+      const url = window.api.candidateImageUrl(c, 384);
+      if (!url) continue;
+      const img = new Image();
+      img.decoding = 'async';
+      img.src = url;
+    }
+  }, [cursor, cur, visibleItems]);
 
   // 그리드 열 수 추정 (J/K 용) — CSS grid가 5열 기본이지만 화면 폭 따라 변함.
   // 실측값: grid element width / 셀 width (approx 200px 셀).
@@ -370,7 +410,7 @@ function CherryPick({ batchId }) {
               />
             </div>
           )}
-          {visibleItems.map((c, i) => {
+          {visibleItems.slice(0, visibleLimit).map((c, i) => {
             const isCursor = i === cursor;
             const inCompare = compareSet.has(c.id);
             return (
@@ -406,6 +446,15 @@ function CherryPick({ batchId }) {
               />
             );
           })}
+          {visibleLimit < visibleItems.length && (
+            <div
+              ref={sentinelRef}
+              aria-hidden="true"
+              style={{ gridColumn: '1 / -1', height: 20, color: 'var(--text-faint)', textAlign: 'center', fontFamily: 'var(--font-mono)', fontSize: 11 }}
+            >
+              … {visibleItems.length - visibleLimit} more
+            </div>
+          )}
         </div>
 
         {!metaHidden && (
