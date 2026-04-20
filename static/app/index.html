@@ -30,31 +30,25 @@
   // dependents that reference globals like window.Router or window.AppShell.
   // See docs/asset-factory-redesign-followups.md.
   (async function bootstrap() {
-    const files = [
-      '/static/app/js/api.jsx',
-      '/static/app/js/hooks.jsx',
-      '/static/app/js/router.jsx',
-      '/static/app/js/chrome.jsx',
-      '/static/app/js/screens/Dashboard.jsx',
-      '/static/app/js/screens/Queue.jsx',
-      '/static/app/js/screens/CherryPick.jsx',
-      '/static/app/js/screens/Assets.jsx',
-      '/static/app/js/screens/AssetDetail.jsx',
-      '/static/app/js/screens/Batches.jsx',
-      '/static/app/js/screens/BatchDetail.jsx',
-      '/static/app/js/screens/BatchNew.jsx',
-      '/static/app/js/screens/Catalog.jsx',
-      '/static/app/js/screens/Export.jsx',
-      '/static/app/js/screens/System.jsx',
-      '/static/app/js/screens/Settings.jsx',
-      '/static/app/js/app.jsx',
-    ];
     function showFatal(html) {
       document.getElementById('root').innerHTML =
         '<pre style="padding:24px;color:#ff8e8e;font:13px/1.6 ui-monospace,monospace;white-space:pre-wrap">'
         + html + '</pre>';
     }
     try {
+      // Screen list lives in manifest.json so adding/removing a screen
+      // doesn't require editing this boot script.
+      const manifest = await fetch('/static/app/manifest.json', { cache: 'no-cache' })
+        .then((r) => {
+          if (!r.ok) throw new Error('manifest ' + r.status);
+          return r.json();
+        });
+      const files = [
+        ...(manifest.core || []),
+        ...(manifest.screens || []),
+        ...(manifest.app || []),
+      ];
+      if (files.length === 0) throw new Error('manifest.json produced empty file list');
       for (const path of files) {
         const src = await fetch(path).then((r) => {
           if (!r.ok) throw new Error(path + ' ' + r.status);
