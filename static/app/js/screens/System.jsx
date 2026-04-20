@@ -33,10 +33,15 @@ function System() {
     [],
   );
   const gc = window.useAsync(() => window.api.gcStatus(), []);
+  const dbStat = window.useAsync(() => window.api.systemDb(), []);
+  const worker = window.useAsync(() => window.api.systemWorker(), []);
+  const logs = window.useAsync(() => window.api.systemLogs({ limit: 50 }), []);
 
-  // Light-weight polling — we don't care about drift, we just want fresh values.
+  // Light-weight polling — 큰 이벤트가 아닌 스냅샷 류 (worker heartbeat/DB 카운트)
+  // 이므로 SSE 보다 폴링이 맞다.
   window.useInterval(() => {
     health.reload(); healthSd.reload(); gc.reload();
+    dbStat.reload(); worker.reload(); logs.reload();
   }, 8000);
 
   async function runGc() {
@@ -130,6 +135,134 @@ function System() {
           ) : null}
         </dl>
       </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 20 }}>
+        <DbBlock data={dbStat.data} loading={dbStat.loading} error={dbStat.error}/>
+        <WorkerBlock data={worker.data} loading={worker.loading} error={worker.error}/>
+      </div>
+
+      <LogsBlock data={logs.data} loading={logs.loading} error={logs.error} reload={logs.reload}/>
+    </div>
+  );
+}
+
+function DbBlock({ data, loading, error }) {
+  const rows = data?.tables || {};
+  const queue = data?.queue || {};
+  const size = data?.size_bytes;
+  return (
+    <div className="panel-card">
+      <h3 style={{ margin: '0 0 10px' }}>DB</h3>
+      {loading && !data && <window.Skeleton height={80}/>}
+      {error && <div style={{ color: 'var(--accent-reject)' }}>{String(error.message || error)}</div>}
+      {data && (
+        <dl className="meta-block">
+          <dt>db file size</dt><dd>{fmtBytes(size)}</dd>
+          <dt>path</dt>
+          <dd style={{ fontFamily: 'var(--font-mono)', fontSize: 11, wordBreak: 'break-all', color: 'var(--text-muted)' }}>{data.path}</dd>
+          <dt>jobs</dt><dd>{rows.jobs ?? '—'}</dd>
+          <dt>tasks</dt><dd>
+            {rows.generation_tasks ?? '—'}
+            {(queue.queued_total != null) && (
+              <span style={{ color: 'var(--text-muted)', marginLeft: 6 }}>
+                · q {queue.queued_total} (due {queue.queued_due}) · r {queue.processing} · f {queue.failed}
+              </span>
+            )}
+          </dd>
+          <dt>candidates</dt><dd>{rows.asset_candidates ?? '—'}</dd>
+          <dt>assets</dt><dd>{rows.assets ?? '—'}</dd>
+        </dl>
+      )}
+    </div>
+  );
+}
+
+function WorkerBlock({ data, loading, error }) {
+  if (loading && !data) return <div className="panel-card"><window.Skeleton height={80}/></div>;
+  const alive = data?.alive === true;
+  const cur = data?.current_task;
+  return (
+    <div className="panel-card">
+      <h3 style={{ margin: '0 0 10px' }}>Worker</h3>
+      {error && <div style={{ color: 'var(--accent-reject)' }}>{String(error.message || error)}</div>}
+      {data && (
+        <>
+          <div>
+            <span className={`pill ${alive ? 'pill-ok' : 'pill-fail'}`}>
+              {alive ? 'ALIVE' : 'DOWN'}
+            </span>
+          </div>
+          <dl className="meta-block" style={{ marginTop: 10 }}>
+            <dt>last heartbeat</dt><dd>{fmtTs(data.last_heartbeat_at)}</dd>
+            <dt>current task</dt>
+            <dd style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+              {cur ? (
+                <>
+                  #{cur.id ?? cur.task_id ?? '—'}
+                  {(cur.batch_id || cur.batch) && (
+                    <span style={{ color: 'var(--text-muted)', marginLeft: 6 }}>
+                      · {String(cur.batch_id || cur.batch).slice(0, 12)}…
+                    </span>
+                  )}
+                </>
+              ) : data.last_task_id ? (
+                <span style={{ color: 'var(--text-faint)' }}>idle · last #{data.last_task_id}</span>
+              ) : '—'}
+            </dd>
+            <dt>processed</dt><dd>{data.processed_count ?? 0}</dd>
+            <dt>queue depth</dt>
+            <dd>
+              {data.queue_depth ?? 0}
+              <span style={{ color: 'var(--text-muted)', marginLeft: 6 }}>
+                · due {data.queue_due ?? 0} · run {data.processing ?? 0} · fail {data.failed ?? 0}
+              </span>
+            </dd>
+          </dl>
+        </>
+      )}
+    </div>
+  );
+}
+
+function LogsBlock({ data, loading, error, reload }) {
+  const items = data?.items || [];
+  return (
+    <div className="panel-card" style={{ marginTop: 20 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+        <h3 style={{ margin: 0 }}>최근 로그 (warning / error)</h3>
+        <button className="btn" onClick={reload} title="새로고침">↻</button>
+      </div>
+      {loading && !data && <window.Skeleton height={120}/>}
+      {error && <div style={{ color: 'var(--accent-reject)' }}>{String(error.message || error)}</div>}
+      {data && items.length === 0 && (
+        <div style={{ color: 'var(--text-muted)', fontSize: 12, fontFamily: 'var(--font-mono)' }}>
+          최근 warning/error 없음 — 건강합니다.
+        </div>
+      )}
+      {items.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 320, overflow: 'auto' }}>
+          {items.map((l, i) => (
+            <div
+              key={i}
+              style={{
+                fontFamily: 'var(--font-mono)',
+                fontSize: 11,
+                display: 'grid',
+                gridTemplateColumns: '80px 60px 1fr',
+                gap: 10,
+                padding: '4px 0',
+                borderBottom: '1px solid var(--border-subtle)',
+              }}
+            >
+              <span style={{ color: 'var(--text-faint)' }}>{(l.ts || '').slice(11, 19)}</span>
+              <span style={{ color: l.level === 'error' ? 'var(--accent-reject)' : 'var(--accent-warning)' }}>
+                {l.level}
+              </span>
+              <span style={{ wordBreak: 'break-word' }}>{l.message}</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
