@@ -15,6 +15,12 @@ function Dashboard() {
   const queue = window.useAsync(() => window.api.cherryPickQueue({ limit: 200 }), []);
   const summary = window.useAsync(() => window.api.assetSummary(), []);
   const recentJobs = window.useAsync(() => window.api.recentJobs(8), []);
+  const healthSd = window.useAsync(
+    () => window.api.healthSd().catch((err) => ({ ok: false, error: String(err?.body?.detail || err?.message || err) })),
+    [],
+  );
+  // SD health 는 SSE 로 안 날아오니 천천히 폴링한다 (UI 의 "언제 확인?" 에 답).
+  window.useInterval?.(() => { healthSd.reload(); }, 20000);
 
   // SSE — 실시간 큐/써머리 업데이트. 폴링 제거.
   window.useSSE((batch) => {
@@ -132,6 +138,13 @@ function Dashboard() {
         />
       </div>
 
+      <div style={{ marginTop: 20, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+        <SdHealthCard data={healthSd.data} loading={healthSd.loading} reload={healthSd.reload}/>
+        <CategoryBarChart data={summary.data} loading={summary.loading}/>
+      </div>
+
+      <CurlCheatsheet/>
+
       <div className="panel-card" style={{ marginTop: 20 }}>
         <h3>RECENT JOBS</h3>
         {recentJobs.loading && <window.Skeleton height={48}/>}
@@ -242,6 +255,144 @@ function Stat({ label, value, accent }) {
         color: accent || 'var(--text-primary)',
       }}>
         {typeof value === 'number' ? value.toLocaleString() : value}
+      </div>
+    </div>
+  );
+}
+
+function SdHealthCard({ data, loading, reload }) {
+  const ok = data?.ok === true;
+  const err = data?.error;
+  const state = loading && !data ? 'checking' : (ok ? 'ok' : (err ? 'error' : 'checking'));
+  const color = state === 'ok' ? 'var(--accent-success)' : state === 'error' ? 'var(--accent-warning)' : 'var(--text-muted)';
+  const label = state === 'ok' ? 'OK' : state === 'error' ? 'ERROR' : 'CHECKING';
+  return (
+    <div className="panel-card" style={{ padding: 16 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+        <h3 style={{ margin: 0 }}>SD · A1111</h3>
+        <button className="btn" onClick={() => reload && reload()} title="재확인">↻</button>
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <span style={{ width: 10, height: 10, borderRadius: '50%', background: color }}/>
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 20, fontWeight: 600, color }}>{label}</span>
+        {ok && typeof data.model_count === 'number' && (
+          <span style={{ color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+            · {data.model_count} models
+          </span>
+        )}
+      </div>
+      <div style={{ marginTop: 8, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)', wordBreak: 'break-all' }}>
+        {ok
+          ? (Array.isArray(data.models) && data.models.length > 0 ? data.models.slice(0, 3).join(', ') + (data.models.length > 3 ? ' …' : '') : 'A1111 /sdapi/v1/sd-models')
+          : (err || 'A1111 서버 응답 대기 중')}
+      </div>
+    </div>
+  );
+}
+
+function CategoryBarChart({ data, loading }) {
+  const entries = useMemo(() => {
+    const map = data?.by_category || {};
+    return Object.entries(map)
+      .filter(([name]) => name && name !== 'null')
+      .map(([name, count]) => ({ name, count: Number(count || 0) }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10);
+  }, [data]);
+  const max = entries.reduce((m, e) => Math.max(m, e.count), 0) || 1;
+  return (
+    <div className="panel-card" style={{ padding: 16 }}>
+      <h3 style={{ margin: '0 0 10px' }}>by_category</h3>
+      {loading && !data && <window.Skeleton height={120}/>}
+      {data && entries.length === 0 && (
+        <div style={{ color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+          카테고리 데이터 없음
+        </div>
+      )}
+      {entries.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {entries.map((e) => (
+            <div key={e.name} style={{ display: 'grid', gridTemplateColumns: '120px 1fr 48px', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={e.name}>
+                {e.name}
+              </span>
+              <div style={{ height: 10, background: 'var(--bg-elev-2, #1a1a1a)', borderRadius: 2, overflow: 'hidden' }}>
+                <div style={{
+                  width: `${(e.count / max) * 100}%`, height: '100%',
+                  background: 'var(--accent-approve)', transition: 'width 200ms ease',
+                }}/>
+              </div>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)', textAlign: 'right' }}>
+                {e.count.toLocaleString()}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CurlCheatsheet() {
+  const [copied, setCopied] = React.useState('');
+  const base = (typeof window !== 'undefined' && window.location ? window.location.origin : 'http://localhost:8080');
+  const apiKey = (typeof localStorage !== 'undefined' ? (localStorage.getItem('af_api_key') || localStorage.getItem('assetFactoryApiKey') || '') : '');
+  const authHeader = apiKey ? ` -H 'X-API-Key: ${apiKey.slice(0, 6)}…'` : " -H 'X-API-Key: $AF_API_KEY'";
+  const examples = [
+    {
+      id: 'health',
+      label: 'health / SD 체크',
+      cmd: `curl -s ${base}/api/health && echo && curl -s ${base}/api/health/sd`,
+    },
+    {
+      id: 'summary',
+      label: 'assets summary',
+      cmd: `curl -s '${base}/api/assets/summary'`,
+    },
+    {
+      id: 'queue',
+      label: 'cherry-pick queue',
+      cmd: `curl -s '${base}/api/cherry-pick/queue?limit=50'`,
+    },
+    {
+      id: 'batch',
+      label: '새 배치 생성 (POST)',
+      cmd: `curl -s -X POST ${base}/api/batches${authHeader} \\
+  -H 'Content-Type: application/json' \\
+  -d '{"project":"default","asset_key":"cat_raising_bg","count":12}'`,
+    },
+  ];
+  const doCopy = async (ex) => {
+    try {
+      await navigator.clipboard.writeText(ex.cmd);
+      setCopied(ex.id);
+      setTimeout(() => setCopied(''), 1200);
+    } catch (_) { /* noop */ }
+  };
+  return (
+    <div className="panel-card" style={{ marginTop: 14, padding: 16 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
+        <h3 style={{ margin: 0 }}>API · curl cheatsheet</h3>
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)' }}>
+          {apiKey ? 'X-API-Key 감지됨 (앞 6자리만 표시)' : '인증이 필요한 엔드포인트는 AF_API_KEY 환경변수 사용'}
+        </span>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {examples.map((ex) => (
+          <div key={ex.id} style={{ border: '1px solid var(--border-subtle)', borderRadius: 4 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 10px', borderBottom: '1px solid var(--border-subtle)' }}>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)' }}>{ex.label}</span>
+              <button className="btn" onClick={() => doCopy(ex)} title="복사">
+                {copied === ex.id ? '✓ copied' : 'copy'}
+              </button>
+            </div>
+            <pre style={{
+              margin: 0, padding: 10, fontFamily: 'var(--font-mono)', fontSize: 11,
+              color: 'var(--text-secondary)', whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+              background: 'transparent',
+            }}>{ex.cmd}</pre>
+          </div>
+        ))}
       </div>
     </div>
   );
