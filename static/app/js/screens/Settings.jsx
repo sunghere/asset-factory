@@ -2,7 +2,8 @@
    Keys:
      af_api_key           — X-API-Key used by api.jsx (also used by the legacy UI)
      af_grid_cols         — preferred grid column count for cherry-pick / gallery
-     af_auto_advance      — 'on' | 'off'  — whether Enter advances to the next candidate
+     af_auto_advance      — 'on' | 'off'  — whether Enter/x advances to the next candidate
+     af_keymap            — 'on' | 'off'  — global keyboard shortcuts in CherryPick
      af_motion            — 'full' | 'reduced' | 'none' — user-level motion preference
    None of these are sent to the backend; we only use them to style the SPA. */
 
@@ -12,6 +13,7 @@ const LS_KEYS = {
   apiKey: 'af_api_key',
   gridCols: 'af_grid_cols',
   autoAdvance: 'af_auto_advance',
+  keymap: 'af_keymap',
   motion: 'af_motion',
 };
 
@@ -21,17 +23,26 @@ function mask(s) {
   return s.slice(0, 3) + '…'.repeat(3) + s.slice(-3);
 }
 
+// legacy 저장값('true'/'false')이 남아있을 수 있어 관대하게 정규화한다.
+function normalizeOnOff(raw, def) {
+  if (raw === 'on' || raw === 'true') return 'on';
+  if (raw === 'off' || raw === 'false') return 'off';
+  return def;
+}
+
 function Settings() {
   const toasts = window.useToasts();
   const [apiKey, setApiKey] = useState(() => window.localStorage.getItem(LS_KEYS.apiKey) || '');
   const [apiKeyDraft, setApiKeyDraft] = useState(apiKey);
   const [gridCols, setGridCols] = useState(() => window.localStorage.getItem(LS_KEYS.gridCols) || '5');
-  const [autoAdvance, setAutoAdvance] = useState(() => window.localStorage.getItem(LS_KEYS.autoAdvance) || 'on');
+  const [autoAdvance, setAutoAdvance] = useState(() => normalizeOnOff(window.localStorage.getItem(LS_KEYS.autoAdvance), 'on'));
+  const [keymap, setKeymap] = useState(() => normalizeOnOff(window.localStorage.getItem(LS_KEYS.keymap), 'on'));
   const [motion, setMotion] = useState(() => window.localStorage.getItem(LS_KEYS.motion) || 'full');
 
   // Debounced autosave for the simple toggles (API key saved explicitly).
   useEffect(() => { window.localStorage.setItem(LS_KEYS.gridCols, gridCols); }, [gridCols]);
   useEffect(() => { window.localStorage.setItem(LS_KEYS.autoAdvance, autoAdvance); }, [autoAdvance]);
+  useEffect(() => { window.localStorage.setItem(LS_KEYS.keymap, keymap); }, [keymap]);
   useEffect(() => { window.localStorage.setItem(LS_KEYS.motion, motion); }, [motion]);
 
   function saveApiKey() {
@@ -97,10 +108,17 @@ function Settings() {
               </select>
             </label>
             <label>
-              <span>자동 진행 (Enter 후)</span>
+              <span>자동 진행 (Enter / x 후)</span>
               <select className="input" value={autoAdvance} onChange={(e) => setAutoAdvance(e.target.value)}>
                 <option value="on">on</option>
                 <option value="off">off</option>
+              </select>
+            </label>
+            <label>
+              <span>CherryPick 키맵</span>
+              <select className="input" value={keymap} onChange={(e) => setKeymap(e.target.value)}>
+                <option value="on">on (j/k/Enter/x/…)</option>
+                <option value="off">off (? 만 유지)</option>
               </select>
             </label>
             <label style={{ gridColumn: 'span 2' }}>

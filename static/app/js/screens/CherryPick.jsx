@@ -22,13 +22,22 @@
 
 const { useMemo: useMemoCP, useState: useStateCP, useCallback: useCallbackCP, useEffect: useEffectCP, useRef: useRefCP } = React;
 
-// 로컬 설정값 (Settings 화면이 추후 이 키들을 관장).
+// 로컬 설정값 (Settings 화면이 이 키들을 관장).
 function cpReadSetting(key, def) {
   try {
     const raw = window.localStorage?.getItem(key);
     if (raw == null) return def;
-    return raw === 'true' ? true : raw === 'false' ? false : raw;
+    return raw;
   } catch { return def; }
+}
+
+// 'on'/'off' (신규) 혹은 'true'/'false' (legacy) 어느 쪽이 저장돼 있어도
+// 토글 상태를 안정적으로 읽는다.
+function cpReadToggle(key, defaultOn) {
+  const raw = cpReadSetting(key, defaultOn ? 'on' : 'off');
+  if (raw === 'on' || raw === 'true') return true;
+  if (raw === 'off' || raw === 'false') return false;
+  return defaultOn;
 }
 
 function CherryPick({ batchId }) {
@@ -51,7 +60,11 @@ function CherryPick({ batchId }) {
   const sentinelRef = useRefCP(null);
   const toasts = window.useToasts();
 
-  const autoAdvance = cpReadSetting('af_auto_advance', 'true') !== 'false';
+  // Settings 에서 저장한 'on'/'off' (또는 legacy 'true'/'false') 어느 쪽이든 해석.
+  // af_auto_advance 기본값 on: Enter/x 후 자동으로 다음 후보로 이동.
+  // af_keymap 기본값 on: j/k/Enter/x/... 전역 키맵 활성화.
+  const autoAdvance = cpReadToggle('af_auto_advance', true);
+  const keymapEnabled = cpReadToggle('af_keymap', true);
 
   // server response 를 local mutable view 로 동기화.
   useEffectCP(() => {
@@ -249,34 +262,41 @@ function CherryPick({ batchId }) {
     });
   }, [loraCatalog]);
 
-  // 단축키 바인딩.
-  window.useKeyboard({
-    j: () => move(1),
-    ArrowRight: () => move(1),
-    k: () => move(-1),
-    ArrowLeft: () => move(-1),
-    'shift+j': () => moveRow(1),
-    'shift+k': () => moveRow(-1),
-    Enter: pick,
-    x: reject,
-    v: toggleCompare,
-    c: () => setCompareOpen(true),
-    i: () => setZoomOpen((z) => !z),
-    m: () => setMetaHidden((h) => !h),
-    f: () => filterInputRef.current && filterInputRef.current.focus(),
-    '?': () => setHelpOpen(true),
-    '/': () => setHelpOpen(true),
-    1: () => toggleLoraFilterByIndex(1),
-    2: () => toggleLoraFilterByIndex(2),
-    3: () => toggleLoraFilterByIndex(3),
-    4: () => toggleLoraFilterByIndex(4),
-    5: () => toggleLoraFilterByIndex(5),
-    6: () => toggleLoraFilterByIndex(6),
-    7: () => toggleLoraFilterByIndex(7),
-    8: () => toggleLoraFilterByIndex(8),
-    9: () => toggleLoraFilterByIndex(9),
-    Backspace: () => window.navigate('/queue'),
-  }, [move, moveRow, pick, reject, toggleCompare, toggleLoraFilterByIndex]);
+  // 단축키 바인딩. keymapEnabled=false 여도 '?' 는 항상 살려둬서 도움말로
+  // 끈 상태임을 사용자에게 알릴 수 있게 한다.
+  const keymap = keymapEnabled
+    ? {
+        j: () => move(1),
+        ArrowRight: () => move(1),
+        k: () => move(-1),
+        ArrowLeft: () => move(-1),
+        'shift+j': () => moveRow(1),
+        'shift+k': () => moveRow(-1),
+        Enter: pick,
+        x: reject,
+        v: toggleCompare,
+        c: () => setCompareOpen(true),
+        i: () => setZoomOpen((z) => !z),
+        m: () => setMetaHidden((h) => !h),
+        f: () => filterInputRef.current && filterInputRef.current.focus(),
+        '?': () => setHelpOpen(true),
+        '/': () => setHelpOpen(true),
+        1: () => toggleLoraFilterByIndex(1),
+        2: () => toggleLoraFilterByIndex(2),
+        3: () => toggleLoraFilterByIndex(3),
+        4: () => toggleLoraFilterByIndex(4),
+        5: () => toggleLoraFilterByIndex(5),
+        6: () => toggleLoraFilterByIndex(6),
+        7: () => toggleLoraFilterByIndex(7),
+        8: () => toggleLoraFilterByIndex(8),
+        9: () => toggleLoraFilterByIndex(9),
+        Backspace: () => window.navigate('/queue'),
+      }
+    : {
+        '?': () => setHelpOpen(true),
+        '/': () => setHelpOpen(true),
+      };
+  window.useKeyboard(keymap, [keymapEnabled, move, moveRow, pick, reject, toggleCompare, toggleLoraFilterByIndex]);
 
   const approvedCount = items.filter((c) => c.status === 'approved').length;
   const rejectedCount = items.filter((c) => c.status === 'rejected').length;
@@ -508,7 +528,12 @@ function CherryPick({ batchId }) {
       />
 
       {/* Help dialog */}
-      <HelpDialog open={helpOpen} onClose={() => setHelpOpen(false)}/>
+      <HelpDialog
+        open={helpOpen}
+        onClose={() => setHelpOpen(false)}
+        keymapEnabled={keymapEnabled}
+        autoAdvance={autoAdvance}
+      />
     </div>
   );
 }
@@ -691,13 +716,15 @@ function CompareDialog({ open, onClose, items, onClear }) {
   );
 }
 
-function HelpDialog({ open, onClose }) {
+function HelpDialog({ open, onClose, keymapEnabled = true, autoAdvance = true }) {
+  const enterDesc = autoAdvance ? '승인 → 다음 후보' : '승인 (자동 이동 off — 현재 위치 유지)';
+  const rejectDesc = autoAdvance ? '반려 → 다음 후보 · 5초 undo toast' : '반려 · 5초 undo toast (자동 이동 off)';
   const rows = [
     ['j / →', '다음 후보'],
     ['k / ←', '이전 후보'],
     ['Shift + j / k', '한 행 아래/위로'],
-    ['Enter', '승인 → 다음 후보'],
-    ['x', '반려 (5초 undo toast)'],
+    ['Enter', enterDesc],
+    ['x', rejectDesc],
     ['v', '비교 set 토글'],
     ['c', '비교 Dialog 열기'],
     ['i', '미리보기 zoom'],
@@ -717,6 +744,24 @@ function HelpDialog({ open, onClose }) {
       size="md"
       footer={<button className="btn primary" onClick={onClose}>확인</button>}
     >
+      {!keymapEnabled && (
+        <div
+          role="note"
+          style={{
+            marginBottom: 12,
+            padding: '8px 10px',
+            border: '1px solid var(--accent-reject, #c56)',
+            borderRadius: 6,
+            background: 'rgba(200, 80, 100, 0.08)',
+            fontSize: 12,
+          }}
+        >
+          키맵이 <b>꺼져 있습니다</b> (af_keymap = off). <code>?</code> 와 <code>/</code>만
+          동작합니다. <a href="/app/settings" onClick={(e) => { e.preventDefault(); onClose?.(); window.navigate('/settings'); }}>
+            /settings
+          </a> 에서 다시 켜세요.
+        </div>
+      )}
       <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: 'var(--font-mono)', fontSize: 13 }}>
         <tbody>
           {rows.map(([key, desc]) => (
@@ -727,6 +772,13 @@ function HelpDialog({ open, onClose }) {
           ))}
         </tbody>
       </table>
+      <div style={{ marginTop: 10, fontSize: 11, color: 'var(--text-faint)' }}>
+        현재 설정 · auto-advance: <b>{autoAdvance ? 'on' : 'off'}</b> · keymap: <b>{keymapEnabled ? 'on' : 'off'}</b>
+        {' · '}
+        <a href="/app/settings" onClick={(e) => { e.preventDefault(); onClose?.(); window.navigate('/settings'); }}>
+          /settings 에서 변경
+        </a>
+      </div>
     </window.Dialog>
   );
 }
