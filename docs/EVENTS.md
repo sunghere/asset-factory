@@ -27,6 +27,7 @@ on receipt.
 | `asset_candidate_selected` | select-candidate | `asset_id`, `job_id`, `slot_index` | AssetDetail |
 | `asset_status_changed` | status PATCH | `asset_id`, `status` | Assets |
 | `asset_regenerate_queued` | regenerate | `asset_id`, `job_id` | Assets |
+| `asset_history_restored` | `POST /api/assets/{id}/restore-history` | `asset_id`, `version`, `new_version` | AssetDetail |
 | `scan_completed` | scan flow | `project`, `count`, `root_path` | Scan screen |
 | `export_completed` | export flow | `count`, `output_dir`, `manifest_path` | Export |
 | `sd_health_changed` | periodic SD health sampling | `healthy: bool` | Persistent banner (Phase B.3) |

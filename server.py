@@ -172,6 +172,12 @@ class SelectCandidateRequest(BaseModel):
     slot_index: int = Field(ge=0)
 
 
+class RestoreHistoryRequest(BaseModel):
+    """AssetDetail 히스토리 복원 요청."""
+
+    version: int = Field(ge=1)
+
+
 class LoraSpec(BaseModel):
     """곱집합 한 칸을 차지할 LoRA 한 개."""
 
@@ -1872,6 +1878,93 @@ async def select_asset_candidate(asset_id: str, body: SelectCandidateRequest) ->
         }
     )
     return {"ok": True, "asset_id": asset_id, "validation_status": "pass" if validation.passed else "fail"}
+
+
+@app.post("/api/assets/{asset_id}/restore-history", dependencies=[Depends(require_api_key)])
+async def restore_asset_history(asset_id: str, body: RestoreHistoryRequest) -> dict[str, Any]:
+    """AssetDetail의 이전 버전(history 스냅샷)을 다시 메인으로 되돌린다.
+
+    현재 메인은 자동으로 새 history 행으로 밀려난다
+    (``replace_asset_primary_image`` 내부 로직). 따라서 복원은 idempotent하지
+    않고 히스토리가 한 버전씩 쌓인다.
+    """
+    asset = await db.get_asset(asset_id)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="에셋을 찾을 수 없습니다.")
+    history_rows = await db.list_asset_history(asset_id)
+    target = next((h for h in history_rows if int(h["version"]) == body.version), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail="해당 버전의 history가 없습니다.")
+
+    safe_src = _ensure_path_allowed(Path(target["image_path"]))
+    if not safe_src.exists():
+        raise HTTPException(status_code=410, detail="해당 버전의 파일이 사라졌습니다. 복원할 수 없습니다.")
+
+    # history.image_path 가 approved/ 트리에 남아있지 않은 레거시 케이스(예: scan 으로
+    # 추가된 에셋)를 위해, 복원본을 새 고유 경로로 복사해 primary 로 지정한다.
+    safe_key = _safe_segment(asset["asset_key"])
+    safe_job = _safe_segment(str(target.get("job_id") or "restore"))
+    dest_dir = _approved_dir(asset["project"])
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"{safe_key}__restore__v{int(target['version'])}__{safe_job}.png"
+    shutil.copy2(safe_src, dest)
+
+    meta: dict[str, Any] = {}
+    if target.get("metadata_json"):
+        try:
+            meta = json.loads(target["metadata_json"])
+        except (TypeError, json.JSONDecodeError):
+            meta = {}
+    max_colors = int(meta.get("max_colors", 32))
+    expected = meta.get("expected_size")
+    if expected is None:
+        expected = target.get("width") or asset.get("width")
+
+    validation = validate_asset(
+        image_path=dest,
+        expected_size=int(expected) if expected is not None else None,
+        max_colors=max_colors,
+    )
+    metadata_out = target.get("metadata_json")
+    if not metadata_out and meta:
+        metadata_out = json.dumps(meta, ensure_ascii=False)
+
+    ok = await db.replace_asset_primary_image(
+        asset_id,
+        image_path=str(dest),
+        width=validation.width,
+        height=validation.height,
+        color_count=validation.color_count,
+        has_alpha=validation.has_alpha,
+        validation_status="pass" if validation.passed else "fail",
+        validation_message=validation.message,
+        generation_seed=target.get("generation_seed"),
+        generation_model=target.get("generation_model"),
+        generation_prompt=target.get("generation_prompt"),
+        metadata_json=metadata_out,
+    )
+    if not ok:
+        raise HTTPException(status_code=500, detail="에셋 갱신에 실패했습니다.")
+
+    # 복원 직후 가장 최신 history version 을 리턴하면 UI 가 rehydrate 하기 쉽다.
+    new_rows = await db.list_asset_history(asset_id)
+    new_version = int(new_rows[0]["version"]) if new_rows else None
+
+    await event_broker.publish(
+        {
+            "type": ev.EVT_ASSET_HISTORY_RESTORED,
+            "asset_id": asset_id,
+            "version": body.version,
+            "new_version": new_version,
+        }
+    )
+    return {
+        "ok": True,
+        "asset_id": asset_id,
+        "restored_from_version": body.version,
+        "new_history_version": new_version,
+        "validation_status": "pass" if validation.passed else "fail",
+    }
 
 
 @app.patch("/api/assets/{asset_id}", dependencies=[Depends(require_api_key)])

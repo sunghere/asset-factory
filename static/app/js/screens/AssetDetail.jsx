@@ -8,12 +8,13 @@
      - swap primary from any candidate slot → POST /api/assets/{id}/select-candidate
 */
 
-const { useState, useMemo } = React;
+const { useState, useMemo, useCallback } = React;
 
 function AssetDetail({ assetId }) {
   const toasts = window.useToasts();
   const [tab, setTab] = useState('candidates');
   const [running, setRunning] = useState(false);
+  const [restoreTarget, setRestoreTarget] = useState(null); // history row to confirm
 
   const detail = window.useAsync(() => window.api.getAssetDetail(assetId), [assetId]);
   const history = window.useAsync(
@@ -24,6 +25,27 @@ function AssetDetail({ assetId }) {
     () => window.api.getAssetCandidates(assetId).catch(() => []),
     [assetId],
   );
+
+  // Subscribe to events that can change this asset so the detail/history/cands
+  // stay fresh even when another tab or the worker mutates things.
+  const onEvent = useCallback((e) => {
+    if (!e || typeof e !== 'object') return;
+    if (e.asset_id && e.asset_id !== assetId) return;
+    const kinds = [
+      'asset_status_changed',
+      'asset_candidate_selected',
+      'asset_history_restored',
+      'asset_approved_from_candidate',
+      'asset_approve_undone',
+      'validation_updated',
+    ];
+    if (kinds.includes(e.type)) {
+      detail.reload();
+      history.reload();
+      cands.reload();
+    }
+  }, [assetId, detail, history, cands]);
+  window.useSSE?.(onEvent);
 
   async function setStatus(status) {
     const prev = detail.data?.status;
@@ -76,6 +98,27 @@ function AssetDetail({ assetId }) {
       detail.reload(); history.reload(); cands.reload();
     } catch (e) {
       toasts.push({ kind: 'error', message: 'primary 교체 실패: ' + (e.message || e) });
+    }
+  }
+
+  async function confirmRestore() {
+    const h = restoreTarget;
+    if (!h) return;
+    setRestoreTarget(null);
+    setRunning(true);
+    try {
+      const res = await window.api.restoreAssetHistory(assetId, h.version);
+      toasts.push({
+        kind: 'success',
+        message: `v${h.version} 복원 완료${res?.new_history_version ? ` · 현재 메인이 v${res.new_history_version}로 보존됨` : ''}`,
+        ttl: 8000,
+      });
+      detail.reload(); history.reload(); cands.reload();
+    } catch (e) {
+      const msg = e?.body?.detail || e?.message || String(e);
+      toasts.push({ kind: 'error', message: '복원 실패: ' + msg });
+    } finally {
+      setRunning(false);
     }
   }
 
@@ -179,9 +222,52 @@ function AssetDetail({ assetId }) {
             </div>
 
             {tab === 'candidates' && <CandidatesTab items={cands.data || []} loading={cands.loading} onPromote={promoteCandidate}/>}
-            {tab === 'history' && <HistoryTab items={history.data || []} loading={history.loading}/>}
+            {tab === 'history' && (
+              <HistoryTab
+                items={history.data || []}
+                loading={history.loading}
+                onRestore={(h) => setRestoreTarget(h)}
+                disabled={running}
+              />
+            )}
           </div>
         </div>
+      )}
+
+      {restoreTarget && window.Dialog && (
+        <window.Dialog
+          title={`v${restoreTarget.version} 복원`}
+          onClose={() => setRestoreTarget(null)}
+          footer={(
+            <>
+              <button className="btn" onClick={() => setRestoreTarget(null)}>취소</button>
+              <button className="btn btn-primary" onClick={confirmRestore} disabled={running} autoFocus>
+                이 버전으로 복원
+              </button>
+            </>
+          )}
+        >
+          <p style={{ margin: '0 0 10px 0' }}>
+            <b>v{restoreTarget.version}</b> 스냅샷을 현재 primary 로 되돌립니다.
+          </p>
+          <ul style={{ margin: '0 0 10px 18px', padding: 0, fontSize: 12, color: 'var(--text-muted)' }}>
+            <li>현재 primary 는 새로운 history 행(최신 version)으로 자동 보존됩니다.</li>
+            <li>검증(validation)은 복원된 파일 기준으로 다시 계산됩니다.</li>
+            <li>복원 직후 되돌리려면 바로 다음 version 을 다시 복원하면 됩니다.</li>
+          </ul>
+          <div style={{
+            background: 'var(--bg-elev-3)',
+            border: '1px solid var(--border-subtle)',
+            borderRadius: 6,
+            padding: 8,
+            fontFamily: 'var(--font-mono)',
+            fontSize: 11,
+          }}>
+            snapshot_at: {(restoreTarget.snapshot_at || restoreTarget.created_at || '').slice(0, 19).replace('T', ' ')}
+            <br/>seed: {restoreTarget.generation_seed ?? '—'} · model: {restoreTarget.generation_model || '—'}
+            <br/>validation: {restoreTarget.validation_status || '—'}
+          </div>
+        </window.Dialog>
       )}
     </div>
   );
@@ -219,7 +305,7 @@ function CandidatesTab({ items, loading, onPromote }) {
   );
 }
 
-function HistoryTab({ items, loading }) {
+function HistoryTab({ items, loading, onRestore, disabled }) {
   if (loading && items.length === 0) return <window.Skeleton height={180}/>;
   if (items.length === 0) {
     return <window.EmptyState title="이력 없음" hint="primary 교체 / 재생성 이력이 여기에 쌓입니다."/>;
@@ -234,6 +320,7 @@ function HistoryTab({ items, loading }) {
             <th>validation</th>
             <th>seed</th>
             <th>model</th>
+            <th style={{ width: 110, textAlign: 'right' }}></th>
           </tr>
         </thead>
         <tbody>
@@ -251,6 +338,19 @@ function HistoryTab({ items, loading }) {
               <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{h.generation_seed ?? '—'}</td>
               <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)' }}>
                 {h.generation_model || '—'}
+              </td>
+              <td style={{ textAlign: 'right' }}>
+                {onRestore && (
+                  <button
+                    className="btn"
+                    style={{ padding: '2px 8px', fontSize: 11 }}
+                    onClick={() => onRestore(h)}
+                    disabled={disabled}
+                    title={`v${h.version} 을 primary 로 복원`}
+                  >
+                    restore
+                  </button>
+                )}
               </td>
             </tr>
           ))}

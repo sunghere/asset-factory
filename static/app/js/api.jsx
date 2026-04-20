@@ -106,6 +106,8 @@ const api = {
   },
   selectAssetCandidate: (id, body) =>
     request('POST', `/api/assets/${encodeURIComponent(id)}/select-candidate`, { body }),
+  restoreAssetHistory: (id, version) =>
+    request('POST', `/api/assets/${encodeURIComponent(id)}/restore-history`, { body: { version } }),
   regenerateAsset: (id) =>
     request('POST', `/api/assets/${encodeURIComponent(id)}/regenerate`),
   validateAsset: (id) =>

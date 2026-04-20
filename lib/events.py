@@ -36,6 +36,7 @@ EVT_ASSET_APPROVE_UNDONE = "asset_approve_undone"
 EVT_ASSET_CANDIDATE_SELECTED = "asset_candidate_selected"
 EVT_ASSET_STATUS_CHANGED = "asset_status_changed"
 EVT_ASSET_REGENERATE_QUEUED = "asset_regenerate_queued"
+EVT_ASSET_HISTORY_RESTORED = "asset_history_restored"  # AssetDetail history → restore
 
 # --- Ops / misc --------------------------------------------------------------
 EVT_SCAN_COMPLETED = "scan_completed"
@@ -61,6 +62,7 @@ EventType = Literal[
     "asset_candidate_selected",
     "asset_status_changed",
     "asset_regenerate_queued",
+    "asset_history_restored",
     "scan_completed",
     "export_completed",
     "sd_health_changed",
@@ -85,6 +87,7 @@ ALL_EVENT_TYPES: tuple[str, ...] = (
     EVT_ASSET_CANDIDATE_SELECTED,
     EVT_ASSET_STATUS_CHANGED,
     EVT_ASSET_REGENERATE_QUEUED,
+    EVT_ASSET_HISTORY_RESTORED,
     EVT_SCAN_COMPLETED,
     EVT_EXPORT_COMPLETED,
     EVT_SD_HEALTH_CHANGED,
