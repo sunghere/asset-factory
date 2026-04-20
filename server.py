@@ -16,7 +16,7 @@ from typing import Any, AsyncIterator
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -728,15 +728,40 @@ app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="stat
 
 
 @app.get("/")
-async def root() -> FileResponse:
-    """SPA 엔트리."""
-    return FileResponse(BASE_DIR / "static" / "index.html")
+async def root() -> RedirectResponse:
+    """모든 사용자 진입점은 신규 SPA(/app/)로 수렴한다."""
+    return RedirectResponse(url="/app/", status_code=302)
 
 
 @app.get("/cherry-pick")
-async def cherry_pick_page() -> FileResponse:
-    """Cherry-pick UI: 한 batch의 후보 N장을 빠르게 1장으로 줄이는 화면."""
-    return FileResponse(BASE_DIR / "static" / "cherry-pick.html")
+async def cherry_pick_redirect(batch_id: str | None = Query(default=None)) -> RedirectResponse:
+    """옛 ``/cherry-pick`` 북마크 호환.
+
+    - ``/cherry-pick?batch_id=XYZ`` → ``/app/cherry-pick/XYZ``
+    - ``/cherry-pick``              → ``/app/queue``
+
+    구 HTML/JS (``static/index.html`` · ``static/cherry-pick.html`` · ``static/app.js`` ·
+    ``static/style.css``) 는 2026-04-20 삭제. 회귀 시 git 히스토리에서 복원.
+    """
+    if batch_id:
+        return RedirectResponse(url=f"/app/cherry-pick/{batch_id}", status_code=302)
+    return RedirectResponse(url="/app/queue", status_code=302)
+
+
+@app.get("/app")
+@app.get("/app/")
+async def app_redesign_root() -> FileResponse:
+    """신규 SPA 엔트리 (React + Babel CDN)."""
+    return FileResponse(BASE_DIR / "static" / "app" / "index.html")
+
+
+@app.get("/app/{path:path}")
+async def app_redesign_catchall(path: str) -> FileResponse:
+    """Client-side router 의 deep-link (예: /app/cherry-pick/btc_xxx) 를
+    같은 SPA 셸로 서빙. ``path`` 는 라우터가 ``window.location.pathname`` 에서
+    스스로 파싱하므로 백엔드는 무시한다."""
+    del path  # 라우팅은 클라이언트가 담당
+    return FileResponse(BASE_DIR / "static" / "app" / "index.html")
 
 
 @app.get("/api/health")
@@ -1003,6 +1028,24 @@ async def list_batches(
     """
     rows = await db.list_recent_batches(since=since, limit=limit)
     return {"count": len(rows), "items": rows}
+
+
+@app.get("/api/batches/{batch_id}")
+async def get_batch_detail(batch_id: str) -> dict[str, Any]:
+    """단일 design batch 상세 + spec 재조립.
+
+    응답: ``batch_id``, ``project``, ``asset_key``, ``category``, ``job_id``,
+    ``first_created_at``, ``last_updated_at``, ``tasks`` (status 집계),
+    ``candidates`` (validation/rejected/picked 집계), ``spec`` (seeds/models/
+    prompts/loras distinct + common steps/cfg/sampler/max_colors).
+
+    체리픽 UI(`/app/batches/{id}`) 의 SpecView 가 "샘플 후보 1장" 대신 배치 전체
+    스펙을 보여주기 위해 사용.
+    """
+    detail = await db.get_batch_detail(batch_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail=f"batch not found: {batch_id}")
+    return detail
 
 
 @app.get("/api/batches/{batch_id}/candidates")

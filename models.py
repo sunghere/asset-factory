@@ -983,6 +983,120 @@ class Database:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
+    async def get_batch_detail(self, batch_id: str) -> dict[str, Any] | None:
+        """단일 design batch 상세 + spec 재구성.
+
+        배치의 원 스펙(seeds × models × prompts × loras)은 enqueue 시점에 태스크
+        별로 쪼개져 저장됐으므로, ``generation_tasks`` 의 distinct 값으로
+        재조립한다. candidate 쪽 통계(rejected / picked / validation)는 별도
+        쿼리로 붙인다. 존재하지 않는 batch 는 ``None``.
+        """
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            # 태스크 행(모든 컬럼) — 여기서 spec 재조립
+            cur = await conn.execute(
+                """
+                SELECT project, asset_key, category, job_id, prompt, negative_prompt,
+                       model_name, lora_spec_json, seed, steps, cfg, sampler,
+                       width, height, expected_size, max_colors, max_retries,
+                       status, created_at, updated_at
+                FROM generation_tasks
+                WHERE batch_id=?
+                """,
+                (batch_id,),
+            )
+            task_rows = [dict(r) for r in await cur.fetchall()]
+            if not task_rows:
+                return None
+            cur = await conn.execute(
+                """
+                SELECT validation_status, is_rejected, picked_at
+                FROM asset_candidates
+                WHERE batch_id=?
+                """,
+                (batch_id,),
+            )
+            cand_rows = [dict(r) for r in await cur.fetchall()]
+
+        # Task-level aggregates
+        tasks = {
+            "total": len(task_rows),
+            "done": sum(1 for t in task_rows if t["status"] == "done"),
+            "failed": sum(1 for t in task_rows if t["status"] == "failed"),
+            "active": sum(1 for t in task_rows if t["status"] in ("queued", "processing")),
+        }
+
+        # Candidate-level aggregates
+        validation: dict[str, int] = {"pass": 0, "fail": 0, "pending": 0}
+        for c in cand_rows:
+            v = c.get("validation_status") or "pending"
+            validation[v] = validation.get(v, 0) + 1
+        candidates = {
+            "total": len(cand_rows),
+            "rejected": sum(1 for c in cand_rows if c.get("is_rejected")),
+            "picked": sum(1 for c in cand_rows if c.get("picked_at")),
+            "validation": validation,
+        }
+
+        # Spec reconstruction — distinct values across all tasks
+        def _distinct(key: str) -> list[Any]:
+            seen: list[Any] = []
+            for t in task_rows:
+                v = t.get(key)
+                if v is None:
+                    # None 은 한 번만 대표로 보여줌 (seeds 에 None 이 섞인 건 랜덤)
+                    if None not in seen:
+                        seen.append(None)
+                    continue
+                if v not in seen:
+                    seen.append(v)
+            return seen
+
+        # metadata_json 안에 섞여있는 기타 값 대신 컬럼에서 직접 꺼낸다.
+        # cfg/steps/sampler/max_colors 등은 배치 내에서 보통 uniform 이므로
+        # "common" 섹션에 대표 1값 + 비균일 flag 를 둔다.
+        def _common(key: str) -> dict[str, Any]:
+            vals = _distinct(key)
+            return {"value": vals[0] if vals else None, "uniform": len(vals) <= 1}
+
+        first = task_rows[0]
+        spec = {
+            "seeds": _distinct("seed"),
+            "models": _distinct("model_name"),
+            "prompts": _distinct("prompt"),
+            "negative_prompts": _distinct("negative_prompt"),
+            "loras": _distinct("lora_spec_json"),
+            "common": {
+                "steps": _common("steps"),
+                "cfg": _common("cfg"),
+                "sampler": _common("sampler"),
+                "width": _common("width"),
+                "height": _common("height"),
+                "expected_size": _common("expected_size"),
+                "max_colors": _common("max_colors"),
+                "max_retries": _common("max_retries"),
+            },
+            # 실제 expand 결과 (task 수). 이론상 len(seeds)*len(models)*len(prompts)*len(loras)
+            # 와 같아야 하지만 enqueue 시 중복이 생겼을 수 있으므로 관측값을 그대로 보고한다.
+            "task_count": len(task_rows),
+        }
+
+        first_created = min((t["created_at"] for t in task_rows), default=None)
+        last_updated = max((t["updated_at"] for t in task_rows), default=None)
+
+        return {
+            "batch_id": batch_id,
+            "project": first["project"],
+            "asset_key": first["asset_key"],
+            "category": first["category"],
+            "job_id": first["job_id"],
+            "first_created_at": first_created,
+            "last_updated_at": last_updated,
+            "tasks": tasks,
+            "candidates": candidates,
+            "spec": spec,
+        }
+
     async def get_candidate_by_id(self, candidate_id: int) -> dict[str, Any] | None:
         """후보 단건 조회 (id 기준)."""
         async with aiosqlite.connect(self.db_path) as conn:

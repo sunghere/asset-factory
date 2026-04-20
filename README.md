@@ -81,7 +81,7 @@ POST /api/mcp/design_asset    POST /api/batches
   - SD 오류 분류: `timeout` / `oom` / `unreachable` / `sd_server_error` / `sd_client_error`
 - **API Key**: `.env`의 `API_KEY` 설정 시 변경 계열 엔드포인트(`POST/PATCH/DELETE`)에 `x-api-key` 필요
 - **SSE 이벤트**: `GET /api/events`로 작업/검증/내보내기/후보 선택 이벤트 스트림
-- **순수 HTML/JS UI**: `/` (`static/index.html`) — 빌드 도구 없이 바로 동작
+- **React+Babel SPA (빌드 도구 없음)**: `/` 는 `/app/` 으로 리다이렉트, SPA 셸은 `static/app/index.html`
 
 ---
 

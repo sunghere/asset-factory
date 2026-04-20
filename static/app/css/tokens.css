@@ -1,0 +1,47 @@
+/* Asset Factory — design tokens (extracted from asset-factory/project/deck.css) */
+:root {
+  --bg-base: #14100d;
+  --bg-elev-1: #1d1712;
+  --bg-elev-2: #261e18;
+  --bg-elev-3: #32271f;
+  --bg-input: #130f0b;
+
+  --text-primary: #f3ece1;
+  --text-secondary: #c7b9a5;
+  --text-muted: #8a7c6a;
+  --text-faint: #5a4e41;
+
+  --border-subtle: #2a211a;
+  --border-strong: #3d2f24;
+
+  --accent-pick: #8fb8ff;
+  --accent-pick-strong: #4c8dff;
+  --accent-approve: #f5d76e;
+  --accent-approve-strong: #f5d76e;
+  --accent-reject: #ff7a7a;
+  --accent-reject-bg: rgba(255, 122, 122, 0.08);
+  --accent-success: #6ee7a8;
+  --accent-warning: #ffb86b;
+
+  --font-sans: "Pretendard", "SF Pro Text", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, monospace;
+
+  --thumb-gap: 6px;
+}
+
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+body, #root { min-height: 100vh; }
+
+a { color: inherit; text-decoration: none; }
+button { font-family: inherit; cursor: pointer; }
+input, textarea, select { font-family: inherit; color: inherit; }

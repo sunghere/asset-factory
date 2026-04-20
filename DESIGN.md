@@ -234,8 +234,9 @@ def scan_directory(root_path):
 
 ## Visual System (v0.1.5+)
 
-v0.1.5는 cherry-pick UI를 redesign했다. 모든 색/타입/모션은 CSS 변수(`static/style.css` 상단 `:root`)에서
-정의되며, 컴포넌트는 변수만 참조한다 (raw hex 금지).
+v0.1.5는 cherry-pick UI를 redesign했다. v0.2(2026-04) 부터 모든 UI가 `/static/app/` 하위
+React+Babel SPA 로 이관됐고, 색/타입/모션 토큰은 `static/app/css/tokens.css` 의 `:root` 에서
+정의되며, 컴포넌트 CSS(`static/app/css/app.css`) 는 변수만 참조한다 (raw hex 금지).
 
 ### Design tokens
 

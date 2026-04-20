@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Asset Factory</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Pretendard:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/app/css/tokens.css"/>
+<link rel="stylesheet" href="/static/app/css/app.css"/>
+</head>
+<body>
+<div id="root"></div>
+
+<script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js"></script>
+
+<!--
+  Babel-in-browser overhead is ~150-250ms for ~1.6k LOC of JSX. Acceptable for an
+  internal tool. If this ever becomes a problem, precompile with `babel src --out-dir build`
+  and swap to plain <script> tags. See plan: docs/asset-factory-redesign-port.md
+-->
+<script>
+  // Sequential JSX loader. We deliberately don't use multiple
+  // <script type="text/babel" src="..."> tags because @babel/standalone
+  // fetches them in parallel and (depending on order of completion)
+  // executes them out of declaration order, which silently breaks
+  // dependents that reference globals like window.Router or window.AppShell.
+  // See docs/asset-factory-redesign-followups.md.
+  (async function bootstrap() {
+    const files = [
+      '/static/app/js/api.jsx',
+      '/static/app/js/hooks.jsx',
+      '/static/app/js/router.jsx',
+      '/static/app/js/chrome.jsx',
+      '/static/app/js/screens/Dashboard.jsx',
+      '/static/app/js/screens/Queue.jsx',
+      '/static/app/js/screens/CherryPick.jsx',
+      '/static/app/js/screens/Assets.jsx',
+      '/static/app/js/screens/AssetDetail.jsx',
+      '/static/app/js/screens/Batches.jsx',
+      '/static/app/js/screens/BatchDetail.jsx',
+      '/static/app/js/screens/BatchNew.jsx',
+      '/static/app/js/screens/Catalog.jsx',
+      '/static/app/js/screens/Export.jsx',
+      '/static/app/js/screens/System.jsx',
+      '/static/app/js/screens/Settings.jsx',
+      '/static/app/js/screens/Regen.jsx',
+      '/static/app/js/screens/Errors.jsx',
+      '/static/app/js/screens/Monitor.jsx',
+      '/static/app/js/app.jsx',
+    ];
+    function showFatal(html) {
+      document.getElementById('root').innerHTML =
+        '<pre style="padding:24px;color:#ff8e8e;font:13px/1.6 ui-monospace,monospace;white-space:pre-wrap">'
+        + html + '</pre>';
+    }
+    try {
+      for (const path of files) {
+        const src = await fetch(path).then((r) => {
+          if (!r.ok) throw new Error(path + ' ' + r.status);
+          return r.text();
+        });
+        let code;
+        try {
+          code = Babel.transform(src, {
+            presets: ['react'],
+            sourceMaps: 'inline',
+            filename: path,
+          }).code;
+        } catch (err) {
+          throw new Error('parse ' + path + ': ' + err.message);
+        }
+        try {
+          // Evaluate at global scope so functions become script-level globals.
+          // (Babel's own <script type=text/babel> uses an indirect eval too.)
+          (0, eval)(code + '\n//# sourceURL=' + path);
+        } catch (err) {
+          throw new Error('runtime ' + path + ': ' + (err && err.stack || err));
+        }
+      }
+    } catch (err) {
+      console.error('[bootstrap]', err);
+      showFatal(String(err && err.stack || err));
+    }
+  })();
+</script>
+</body>
+</html>
