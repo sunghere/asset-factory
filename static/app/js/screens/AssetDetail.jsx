@@ -99,9 +99,7 @@ function AssetDetail({ assetId }) {
       </div>
 
       {detail.loading && !a && <window.Skeleton height={320}/>}
-      {detail.error && (
-        <div className="error-banner"><span>⚠</span><span>{String(detail.error.message || detail.error)}</span></div>
-      )}
+      <window.ErrorPanel error={detail.error} onRetry={detail.reload}/>
 
       {a && (
         <div style={{ display: 'grid', gap: 20, gridTemplateColumns: '360px 1fr', alignItems: 'start' }}>

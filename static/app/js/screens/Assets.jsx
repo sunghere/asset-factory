@@ -174,11 +174,7 @@ function Assets() {
         </aside>
 
         <main style={{ flex: 1, minWidth: 0 }}>
-          {assets.error && (
-            <div className="error-banner" style={{ marginBottom: 12 }}>
-              <span>⚠</span><span>{String(assets.error.message || assets.error)}</span>
-            </div>
-          )}
+          <window.ErrorPanel error={assets.error} onRetry={assets.reload}/>
           {assets.loading && !assets.data && <window.Skeleton height={240}/>}
           {assets.data && rows.length === 0 && (
             <window.EmptyState title="조건과 맞는 에셋 없음" hint="좌측 필터를 완화하거나 검색어를 지워보세요."/>

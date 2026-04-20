@@ -207,6 +207,200 @@ function EmptyState({ glyph = '∅', title, hint, action }) {
   );
 }
 
+// ─── ErrorPanel ────────────────────────────────────────────────────
+// 화면 안에서 쓰는 공용 에러 패널. ApiError (status 5xx) 인 경우 큰 Retry
+// 버튼을 노출하고, body 가 있으면 <details> 에 접어서 보여준다.
+//
+// props:
+//   - error : Error | ApiError | null
+//   - onRetry : () => void   // (optional) 있으면 항상 Retry 노출
+//   - compact : boolean      // marginBottom 축소 (리스트 내부용)
+function ErrorPanel({ error, onRetry, compact }) {
+  if (!error) return null;
+  const status = error.status || null;
+  const statusText = error.statusText || '';
+  const is5xx = status != null && status >= 500 && status < 600;
+  const isAuth = status === 401 || status === 403;
+  const message = String(error.message || error);
+  const body = error.body;
+  const bodyText = body
+    ? (typeof body === 'string' ? body : JSON.stringify(body, null, 2))
+    : null;
+
+  return (
+    <div
+      className="error-banner"
+      role="alert"
+      style={{
+        flexDirection: 'column',
+        alignItems: 'stretch',
+        gap: 8,
+        marginBottom: compact ? 8 : 12,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <span>⚠</span>
+        <span style={{ flex: 1, wordBreak: 'break-word' }}>
+          {status ? <b style={{ marginRight: 6 }}>{status} {statusText}</b> : null}
+          {message}
+        </span>
+        {(onRetry || is5xx) && (
+          <button
+            className="btn btn-primary"
+            onClick={onRetry}
+            style={{ whiteSpace: 'nowrap' }}
+            disabled={!onRetry}
+            title={onRetry ? '요청을 다시 보냅니다' : '재시도 핸들러 없음'}
+          >
+            ↻ 재시도
+          </button>
+        )}
+        {isAuth && (
+          <button
+            className="btn"
+            onClick={() => { window.navigate && window.navigate('/settings'); }}
+            style={{ whiteSpace: 'nowrap' }}
+          >
+            API Key 설정
+          </button>
+        )}
+      </div>
+      {bodyText && (
+        <details>
+          <summary style={{ cursor: 'pointer', fontSize: 11, color: 'var(--text-muted)' }}>
+            응답 본문 펼치기
+          </summary>
+          <pre
+            style={{
+              margin: '6px 0 0',
+              padding: 8,
+              background: 'rgba(0,0,0,0.25)',
+              borderRadius: 4,
+              fontSize: 11,
+              maxHeight: 240,
+              overflow: 'auto',
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+            }}
+          >{bodyText}</pre>
+        </details>
+      )}
+    </div>
+  );
+}
+
+// ─── PersistentBanners ─────────────────────────────────────────────
+// AppShell 상단에 전역 알림을 노출한다:
+//  - SD offline  : /api/health/sd 실패
+//  - API key 없음 : localStorage('af_api_key') 비어있음
+// 각 배너는 '숨김' 상태를 sessionStorage 에 저장해 세션 동안만 닫힌 상태를 유지.
+function PersistentBanners() {
+  const [sdOk, setSdOk] = useState(null);
+  const [apiKeyMissing, setApiKeyMissing] = useState(() => {
+    try { return !window.localStorage?.getItem('af_api_key'); } catch { return false; }
+  });
+  const [dismissedSd, setDismissedSd] = useState(() => {
+    try { return sessionStorage.getItem('banner_sd_dismissed') === '1'; } catch { return false; }
+  });
+  const [dismissedKey, setDismissedKey] = useState(() => {
+    try { return sessionStorage.getItem('banner_apikey_dismissed') === '1'; } catch { return false; }
+  });
+
+  // Poll SD health — same cadence (15s) as AppSideNav so the two agree.
+  useEffect(() => {
+    let cancelled = false;
+    async function tick() {
+      try {
+        await window.api.healthSd();
+        if (!cancelled) setSdOk(true);
+      } catch { if (!cancelled) setSdOk(false); }
+    }
+    tick();
+    const id = setInterval(tick, 15000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+
+  // Watch af_api_key — fires when Settings saves through another tab / manual change.
+  useEffect(() => {
+    function onStorage(e) {
+      if (e.key && e.key !== 'af_api_key') return;
+      try { setApiKeyMissing(!window.localStorage.getItem('af_api_key')); } catch { /* ignore */ }
+    }
+    window.addEventListener('storage', onStorage);
+    window.addEventListener('af:apikey-changed', onStorage);
+    return () => {
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener('af:apikey-changed', onStorage);
+    };
+  }, []);
+
+  const showSd = sdOk === false && !dismissedSd;
+  const showKey = apiKeyMissing && !dismissedKey;
+  if (!showSd && !showKey) return null;
+
+  const dismissSd = () => {
+    try { sessionStorage.setItem('banner_sd_dismissed', '1'); } catch { /* ignore */ }
+    setDismissedSd(true);
+  };
+  const dismissKey = () => {
+    try { sessionStorage.setItem('banner_apikey_dismissed', '1'); } catch { /* ignore */ }
+    setDismissedKey(true);
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: '8px 24px 0' }}>
+      {showSd && (
+        <div
+          className="error-banner"
+          role="alert"
+          style={{
+            background: 'rgba(255, 184, 107, 0.08)',
+            borderColor: 'rgba(255, 184, 107, 0.35)',
+            color: 'var(--accent-warning)',
+          }}
+        >
+          <span>●</span>
+          <span style={{ flex: 1 }}>
+            <b>SD 서버 오프라인</b> — /api/health/sd 응답 없음. 새 배치는 큐에만 쌓이고 생성이 멈춥니다.
+          </span>
+          <a
+            href="/system"
+            onClick={(e) => { e.preventDefault(); window.navigate && window.navigate('/system'); }}
+            className="btn"
+          >
+            /system 열기
+          </a>
+          <button className="btn" onClick={dismissSd} title="이 세션 동안 숨김">✕</button>
+        </div>
+      )}
+      {showKey && (
+        <div
+          className="error-banner"
+          role="status"
+          style={{
+            background: 'rgba(143, 184, 255, 0.08)',
+            borderColor: 'rgba(143, 184, 255, 0.35)',
+            color: 'var(--accent-pick)',
+          }}
+        >
+          <span>🔑</span>
+          <span style={{ flex: 1 }}>
+            <b>API Key 미설정</b> — 쓰기 요청이 401 로 거부될 수 있습니다. /settings 에서 키를 등록하세요.
+          </span>
+          <a
+            href="/settings"
+            onClick={(e) => { e.preventDefault(); window.navigate && window.navigate('/settings'); }}
+            className="btn"
+          >
+            /settings 이동
+          </a>
+          <button className="btn" onClick={dismissKey} title="이 세션 동안 숨김">✕</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Skeleton ──────────────────────────────────────────────────────
 function Skeleton({ width = '100%', height = 14, style }) {
   return <div className="skeleton" style={{ width, height, ...style }}/>;
@@ -462,6 +656,8 @@ Object.assign(window, {
   useToasts,
   ErrorBoundary,
   EmptyState,
+  ErrorPanel,
+  PersistentBanners,
   Skeleton,
   Thumb,
   Dialog,

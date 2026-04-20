@@ -64,9 +64,7 @@ function Queue() {
         />
       </div>
 
-      {queue.error && <div className="error-banner" style={{ marginBottom: 12 }}>
-        <span>⚠</span><span>{String(queue.error.message || queue.error)}</span>
-      </div>}
+      <window.ErrorPanel error={queue.error} onRetry={queue.reload}/>
 
       <div className="panel-card" style={{ padding: 0 }}>
         <table className="data-table">

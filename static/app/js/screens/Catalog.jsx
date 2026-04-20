@@ -71,16 +71,7 @@ function Catalog() {
       </div>
 
       {data.loading && <window.Skeleton height={180}/>}
-      {data.error && (
-        <div className="error-banner">
-          <span>⚠</span>
-          <span>
-            {data.error.status === 503
-              ? 'SD 서버에 연결할 수 없습니다. 시스템 탭에서 상태를 확인하세요.'
-              : String(data.error.message || data.error)}
-          </span>
-        </div>
-      )}
+      <window.ErrorPanel error={data.error} onRetry={data.reload}/>
 
       {!data.loading && !data.error && (
         filtered.length === 0 ? (

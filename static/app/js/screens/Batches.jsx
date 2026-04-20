@@ -77,11 +77,7 @@ function Batches() {
         />
       </div>
 
-      {batches.error && (
-        <div className="error-banner" style={{ marginBottom: 12 }}>
-          <span>⚠</span><span>{String(batches.error.message || batches.error)}</span>
-        </div>
-      )}
+      <window.ErrorPanel error={batches.error} onRetry={batches.reload}/>
 
       <div className="panel-card" style={{ padding: 0, overflow: 'hidden' }}>
         <table className="data-table">

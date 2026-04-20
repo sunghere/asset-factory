@@ -95,9 +95,7 @@ function Dashboard() {
         }}
       />
 
-      {queue.error && <div className="error-banner" style={{ marginBottom: 16 }}>
-        <span>⚠</span><span>큐를 불러오지 못했습니다 · {String(queue.error.message || queue.error)}</span>
-      </div>}
+      <window.ErrorPanel error={queue.error} onRetry={queue.reload}/>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         {queue.loading && !queue.data && (

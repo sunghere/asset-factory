@@ -137,9 +137,7 @@ function BatchDetail({ batchId }) {
       )}
 
       {candidates.loading && !candidates.data && <window.Skeleton height={200}/>}
-      {candidates.error && (
-        <div className="error-banner"><span>⚠</span><span>{String(candidates.error.message || candidates.error)}</span></div>
-      )}
+      <window.ErrorPanel error={candidates.error} onRetry={candidates.reload}/>
 
       {!candidates.loading && !candidates.error && tab === 'candidates' && (
         items.length === 0 ? <window.EmptyState title="후보 없음" hint="아직 생성 중이거나 배치가 비어있습니다."/> : (

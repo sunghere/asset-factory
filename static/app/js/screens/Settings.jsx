@@ -39,6 +39,9 @@ function Settings() {
     if (v) window.localStorage.setItem(LS_KEYS.apiKey, v);
     else window.localStorage.removeItem(LS_KEYS.apiKey);
     setApiKey(v);
+    // Notify same-tab listeners (PersistentBanners, TopBar chip). Cross-tab
+    // changes are picked up by the native 'storage' event.
+    try { window.dispatchEvent(new CustomEvent('af:apikey-changed')); } catch { /* ignore */ }
     toasts.push({ kind: 'success', message: v ? 'API key 저장됨' : 'API key 삭제됨' });
   }
 

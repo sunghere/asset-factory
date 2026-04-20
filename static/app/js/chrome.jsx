@@ -155,11 +155,13 @@ function AppTopBar() {
 }
 
 function AppShell({ active, children }) {
+  const Banners = window.PersistentBanners;
   return (
     <div className="app-shell">
       <AppSideNav active={active}/>
       <main className="app-main">
         <AppTopBar/>
+        {Banners ? <Banners/> : null}
         <div className="app-screen">{children}</div>
       </main>
     </div>

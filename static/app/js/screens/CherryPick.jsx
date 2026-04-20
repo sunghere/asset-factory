@@ -375,9 +375,7 @@ function CherryPick({ batchId }) {
         </div>
       )}
 
-      {candidates.error && <div className="error-banner" style={{ marginBottom: 12 }}>
-        <span>⚠</span><span>{String(candidates.error.message || candidates.error)}</span>
-      </div>}
+      <window.ErrorPanel error={candidates.error} onRetry={candidates.reload}/>
 
       {/* Main: Grid + Side */}
       <div
