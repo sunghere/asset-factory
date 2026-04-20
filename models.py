@@ -796,13 +796,28 @@ class Database:
             )
             await conn.commit()
 
-    async def list_approved_assets(self, project: str | None = None) -> list[dict[str, Any]]:
-        """승인된 에셋 목록을 반환한다."""
+    async def list_approved_assets(
+        self,
+        project: str | None = None,
+        category: str | None = None,
+        since: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """승인된 에셋 목록을 반환한다.
+
+        ``project`` · ``category`` 는 단순 equality, ``since`` 는 ISO8601 문자열로
+        ``updated_at >= since`` (없으면 ``created_at``) 비교한다.
+        """
         query = "SELECT * FROM assets WHERE status='approved'"
         params: list[Any] = []
         if project:
             query += " AND project=?"
             params.append(project)
+        if category:
+            query += " AND category=?"
+            params.append(category)
+        if since:
+            query += " AND COALESCE(updated_at, created_at) >= ?"
+            params.append(since)
         query += " ORDER BY asset_key ASC"
 
         async with aiosqlite.connect(self.db_path) as conn:

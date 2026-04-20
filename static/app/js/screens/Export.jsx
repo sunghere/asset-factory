@@ -1,21 +1,112 @@
 /* Export — copy approved assets to a target directory (+ optional manifest).
-   Matches ExportRequest(project?, output_dir, save_manifest). We also show
-   a dry-run preview by fetching /api/export/manifest first, so the user
-   sees what they're about to copy before committing to disk writes. */
+   Matches ExportRequest(project?, category?, since?, output_dir, save_manifest).
+   미리보기는 /api/export/manifest 를 그대로 사용하고, 응답에 포함된 size_bytes
+   합계로 실시간 용량(MB) 을 표시한다. 파일 트리는 project/category 로 그루핑
+   하여 실제 복사될 디렉토리 구조를 한눈에 보여준다. */
 
-const { useState } = React;
+const { useState, useMemo } = React;
+
+function _fmtBytes(n) {
+  if (n == null || Number.isNaN(n)) return '—';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+function _sinceChoices() {
+  // 상단 4개 preset + custom. value 는 ISO8601 문자열(UTC) 로 직렬화.
+  const now = new Date();
+  const iso = (d) => new Date(d).toISOString();
+  return [
+    { label: '전체', value: '' },
+    { label: '최근 24시간', value: iso(now.getTime() - 24 * 3600 * 1000) },
+    { label: '최근 7일', value: iso(now.getTime() - 7 * 24 * 3600 * 1000) },
+    { label: '최근 30일', value: iso(now.getTime() - 30 * 24 * 3600 * 1000) },
+  ];
+}
+
+function _groupTree(items) {
+  // { project: { category: [items...] } }
+  const tree = new Map();
+  for (const it of items) {
+    if (!tree.has(it.project)) tree.set(it.project, new Map());
+    const byCat = tree.get(it.project);
+    if (!byCat.has(it.category)) byCat.set(it.category, []);
+    byCat.get(it.category).push(it);
+  }
+  return tree;
+}
+
+function FileTree({ tree, outputRoot }) {
+  // 순수 표시용 — project/category 별 접힘 가능한 <details> 로 내보낸다.
+  return (
+    <div style={{ padding: 12, fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+      <div style={{ color: 'var(--text-faint)', marginBottom: 8 }}>{outputRoot || '(output_dir)'}/</div>
+      {[...tree.entries()].map(([project, byCat]) => {
+        const projTotal = [...byCat.values()].reduce((a, arr) => a + arr.length, 0);
+        return (
+          <details key={project} open style={{ marginBottom: 6 }}>
+            <summary style={{ cursor: 'pointer', color: 'var(--text)' }}>
+              📁 {project}/ <span className="hint" style={{ marginLeft: 6 }}>{projTotal}</span>
+            </summary>
+            <div style={{ paddingLeft: 16 }}>
+              {[...byCat.entries()].map(([category, arr]) => (
+                <details key={category} style={{ marginTop: 4 }}>
+                  <summary style={{ cursor: 'pointer', color: 'var(--text-muted)' }}>
+                    📂 {category}/ <span className="hint" style={{ marginLeft: 6 }}>{arr.length}</span>
+                  </summary>
+                  <div style={{ paddingLeft: 16, color: 'var(--text-faint)' }}>
+                    {arr.slice(0, 50).map((it) => (
+                      <div key={it.asset_key} title={it.path}>
+                        🖼 {it.asset_key}.png
+                        <span className="hint" style={{ marginLeft: 8 }}>
+                          {it.width}×{it.height}
+                          {it.size_bytes != null ? ` · ${_fmtBytes(it.size_bytes)}` : ''}
+                        </span>
+                      </div>
+                    ))}
+                    {arr.length > 50 && (
+                      <div className="hint" style={{ marginTop: 4 }}>
+                        … {arr.length - 50}개 더
+                      </div>
+                    )}
+                  </div>
+                </details>
+              ))}
+            </div>
+          </details>
+        );
+      })}
+    </div>
+  );
+}
 
 function Export() {
   const toasts = window.useToasts();
   const [project, setProject] = useState('');
+  const [category, setCategory] = useState('');
+  const [sincePreset, setSincePreset] = useState('');
   const [outputDir, setOutputDir] = useState('~/workspace/assets');
   const [saveManifest, setSaveManifest] = useState(true);
   const [exporting, setExporting] = useState(false);
+  const [view, setView] = useState('tree'); // 'tree' | 'table'
 
   const projects = window.useAsync(() => window.api.listProjects().catch(() => []), []);
-  const manifest = window.useAsync(
-    () => window.api.getManifest(project || undefined),
+  const summary = window.useAsync(
+    () => window.api.assetSummary(project || undefined).catch(() => null),
     [project],
+  );
+
+  const since = sincePreset;
+  const manifest = window.useAsync(
+    () =>
+      window.api.getManifest({
+        project: project || undefined,
+        category: category || undefined,
+        since: since || undefined,
+      }),
+    [project, category, since],
   );
 
   async function doExport() {
@@ -23,6 +114,8 @@ function Export() {
     try {
       const res = await window.api.runExport({
         project: project || null,
+        category: category || null,
+        since: since || null,
         output_dir: outputDir,
         save_manifest: saveManifest,
       });
@@ -39,16 +132,30 @@ function Export() {
   }
 
   const items = manifest.data?.items || [];
-  const totalBytes = 0; // server doesn't give size; we show count only
+  const totalBytes = manifest.data?.total_bytes ?? items.reduce((a, it) => a + (it.size_bytes || 0), 0);
+  const tree = useMemo(() => _groupTree(items), [items]);
+  const categoryOptions = useMemo(() => {
+    const byCat = summary.data?.by_category || {};
+    return Object.keys(byCat).sort();
+  }, [summary.data]);
 
   return (
     <div>
       <window.PageToolbar
-        left={<span className="chip">미리보기 <b>{items.length}</b>건</span>}
+        left={
+          <>
+            <span className="chip">
+              미리보기 <b>{items.length}</b>건
+            </span>
+            <span className="chip" title="선택 승인본 총 용량">
+              총 <b>{_fmtBytes(totalBytes)}</b>
+            </span>
+          </>
+        }
         right={<button className="btn" onClick={manifest.reload} title="새로고침">↻</button>}
         info={{
           title: 'export',
-          text: '승인된 assets 를 지정 디렉토리로 복사. save_manifest 체크 시 asset-manifest.json 동봉. 경로는 서버 allowlist 내부만 허용.',
+          text: '승인된 assets 를 지정 디렉토리로 복사. project/category/since 로 필터 가능하며, save_manifest 체크 시 asset-manifest.json 동봉. 경로는 서버 allowlist 내부만 허용.',
         }}
       />
 
@@ -67,6 +174,40 @@ function Export() {
                 })}
               </select>
             </label>
+
+            <label style={{ gridColumn: 'span 2' }}>
+              <span>카테고리 <span className="hint">(빈 값 = 전체)</span></span>
+              <select
+                className="input"
+                value={category}
+                onChange={(e) => setCategory(e.target.value)}
+                disabled={categoryOptions.length === 0}
+              >
+                <option value="">— 전체 카테고리 —</option>
+                {categoryOptions.map((c) => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </select>
+            </label>
+
+            <label style={{ gridColumn: 'span 2' }}>
+              <span>변경 이후</span>
+              <select
+                className="input"
+                value={sincePreset}
+                onChange={(e) => setSincePreset(e.target.value)}
+              >
+                {_sinceChoices().map((c) => (
+                  <option key={c.label} value={c.value}>{c.label}</option>
+                ))}
+              </select>
+              {sincePreset && (
+                <span className="hint" style={{ marginTop: 4, display: 'block' }}>
+                  {new Date(sincePreset).toLocaleString()} 이후 업데이트된 승인본만
+                </span>
+              )}
+            </label>
+
             <label style={{ gridColumn: 'span 2' }}>
               <span>출력 디렉토리</span>
               <input
@@ -86,14 +227,15 @@ function Export() {
             </label>
           </div>
 
-          <div style={{ marginTop: 16, display: 'flex', gap: 8 }}>
+          <div style={{ marginTop: 16, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <button
               type="button"
               className="btn btn-primary"
               onClick={doExport}
               disabled={exporting || items.length === 0}
+              title={items.length === 0 ? '내보낼 승인본이 없습니다' : `${_fmtBytes(totalBytes)} 복사`}
             >
-              {exporting ? '복사 중…' : `내보내기 (${items.length}건)`}
+              {exporting ? '복사 중…' : `내보내기 (${items.length}건 · ${_fmtBytes(totalBytes)})`}
             </button>
             <button type="button" className="btn" onClick={manifest.reload}>미리보기 새로고침</button>
           </div>
@@ -103,9 +245,36 @@ function Export() {
         </div>
 
         <div className="panel-card" style={{ padding: 0, overflow: 'hidden' }}>
-          <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <h3 style={{ margin: 0 }}>미리보기 <span className="hint">{items.length}건</span></h3>
-            {manifest.loading && <span className="hint">로드 중…</span>}
+          <div
+            style={{
+              padding: '12px 16px',
+              borderBottom: '1px solid var(--border-subtle)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 12,
+            }}
+          >
+            <h3 style={{ margin: 0 }}>
+              미리보기 <span className="hint">{items.length}건 · {_fmtBytes(totalBytes)}</span>
+            </h3>
+            <div style={{ display: 'flex', gap: 4 }}>
+              <button
+                className={`btn btn-sm${view === 'tree' ? ' btn-primary' : ''}`}
+                onClick={() => setView('tree')}
+                title="파일 트리"
+              >
+                트리
+              </button>
+              <button
+                className={`btn btn-sm${view === 'table' ? ' btn-primary' : ''}`}
+                onClick={() => setView('table')}
+                title="표 형태"
+              >
+                표
+              </button>
+              {manifest.loading && <span className="hint" style={{ alignSelf: 'center' }}>로드 중…</span>}
+            </div>
           </div>
 
           {manifest.error ? (
@@ -116,7 +285,11 @@ function Export() {
             </div>
           ) : items.length === 0 ? (
             <div style={{ padding: 40 }}>
-              <window.EmptyState title="내보낼 승인본이 없습니다" hint="먼저 /cherry-pick에서 승인하세요."/>
+              <window.EmptyState title="내보낼 승인본이 없습니다" hint="필터를 조정하거나 /cherry-pick에서 승인하세요." />
+            </div>
+          ) : view === 'tree' ? (
+            <div style={{ maxHeight: 520, overflow: 'auto' }}>
+              <FileTree tree={tree} outputRoot={outputDir} />
             </div>
           ) : (
             <div style={{ maxHeight: 520, overflow: 'auto' }}>
@@ -127,6 +300,7 @@ function Export() {
                     <th>category</th>
                     <th>asset_key</th>
                     <th>dims</th>
+                    <th>size</th>
                     <th>sha256</th>
                   </tr>
                 </thead>
@@ -138,6 +312,9 @@ function Export() {
                       <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{it.asset_key}</td>
                       <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>
                         {it.width}×{it.height}
+                      </td>
+                      <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>
+                        {_fmtBytes(it.size_bytes)}
                       </td>
                       <td style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)' }}>
                         {it.sha256 ? it.sha256.slice(0, 12) : '—'}

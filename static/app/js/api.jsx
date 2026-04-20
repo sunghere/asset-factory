@@ -146,9 +146,13 @@ const api = {
 
   // Export
   runExport: (body) => request('POST', '/api/export', { body }),
-  getManifest: (project) => {
-    const q = project ? `?project=${encodeURIComponent(project)}` : '';
-    return request('GET', `/api/export/manifest${q}`);
+  getManifest: ({ project, category, since } = {}) => {
+    const params = new URLSearchParams();
+    if (project) params.set('project', project);
+    if (category) params.set('category', category);
+    if (since) params.set('since', since);
+    const q = params.toString();
+    return request('GET', `/api/export/manifest${q ? `?${q}` : ''}`);
   },
 
   // System

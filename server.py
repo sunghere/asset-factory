@@ -161,6 +161,8 @@ class ExportRequest(BaseModel):
     """승인 에셋 내보내기 요청."""
 
     project: str | None = None
+    category: str | None = None
+    since: str | None = None
     output_dir: str = str(Path.home() / "workspace" / "assets")
     save_manifest: bool = True
 
@@ -2220,7 +2222,11 @@ async def batch_regenerate_failed(
 @app.post("/api/export", dependencies=[Depends(require_api_key)])
 async def export_assets(request: ExportRequest) -> dict[str, Any]:
     """승인된 에셋을 대상 디렉토리로 복사한다."""
-    approved = await db.list_approved_assets(project=request.project)
+    approved = await db.list_approved_assets(
+        project=request.project,
+        category=request.category,
+        since=request.since,
+    )
     if not approved:
         return {"exported_count": 0, "output_dir": request.output_dir}
 
@@ -2248,9 +2254,20 @@ async def export_assets(request: ExportRequest) -> dict[str, Any]:
     manifest_path: str | None = None
     if request.save_manifest:
         manifest_items: list[dict[str, Any]] = []
+        total_bytes = 0
         for asset in approved:
             image_path = Path(asset["image_path"])
-            sha256 = hashlib.sha256(image_path.read_bytes()).hexdigest() if image_path.exists() else None
+            sha256: str | None = None
+            size_bytes: int | None = None
+            if image_path.exists():
+                try:
+                    data = image_path.read_bytes()
+                    sha256 = hashlib.sha256(data).hexdigest()
+                    size_bytes = len(data)
+                    total_bytes += size_bytes
+                except OSError:
+                    sha256 = None
+                    size_bytes = None
             manifest_items.append(
                 {
                     "project": asset["project"],
@@ -2260,9 +2277,14 @@ async def export_assets(request: ExportRequest) -> dict[str, Any]:
                     "width": asset["width"],
                     "height": asset["height"],
                     "sha256": sha256,
+                    "size_bytes": size_bytes,
                 }
             )
-        manifest_data = {"count": len(manifest_items), "items": manifest_items}
+        manifest_data = {
+            "count": len(manifest_items),
+            "total_bytes": total_bytes,
+            "items": manifest_items,
+        }
         manifest_file = output_root / "asset-manifest.json"
         manifest_file.write_text(json.dumps(manifest_data, ensure_ascii=False, indent=2), encoding="utf-8")
         manifest_path = str(manifest_file)
@@ -2274,13 +2296,36 @@ async def export_assets(request: ExportRequest) -> dict[str, Any]:
 
 
 @app.get("/api/export/manifest")
-async def export_manifest(project: str | None = None) -> dict[str, Any]:
-    """승인본 기준 manifest를 반환한다."""
-    approved = await db.list_approved_assets(project=project)
+async def export_manifest(
+    project: str | None = None,
+    category: str | None = None,
+    since: str | None = None,
+) -> dict[str, Any]:
+    """승인본 기준 manifest를 반환한다.
+
+    Export 화면 미리보기 + 실 export 의 공용 소스. 각 항목은 파일 바이트 크기
+    (``size_bytes``) 를 포함하여 Export 화면에서 총 용량(MB)을 라이브로 계산할
+    수 있다. sha256 은 bytes 를 읽어 계산하므로 큰 프로젝트에서는 비용이 있으나
+    export 후보 = 승인본 = 수십~수백 장 수준이라 실 운영 범위에서는 무시 가능.
+    """
+    approved = await db.list_approved_assets(
+        project=project, category=category, since=since
+    )
     items: list[dict[str, Any]] = []
+    total_bytes = 0
     for asset in approved:
         image_path = Path(asset["image_path"])
-        sha256 = hashlib.sha256(image_path.read_bytes()).hexdigest() if image_path.exists() else None
+        sha256: str | None = None
+        size_bytes: int | None = None
+        if image_path.exists():
+            try:
+                data = image_path.read_bytes()
+                sha256 = hashlib.sha256(data).hexdigest()
+                size_bytes = len(data)
+                total_bytes += size_bytes
+            except OSError:
+                sha256 = None
+                size_bytes = None
         items.append(
             {
                 "project": asset["project"],
@@ -2290,9 +2335,11 @@ async def export_manifest(project: str | None = None) -> dict[str, Any]:
                 "width": asset["width"],
                 "height": asset["height"],
                 "sha256": sha256,
+                "size_bytes": size_bytes,
+                "updated_at": asset.get("updated_at") or asset.get("created_at"),
             }
         )
-    return {"count": len(items), "items": items}
+    return {"count": len(items), "total_bytes": total_bytes, "items": items}
 
 
 async def sse_event_generator(
