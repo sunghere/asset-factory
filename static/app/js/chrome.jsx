@@ -50,7 +50,6 @@ const NAV_ITEMS = [
   { key: 'catalog',   icon: '⊞', label: '/catalog',   to: '/catalog' },
   { key: 'export',    icon: '↑', label: '/export',    to: '/export' },
   { key: 'system',    icon: '⚙', label: '/system',    to: '/system' },
-  { key: 'monitor',   icon: '◉', label: '/monitor',   to: '/monitor' },
   { key: 'settings',  icon: '·',  label: '/settings',  to: '/settings' },
 ];
 

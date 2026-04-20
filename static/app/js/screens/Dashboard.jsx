@@ -115,7 +115,7 @@ function Dashboard() {
             glyph="∅"
             title="오늘 처리할 batch 없음"
             hint="POST /api/batches 로 새 batch를 등록하세요."
-            action={<button className="btn" onClick={() => window.navigate('/regen')}>+ 재생성으로 이동</button>}
+            action={<button className="btn" onClick={() => window.navigate('/batches/new')}>+ 새 batch</button>}
           />
         )}
         {projects.map((p) => (
