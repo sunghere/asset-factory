@@ -1,4 +1,23 @@
-/* Tiny fetch + EventSource wrapper. Exposes window.api. */
+/* Tiny fetch + EventSource wrapper. Exposes window.api.
+
+   One-shot legacy localStorage migration:
+     assetFactoryApiKey  → af_api_key
+   Runs at bundle evaluation time (before any request()). If af_api_key is
+   already set, we never overwrite it; the legacy key is just removed to
+   keep devtools tidy. Missing/unsupported localStorage is ignored. */
+(function migrateApiKey() {
+  try {
+    const ls = window.localStorage;
+    if (!ls) return;
+    const legacy = ls.getItem('assetFactoryApiKey');
+    if (legacy == null) return;
+    const current = ls.getItem('af_api_key');
+    if (!current && legacy) ls.setItem('af_api_key', legacy);
+    ls.removeItem('assetFactoryApiKey');
+  } catch {
+    // storage disabled (private mode / quota) — nothing to migrate.
+  }
+})();
 
 class ApiError extends Error {
   constructor(status, statusText, body) {

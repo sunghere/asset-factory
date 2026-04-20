@@ -101,6 +101,46 @@ function AppSideNav({ active }) {
   );
 }
 
+function ApiKeyChip() {
+  // Reads localStorage('af_api_key') and listens for af:apikey-changed +
+  // cross-tab storage events. Click jumps to /settings for configuration.
+  const [hasKey, setHasKey] = useState(() => {
+    try { return !!window.localStorage?.getItem('af_api_key'); } catch { return false; }
+  });
+  useEffect(() => {
+    function sync() {
+      try { setHasKey(!!window.localStorage.getItem('af_api_key')); } catch { /* ignore */ }
+    }
+    function onStorage(e) {
+      if (e && e.key && e.key !== 'af_api_key') return;
+      sync();
+    }
+    window.addEventListener('storage', onStorage);
+    window.addEventListener('af:apikey-changed', sync);
+    return () => {
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener('af:apikey-changed', sync);
+    };
+  }, []);
+  const cls = `chip chip-small ${hasKey ? 'chip-ok' : 'chip-warn'}`;
+  const title = hasKey
+    ? 'API 키 설정됨 (Settings에서 변경)'
+    : 'API 키 없음 — 쓰기 API 호출은 401. Settings에서 설정하세요.';
+  return (
+    <window.Link to="/settings" className={cls} title={title} style={{ textDecoration: 'none' }}>
+      <span
+        aria-hidden
+        style={{
+          width: 6, height: 6, borderRadius: '50%', display: 'inline-block',
+          marginRight: 6,
+          background: hasKey ? 'var(--accent-success)' : 'var(--accent-reject)',
+        }}
+      />
+      API {hasKey ? 'set' : 'missing'}
+    </window.Link>
+  );
+}
+
 function AppTopBar() {
   // Live cherry-pick queue snapshot drives the pill numbers.
   const [data, setData] = useState({ batches: null, remaining: null, sdOk: null });
@@ -148,6 +188,7 @@ function AppTopBar() {
         {data.remaining != null && <> · {data.remaining}장 남음</>}
       </span>
       <div style={{ flex: 1 }}/>
+      <ApiKeyChip/>
       <span style={{ color: 'var(--text-faint)' }}>j k nav · ? help</span>
       <div className="avatar">YK</div>
     </header>
@@ -168,4 +209,4 @@ function AppShell({ active, children }) {
   );
 }
 
-Object.assign(window, { Monogram, Kbd, SegProgress, AppSideNav, AppTopBar, AppShell });
+Object.assign(window, { Monogram, Kbd, SegProgress, AppSideNav, AppTopBar, AppShell, ApiKeyChip });

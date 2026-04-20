@@ -404,6 +404,25 @@ button { cursor: pointer; font: inherit; }
 .page-toolbar .chip.warn { color: var(--accent-warning, var(--accent-pick)); }
 .page-toolbar .chip.fail { color: var(--accent-reject); }
 
+/* Generic chip — used outside .page-toolbar (e.g. AppTopBar API-key indicator).
+   Keeps the same visual grammar as the page-toolbar variant but can stand alone. */
+.chip-small {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--bg-elev-2, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+  line-height: 1.4;
+}
+.chip-small.chip-ok { color: var(--accent-success); border-color: rgba(46, 204, 113, 0.25); }
+.chip-small.chip-warn { color: var(--accent-reject); border-color: rgba(255, 90, 90, 0.3); }
+.chip-small:hover { filter: brightness(1.1); }
+
 /* PageInfo 팝오버 — 설계문서 디스크립션을 담는 숨은 도움말 */
 .page-info {
   position: relative;
