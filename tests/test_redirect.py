@@ -18,6 +18,14 @@ def _client() -> TestClient:
     return TestClient(server.app)
 
 
+def test_root_redirects_to_app_spa() -> None:
+    """루트 `/` 는 신규 SPA 엔트리 `/app/` 로 보낸다."""
+    with _client() as client:
+        r = client.get("/", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"] == "/app/"
+
+
 def test_redirect_valid_batch_id_goes_to_app_cherry_pick() -> None:
     with _client() as client:
         r = client.get("/cherry-pick?batch_id=btc_ABC-123", follow_redirects=False)

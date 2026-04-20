@@ -107,6 +107,27 @@ function Assets() {
     [project, status, validation, category],
   );
 
+  const onSseBatch = useCallback((batch) => {
+    if (!Array.isArray(batch) || !batch.length) return;
+    const kinds = new Set([
+      'asset_approved_from_candidate',
+      'asset_approve_undone',
+      'asset_candidate_selected',
+      'asset_status_changed',
+      'asset_regenerate_queued',
+      'asset_history_restored',
+      'validation_updated',
+    ]);
+    for (const e of batch) {
+      if (!e || typeof e !== 'object') continue;
+      if (!kinds.has(e.type)) continue;
+      summary.reload();
+      assets.reload();
+      return;
+    }
+  }, [summary, assets]);
+  window.useSSE?.(onSseBatch);
+
   // 필터 변경 시 선택/페이지 초기화.
   useEffect(() => { setSelected(new Set()); setPage(1); lastAnchorIdx.current = null; },
     [project, status, validation, category, q, sortKey, sortDir, pageSize]);

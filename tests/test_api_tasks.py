@@ -177,3 +177,19 @@ def test_retry_failed_404_for_unknown_batch(isolated) -> None:
     with TestClient(server.app) as client:
         r = client.post("/api/batches/btc_nope/retry-failed")
     assert r.status_code == 404
+
+
+def test_retry_failed_requires_api_key_when_set(isolated, monkeypatch) -> None:
+    """``API_KEY`` 가 설정되면 ``POST …/retry-failed`` 에 ``x-api-key`` 가 필요하다."""
+    db, _ = isolated
+    monkeypatch.setattr(server, "api_key", "secret")
+    asyncio.run(_seed_tasks(db, "btc_rf_auth", ["failed"]))
+    with TestClient(server.app) as client:
+        unauth = client.post("/api/batches/btc_rf_auth/retry-failed")
+        assert unauth.status_code == 401
+        ok = client.post(
+            "/api/batches/btc_rf_auth/retry-failed",
+            headers={"x-api-key": "secret"},
+        )
+        assert ok.status_code == 200
+        assert ok.json()["retried_count"] == 1

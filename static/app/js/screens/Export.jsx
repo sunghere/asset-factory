@@ -4,7 +4,7 @@
    합계로 실시간 용량(MB) 을 표시한다. 파일 트리는 project/category 로 그루핑
    하여 실제 복사될 디렉토리 구조를 한눈에 보여준다. */
 
-const { useState, useMemo } = React;
+const { useState, useMemo, useCallback } = React;
 
 function _fmtBytes(n) {
   if (n == null || Number.isNaN(n)) return '—';
@@ -108,6 +108,18 @@ function Export() {
       }),
     [project, category, since],
   );
+
+  const onSseBatch = useCallback((batch) => {
+    if (!Array.isArray(batch) || !batch.length) return;
+    for (const e of batch) {
+      if (e && e.type === 'export_completed') {
+        summary.reload();
+        manifest.reload();
+        return;
+      }
+    }
+  }, [summary, manifest]);
+  window.useSSE?.(onSseBatch);
 
   async function doExport() {
     setExporting(true);

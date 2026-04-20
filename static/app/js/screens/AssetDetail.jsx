@@ -26,26 +26,29 @@ function AssetDetail({ assetId }) {
     [assetId],
   );
 
-  // Subscribe to events that can change this asset so the detail/history/cands
-  // stay fresh even when another tab or the worker mutates things.
-  const onEvent = useCallback((e) => {
-    if (!e || typeof e !== 'object') return;
-    if (e.asset_id && e.asset_id !== assetId) return;
-    const kinds = [
+  // useSSE passes an array per flush (see hooks.jsx); same contract as Dashboard.
+  const onSseBatch = useCallback((batch) => {
+    if (!Array.isArray(batch) || !batch.length) return;
+    const kinds = new Set([
       'asset_status_changed',
       'asset_candidate_selected',
       'asset_history_restored',
       'asset_approved_from_candidate',
       'asset_approve_undone',
       'validation_updated',
-    ];
-    if (kinds.includes(e.type)) {
-      detail.reload();
-      history.reload();
-      cands.reload();
+    ]);
+    for (const e of batch) {
+      if (!e || typeof e !== 'object') continue;
+      if (e.asset_id && e.asset_id !== assetId) continue;
+      if (kinds.has(e.type)) {
+        detail.reload();
+        history.reload();
+        cands.reload();
+        return;
+      }
     }
   }, [assetId, detail, history, cands]);
-  window.useSSE?.(onEvent);
+  window.useSSE?.(onSseBatch);
 
   async function setStatus(status) {
     const prev = detail.data?.status;
