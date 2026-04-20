@@ -61,6 +61,10 @@ const api = {
     request('GET', `/api/batches/${encodeURIComponent(batchId)}`),
   listBatchCandidates: (batchId) =>
     request('GET', `/api/batches/${encodeURIComponent(batchId)}/candidates`),
+  listBatchTasks: (batchId) =>
+    request('GET', `/api/batches/${encodeURIComponent(batchId)}/tasks`),
+  retryFailedTasks: (batchId) =>
+    request('POST', `/api/batches/${encodeURIComponent(batchId)}/retry-failed`),
   rejectCandidate: (batchId, candidateId) =>
     request('POST', `/api/batches/${encodeURIComponent(batchId)}/candidates/${candidateId}/reject`),
   unrejectCandidate: (batchId, candidateId) =>
@@ -139,9 +143,27 @@ const api = {
 
   // System
   runGc: () => request('POST', '/api/system/gc/run'),
+  systemDb: () => request('GET', '/api/system/db'),
+  systemWorker: () => request('GET', '/api/system/worker'),
+  systemLogs: ({ level, limit } = {}) => {
+    const qs = new URLSearchParams();
+    if (level) qs.set('level', level);
+    if (limit) qs.set('limit', String(limit));
+    const q = qs.toString();
+    return request('GET', `/api/system/logs/recent${q ? '?' + q : ''}`);
+  },
 
   // Convenience builders
   imageUrl: (asset) => asset?.image_url || (asset?.id ? `/api/assets/${asset.id}/image` : null),
+  candidateImageUrl: (candidate, size) => {
+    if (!candidate) return null;
+    const base = candidate.image_url
+      || (candidate.id ? `/api/asset-candidates/${candidate.id}/image` : null);
+    if (!base) return null;
+    if (!size) return base;
+    const sep = base.includes('?') ? '&' : '?';
+    return `${base}${sep}size=${size}`;
+  },
 
   // SSE
   events(onEvent, onError) {
