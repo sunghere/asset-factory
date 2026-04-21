@@ -38,8 +38,8 @@ def test_validate_asset_reports_size_palette_and_format_failures(tmp_path: Path)
     assert "포맷 오류" in result.message
 
 
-class _ColorProbe:
-    def convert(self, _mode: str) -> _ColorProbe:
+class _MockImageWithExhaustedPalette:
+    def convert(self, _mode: str) -> _MockImageWithExhaustedPalette:
         return self
 
     def getcolors(self, *, maxcolors: int) -> None:
@@ -48,4 +48,4 @@ class _ColorProbe:
 
 
 def test_count_colors_caps_when_palette_exceeds_limit() -> None:
-    assert _count_colors(_ColorProbe()) == 1024 * 1024
+    assert _count_colors(_MockImageWithExhaustedPalette()) == 1024 * 1024

@@ -55,7 +55,7 @@ def test_load_rejected_paths_returns_empty_on_schema_error(tmp_path: Path) -> No
     assert _load_rejected_paths(root) == set()
 
 
-def test_gc_deletes_rejected_files_only_inside_candidates_tree(tmp_path: Path) -> None:
+def test_gc_deletes_rejected_files_only_inside_candidates_dir(tmp_path: Path) -> None:
     root = tmp_path / "data"
     candidates = root / "candidates" / "proj"
     candidates.mkdir(parents=True)
