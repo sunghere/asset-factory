@@ -190,7 +190,7 @@ function Queue() {
                   </td>
                   <td style={{ textAlign: 'right', position: 'relative' }}>
                     <button
-                      className="btn primary"
+                      className="btn btn-primary"
                       onClick={(e) => {
                         e.stopPropagation();
                         setCursor(idx);
