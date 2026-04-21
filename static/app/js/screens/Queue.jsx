@@ -14,27 +14,46 @@ const SINCE_PRESETS = [
   { key: '7d', label: '최근 7일' },
 ];
 
-function _sinceIso(key) {
-  const now = new Date();
-  if (key === '24h') return new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
-  if (key === '7d') return new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
-  const kstNow = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Seoul' }));
-  kstNow.setHours(0, 0, 0, 0);
-  // KST midnight -> UTC ISO
-  const utcTs = kstNow.getTime() - (9 * 60 * 60 * 1000);
-  return new Date(utcTs).toISOString();
+function _queueSafeIsoFromMs(ms) {
+  const d = new Date(ms);
+  const ts = d.getTime();
+  if (!Number.isFinite(ts)) return new Date().toISOString();
+  return d.toISOString();
+}
+
+function _queueSinceIso(key) {
+  try {
+    const nowMs = Date.now();
+    if (!Number.isFinite(nowMs)) return new Date().toISOString();
+    if (key === '24h') return _queueSafeIsoFromMs(nowMs - 24 * 60 * 60 * 1000);
+    if (key === '7d') return _queueSafeIsoFromMs(nowMs - 7 * 24 * 60 * 60 * 1000);
+
+    // "오늘 00:00 (KST)"를 locale 문자열 파싱 없이 계산해 브라우저별 파싱 차이를 피한다.
+    const kstOffsetMs = 9 * 60 * 60 * 1000;
+    const kstNow = new Date(nowMs + kstOffsetMs);
+    const kstMidnightUtcMs =
+      Date.UTC(
+        kstNow.getUTCFullYear(),
+        kstNow.getUTCMonth(),
+        kstNow.getUTCDate(),
+        0, 0, 0, 0,
+      ) - kstOffsetMs;
+    return _queueSafeIsoFromMs(kstMidnightUtcMs);
+  } catch (_) {
+    return new Date().toISOString();
+  }
 }
 
 function _relTime(iso) {
   if (!iso) return '—';
-  try {
-    const d = new Date(iso);
-    const diff = (Date.now() - d.getTime()) / 1000;
-    if (diff < 60) return `${Math.max(1, Math.floor(diff))}초 전`;
-    if (diff < 3600) return `${Math.floor(diff / 60)}분 전`;
-    if (diff < 86400) return `${Math.floor(diff / 3600)}시간 전`;
-    return `${Math.floor(diff / 86400)}일 전`;
-  } catch (_) { return '—'; }
+  const d = new Date(iso);
+  const ts = d.getTime();
+  if (!Number.isFinite(ts)) return '—';
+  const diff = (Date.now() - ts) / 1000;
+  if (diff < 60) return `${Math.max(1, Math.floor(diff))}초 전`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}분 전`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}시간 전`;
+  return `${Math.floor(diff / 86400)}일 전`;
 }
 
 function _formatEta(totalRemaining) {
@@ -49,7 +68,7 @@ function _formatEta(totalRemaining) {
 function Queue() {
   const [sincePreset, setSincePreset] = useState('today');
   const [hideCompleted, setHideCompleted] = useState(true);
-  const sinceIso = useMemo(() => _sinceIso(sincePreset), [sincePreset]);
+  const sinceIso = useMemo(() => _queueSinceIso(sincePreset), [sincePreset]);
   const queue = window.useAsync(() => window.api.cherryPickQueue({ since: sinceIso, limit: 200 }), [sinceIso]);
   const toasts = window.useToasts ? window.useToasts() : null;
   const [filter, setFilter] = useState('all');
