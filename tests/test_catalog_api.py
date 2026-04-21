@@ -42,6 +42,13 @@ loras:
     assert "marine_uniform_v2" in cat["loras"]
 
 
+def test_load_catalog_yaml_returns_empty_on_invalid_yaml(tmp_path: Path) -> None:
+    yml = tmp_path / "broken.yml"
+    yml.write_text("models: [broken", encoding="utf-8")
+
+    assert load_catalog_yaml(yml) == {"models": {}, "loras": {}}
+
+
 def test_merge_models_attaches_metadata_when_match() -> None:
     sd = [
         {"model_name": "pixelart_xl_v1.5", "title": "pixelart_xl_v1.5 [abc]", "hash": "abc"},
@@ -82,6 +89,47 @@ def test_merge_loras_provides_default_weight_range() -> None:
     assert unmatched["weight_default"] == 0.7
     assert unmatched["weight_range"] == [0.0, 1.0]
     assert unmatched["has_metadata"] is False
+
+
+def test_merge_helpers_skip_invalid_entries_and_use_fallback_fields() -> None:
+    merged_models = merge_models(
+        [
+            {"title": "fallback-model", "sha256": "abc", "filename": "fallback-model.safetensors"},
+            "bad-model",
+        ],
+        {"models": {"fallback-model": {"tags": ["fallback"]}}, "loras": {}},
+    )
+    merged_loras = merge_loras(
+        [
+            {"alias": "alias-only", "path": "/loras/alias-only.safetensors"},
+            "bad-lora",
+        ],
+        {"models": {}, "loras": {"alias-only": {"weight_range": "bad", "notes": "memo"}}},
+    )
+
+    assert merged_models == [
+        {
+            "name": "fallback-model",
+            "title": "fallback-model",
+            "hash": "abc",
+            "filename": "fallback-model.safetensors",
+            "tags": ["fallback"],
+            "notes": None,
+            "has_metadata": True,
+        }
+    ]
+    assert merged_loras == [
+        {
+            "name": "alias-only",
+            "alias": "alias-only",
+            "path": "/loras/alias-only.safetensors",
+            "weight_default": 0.7,
+            "weight_range": [0.0, 1.0],
+            "tags": [],
+            "notes": "memo",
+            "has_metadata": True,
+        }
+    ]
 
 
 # ----------------------------------------------------------------------------
