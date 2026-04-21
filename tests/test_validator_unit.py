@@ -42,7 +42,7 @@ class _ColorProbe:
     def convert(self, _mode: str) -> _ColorProbe:
         return self
 
-    def getcolors(self, *, maxcolors: int):  # noqa: ANN201
+    def getcolors(self, *, maxcolors: int) -> None:
         assert maxcolors == 1024 * 1024
         return None
 

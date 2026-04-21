@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from pathlib import Path
+from types import TracebackType
 from typing import Any
 
 import aiohttp
@@ -121,7 +122,12 @@ class _FakeResponse:
     async def __aenter__(self) -> _FakeResponse:
         return self
 
-    async def __aexit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         return None
 
     async def text(self) -> str:
@@ -139,7 +145,12 @@ class _FakeSession:
     async def __aenter__(self) -> _FakeSession:
         return self
 
-    async def __aexit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         return None
 
     def request(self, method: str, url: str, json: dict[str, Any] | None = None) -> Any:  # noqa: A002
