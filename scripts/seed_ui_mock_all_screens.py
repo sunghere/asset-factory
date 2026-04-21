@@ -7,14 +7,11 @@ import json
 import os
 import sqlite3
 import struct
-import sys
 import zlib
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT))
-
 from models import Database, utc_now
+REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.getenv("ASSET_FACTORY_DATA_DIR", str(REPO_ROOT / "data"))).expanduser().resolve()
 DB_PATH = Path(os.getenv("ASSET_FACTORY_DB_PATH", str(DATA_DIR / "asset-factory.db"))).expanduser().resolve()
 EXPORT_ROOT = Path(

@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
@@ -861,8 +862,9 @@ async def cherry_pick_redirect(batch_id: str | None = Query(default=None)) -> Re
     구 HTML/JS (``static/index.html`` · ``static/cherry-pick.html`` · ``static/app.js`` ·
     ``static/style.css``) 는 2026-04-20 삭제. 회귀 시 git 히스토리에서 복원.
     """
-    if batch_id and _SAFE_BATCH_ID.match(batch_id):
-        return RedirectResponse(url=f"/app/cherry-pick/{batch_id}", status_code=302)
+    if batch_id and _SAFE_BATCH_ID.fullmatch(batch_id):
+        safe_batch_id = quote(batch_id, safe="")
+        return RedirectResponse(url=f"/app/cherry-pick/{safe_batch_id}", status_code=302)
     return RedirectResponse(url="/app/queue", status_code=302)
 
 
@@ -1474,10 +1476,20 @@ async def undo_approve(asset_id: str) -> dict[str, Any]:
             primary_path = _ensure_path_allowed(Path(primary_path_str))
             if primary_path.exists():
                 primary_path.unlink()
-        except HTTPException:
-            pass
-        except OSError:
-            pass
+        except HTTPException as exc:
+            # allowlist 밖 경로는 건드리지 않는다(undo 동작은 계속 진행).
+            _push_log(
+                "warn",
+                "undo_approve skipped deleting primary outside allowed roots",
+                context={"asset_id": asset_id, "reason": str(exc.detail)},
+            )
+        except OSError as exc:
+            # 파일 삭제 실패는 비치명적이며, undo의 DB 복원은 유지한다.
+            _push_log(
+                "warn",
+                "undo_approve failed to delete primary file",
+                context={"asset_id": asset_id, "error": str(exc)},
+            )
 
     await event_broker.publish(
         {
@@ -1769,7 +1781,8 @@ def _ensure_thumb(safe_path: Path, size: int) -> Path:
         if cache_path.exists() and cache_path.stat().st_mtime >= src_mtime:
             return cache_path
     except OSError:
-        pass
+        # stat 실패 시 캐시 freshness 판단을 건너뛰고 생성 경로로 진행.
+        src_mtime = 0.0
     with Image.open(safe_path) as im:
         im.thumbnail((size, size), Image.LANCZOS)
         tmp = cache_path.with_suffix(".tmp.webp")
