@@ -1777,12 +1777,11 @@ def _ensure_thumb(safe_path: Path, size: int) -> Path:
     cache_path = _thumb_cache_path(safe_path, size)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        src_mtime = safe_path.stat().st_mtime
-        if cache_path.exists() and cache_path.stat().st_mtime >= src_mtime:
+        if cache_path.exists() and cache_path.stat().st_mtime >= safe_path.stat().st_mtime:
             return cache_path
     except OSError:
         # stat 실패 시 캐시 freshness 판단을 건너뛰고 생성 경로로 진행.
-        src_mtime = 0.0
+        pass
     with Image.open(safe_path) as im:
         im.thumbnail((size, size), Image.LANCZOS)
         tmp = cache_path.with_suffix(".tmp.webp")
