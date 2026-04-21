@@ -61,6 +61,8 @@ function System() {
   const sdOk = healthSd.data?.ok === true;
   const gcState = gc.data || {};
   const gcResult = gcState.last_result || {};
+  const dbSize = dbStat.data?.size_bytes;
+  const queue = dbStat.data?.queue || {};
 
   return (
     <div>
@@ -79,9 +81,9 @@ function System() {
         }}
       />
 
-      <div style={{ display: 'grid', gap: 16, gridTemplateColumns: 'repeat(3, 1fr)', marginBottom: 20 }}>
+      <div style={{ display: 'grid', gap: 16, gridTemplateColumns: 'repeat(4, 1fr)', marginBottom: 20 }}>
         <div className="panel-card">
-          <h3>앱 헬스</h3>
+          <h3>Health · App</h3>
           <div style={{ fontSize: 24, fontWeight: 600, fontFamily: 'var(--font-mono)' }}>
             <span className={`pill ${appOk ? 'pill-ok' : 'pill-fail'}`}>{appOk ? 'OK' : 'DOWN'}</span>
           </div>
@@ -91,7 +93,7 @@ function System() {
         </div>
 
         <div className="panel-card">
-          <h3>SD 서버</h3>
+          <h3>Health · SD</h3>
           <div style={{ fontSize: 24, fontWeight: 600, fontFamily: 'var(--font-mono)' }}>
             <span className={`pill ${sdOk ? 'pill-ok' : 'pill-fail'}`}>
               {sdOk ? 'OK' : (healthSd.data?.error ? 'ERROR' : 'CHECKING')}
@@ -103,12 +105,21 @@ function System() {
         </div>
 
         <div className="panel-card">
-          <h3>GC 누적</h3>
+          <h3>GC runs</h3>
           <div style={{ fontSize: 24, fontWeight: 600, fontFamily: 'var(--font-mono)' }}>
             {gcState.run_count ?? 0}<span style={{ fontSize: 13, color: 'var(--text-muted)' }}> runs</span>
           </div>
           <p style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 8 }}>
             마지막: {fmtTs(gcState.last_run_at)}
+          </p>
+        </div>
+        <div className="panel-card">
+          <h3>Disk/Queue</h3>
+          <div style={{ fontSize: 24, fontWeight: 600, fontFamily: 'var(--font-mono)' }}>
+            {fmtBytes(dbSize)}
+          </div>
+          <p style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 8 }}>
+            q {queue.queued_total ?? 0} · run {queue.processing ?? 0} · fail {queue.failed ?? 0}
           </p>
         </div>
       </div>
@@ -119,6 +130,9 @@ function System() {
           <button type="button" className="btn btn-primary" onClick={runGc} disabled={running}>
             {running ? '…' : 'GC 즉시 실행'}
           </button>
+        </div>
+        <div style={{ marginBottom: 10, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)' }}>
+          last delta · deleted {gcResult.deleted_files ?? 0} · scanned {gcResult.scanned_files ?? 0} · freed {fmtBytes(gcResult.freed_bytes)}
         </div>
         <dl className="meta-block">
           <dt>마지막 실행</dt><dd>{fmtTs(gcState.last_run_at)}</dd>
@@ -225,30 +239,37 @@ function WorkerBlock({ data, loading, error }) {
 }
 
 function LogsBlock({ data, loading, error, reload }) {
+  const [levelFilter, setLevelFilter] = useState('all');
   const items = data?.items || [];
+  const rows = levelFilter === 'all' ? items : items.filter((l) => l.level === levelFilter);
   return (
     <div className="panel-card" style={{ marginTop: 20 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
         <h3 style={{ margin: 0 }}>최근 로그 (warning / error)</h3>
-        <button className="btn" onClick={reload} title="새로고침">↻</button>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button className={`btn ${levelFilter === 'all' ? 'btn-primary' : ''}`} onClick={() => setLevelFilter('all')}>all</button>
+          <button className={`btn ${levelFilter === 'warning' ? 'btn-primary' : ''}`} onClick={() => setLevelFilter('warning')}>warning</button>
+          <button className={`btn ${levelFilter === 'error' ? 'btn-primary' : ''}`} onClick={() => setLevelFilter('error')}>error</button>
+          <button className="btn" onClick={reload} title="새로고침">↻</button>
+        </div>
       </div>
       {loading && !data && <window.Skeleton height={120}/>}
       {error && <div style={{ color: 'var(--accent-reject)' }}>{String(error.message || error)}</div>}
-      {data && items.length === 0 && (
+      {data && rows.length === 0 && (
         <div style={{ color: 'var(--text-muted)', fontSize: 12, fontFamily: 'var(--font-mono)' }}>
           최근 warning/error 없음 — 건강합니다.
         </div>
       )}
-      {items.length > 0 && (
+      {rows.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 320, overflow: 'auto' }}>
-          {items.map((l, i) => (
+          {rows.map((l, i) => (
             <div
               key={i}
               style={{
                 fontFamily: 'var(--font-mono)',
                 fontSize: 11,
                 display: 'grid',
-                gridTemplateColumns: '80px 60px 1fr',
+                gridTemplateColumns: '80px 70px 1fr',
                 gap: 10,
                 padding: '4px 0',
                 borderBottom: '1px solid var(--border-subtle)',

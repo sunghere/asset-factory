@@ -88,9 +88,9 @@ function Dashboard() {
         }
         right={
           <button
-            className="btn primary"
+            className="btn btn-primary"
             disabled={!firstPending}
-            onClick={() => firstPending && window.navigate(`/cherry-pick/${firstPending.batch_id}`)}
+            onClick={() => window.navigate('/queue')}
           >
             ▶ 체리픽 시작 (Enter)
           </button>
@@ -114,7 +114,7 @@ function Dashboard() {
           <window.EmptyState
             glyph="∅"
             title="오늘 처리할 batch 없음"
-            hint="POST /api/batches 로 새 batch를 등록하세요."
+            hint="첫 batch를 보내려면 아래 curl cheatsheet를 실행하거나 수동 배치 생성으로 시작하세요."
             action={<button className="btn" onClick={() => window.navigate('/batches/new')}>+ 새 batch</button>}
           />
         )}
@@ -124,22 +124,24 @@ function Dashboard() {
       </div>
 
       <div style={{ marginTop: 20, display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
-        <Stat label="TOTAL" value={summary.data?.total ?? '—'}/>
+        <Stat label="TOTAL" value={summary.data?.total ?? '—'} to="/assets"/>
         <Stat
           label="APPROVED"
           value={summary.data?.by_status?.approved ?? 0}
           accent="var(--accent-approve)"
+          to="/assets?s=approved"
         />
-        <Stat label="PENDING" value={summary.data?.by_status?.pending ?? 0}/>
+        <Stat label="PENDING" value={summary.data?.by_status?.pending ?? 0} to="/assets?s=pending"/>
         <Stat
           label="FAILED · 검증"
           value={summary.data?.by_validation?.fail ?? 0}
           accent={(summary.data?.by_validation?.fail || 0) > 0 ? 'var(--accent-warning)' : undefined}
+          to="/batches?status=failed"
         />
       </div>
 
       <div style={{ marginTop: 20, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-        <SdHealthCard data={healthSd.data} loading={healthSd.loading} reload={healthSd.reload}/>
+        <SdHealthCard data={healthSd.data} loading={healthSd.loading} reload={healthSd.reload} onOpenSystem={() => window.navigate('/system')}/>
         <CategoryBarChart data={summary.data} loading={summary.loading}/>
       </div>
 
@@ -156,7 +158,14 @@ function Dashboard() {
         {recentJobs.data && recentJobs.data.length > 0 && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {recentJobs.data.map((j) => (
-              <div key={j.id} className="activity-row">
+              <div
+                key={j.id}
+                className={`activity-row ${getRecentJobTarget(j) ? 'row-link' : ''}`}
+                onClick={() => {
+                  const to = getRecentJobTarget(j);
+                  if (to) window.navigate(to);
+                }}
+              >
                 <span className="t">{(j.created_at || '').slice(11, 19)}</span>
                 <span className="host">{j.job_type}</span>
                 <span className="task">{j.id}</span>
@@ -170,6 +179,16 @@ function Dashboard() {
       </div>
     </div>
   );
+}
+
+function getRecentJobTarget(job) {
+  if (!job || typeof job !== 'object') return null;
+  if (job.asset_id) return `/assets/${job.asset_id}`;
+  if (job.batch_id) return `/batches/${job.batch_id}`;
+  if (job.job_type === 'design_batch' || job.job_type === 'generate_batch') {
+    return `/batches/${job.id}`;
+  }
+  return null;
 }
 
 function ProjectRow({ project }) {
@@ -243,9 +262,14 @@ function ProjectRow({ project }) {
   );
 }
 
-function Stat({ label, value, accent }) {
+function Stat({ label, value, accent, to }) {
+  const clickable = !!to;
   return (
-    <div className="panel-card" style={{ padding: 14 }}>
+    <div
+      className={`panel-card ${clickable ? 'row-link' : ''}`}
+      onClick={() => clickable && window.navigate(to)}
+      style={{ padding: 14, cursor: clickable ? 'pointer' : undefined }}
+    >
       <div style={{
         fontSize: 10, color: 'var(--text-muted)',
         fontFamily: 'var(--font-mono)', letterSpacing: '0.1em',
@@ -260,17 +284,24 @@ function Stat({ label, value, accent }) {
   );
 }
 
-function SdHealthCard({ data, loading, reload }) {
+function SdHealthCard({ data, loading, reload, onOpenSystem }) {
   const ok = data?.ok === true;
   const err = data?.error;
   const state = loading && !data ? 'checking' : (ok ? 'ok' : (err ? 'error' : 'checking'));
   const color = state === 'ok' ? 'var(--accent-success)' : state === 'error' ? 'var(--accent-warning)' : 'var(--text-muted)';
   const label = state === 'ok' ? 'OK' : state === 'error' ? 'ERROR' : 'CHECKING';
   return (
-    <div className="panel-card" style={{ padding: 16 }}>
+    <div className="panel-card row-link" style={{ padding: 16 }} onClick={onOpenSystem}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
         <h3 style={{ margin: 0 }}>SD · A1111</h3>
-        <button className="btn" onClick={() => reload && reload()} title="재확인">↻</button>
+        <button
+          className="btn"
+          onClick={(e) => {
+            e.stopPropagation();
+            reload && reload();
+          }}
+          title="재확인"
+        >↻</button>
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <span style={{ width: 10, height: 10, borderRadius: '50%', background: color }}/>

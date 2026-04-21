@@ -10,11 +10,18 @@
 
 const { useState, useMemo, useCallback } = React;
 
+function _fmtTs(ts) {
+  return (ts || '').slice(0, 19).replace('T', ' ');
+}
+
 function AssetDetail({ assetId }) {
   const toasts = window.useToasts();
   const [tab, setTab] = useState('candidates');
   const [running, setRunning] = useState(false);
   const [restoreTarget, setRestoreTarget] = useState(null); // history row to confirm
+  const [zoomed, setZoomed] = useState(false);
+  const [showPrompt, setShowPrompt] = useState(false);
+  const [showMetadataJson, setShowMetadataJson] = useState(false);
 
   const detail = window.useAsync(() => window.api.getAssetDetail(assetId), [assetId]);
   const history = window.useAsync(
@@ -65,6 +72,16 @@ function AssetDetail({ assetId }) {
       });
     } catch (e) {
       toasts.push({ kind: 'error', message: '상태 변경 실패: ' + (e.message || e) });
+    }
+  }
+
+  async function undoApprove() {
+    try {
+      await window.api.undoApprove(assetId);
+      detail.reload();
+      toasts.push({ kind: 'success', message: '승인 취소 완료' });
+    } catch (e) {
+      toasts.push({ kind: 'error', message: '승인 취소 실패: ' + (e.message || e) });
     }
   }
 
@@ -148,7 +165,7 @@ function AssetDetail({ assetId }) {
       <window.ErrorPanel error={detail.error} onRetry={detail.reload}/>
 
       {a && (
-        <div style={{ display: 'grid', gap: 20, gridTemplateColumns: '360px 1fr', alignItems: 'start' }}>
+        <div style={{ display: 'grid', gap: 20, gridTemplateColumns: 'minmax(360px, 1fr) minmax(380px, 1fr)', alignItems: 'start' }}>
           <div>
             <div
               style={{
@@ -165,9 +182,21 @@ function AssetDetail({ assetId }) {
                 style={{
                   maxWidth: '100%',
                   imageRendering: 'pixelated',
-                  maxHeight: 320,
+                  maxHeight: zoomed ? 680 : 360,
+                  cursor: zoomed ? 'zoom-out' : 'zoom-in',
                 }}
+                onClick={() => setZoomed((z) => !z)}
               />
+            </div>
+            <div style={{ marginTop: 8 }}>
+              <button className="btn" onClick={() => setZoomed((z) => !z)}>
+                {zoomed ? '축소 보기' : '확대 보기'}
+              </button>
+            </div>
+
+            <div style={{ marginTop: 14 }}>
+              <div className="eyebrow" style={{ marginBottom: 8 }}>HISTORY</div>
+              <HistoryCarousel items={history.data || []} loading={history.loading} onRestore={(h) => setRestoreTarget(h)} disabled={running}/>
             </div>
 
             <div style={{ marginTop: 12, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -182,7 +211,7 @@ function AssetDetail({ assetId }) {
             <div style={{ marginTop: 12, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
               {a.status !== 'approved'
                 ? <button className="btn btn-primary" onClick={() => setStatus('approved')}>✓ 승인</button>
-                : <button className="btn" onClick={() => setStatus('pending')}>승인 취소</button>}
+                : <button className="btn" onClick={undoApprove}>↶ 승인 취소</button>}
               {a.status !== 'rejected'
                 ? <button className="btn" onClick={() => setStatus('rejected')}>✕ 리젝트</button>
                 : <button className="btn" onClick={() => setStatus('pending')}>리젝 취소</button>}
@@ -201,17 +230,29 @@ function AssetDetail({ assetId }) {
               </dd>
               <dt>seed</dt><dd>{a.generation_seed ?? '—'}</dd>
               <dt>model</dt><dd style={{ fontSize: 11 }}>{a.generation_model || '—'}</dd>
-              <dt>created</dt><dd style={{ fontSize: 11 }}>{(a.created_at || '').slice(0, 19).replace('T', ' ')}</dd>
-              <dt>updated</dt><dd style={{ fontSize: 11 }}>{(a.updated_at || '').slice(0, 19).replace('T', ' ')}</dd>
+              <dt>created</dt><dd style={{ fontSize: 11 }}>{_fmtTs(a.created_at)}</dd>
+              <dt>updated</dt><dd style={{ fontSize: 11 }}>{_fmtTs(a.updated_at)}</dd>
             </dl>
-            {a.generation_prompt && (
-              <div className="panel-card" style={{ marginTop: 12, padding: 10 }}>
-                <div className="eyebrow">prompt</div>
-                <pre style={{ margin: 0, fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                  {a.generation_prompt}
+            <div className="panel-card" style={{ marginTop: 12, padding: 10 }}>
+              <button className="btn" onClick={() => setShowPrompt((v) => !v)}>
+                {showPrompt ? 'prompt 접기' : 'prompt 펼치기'}
+              </button>
+              {showPrompt && (
+                <pre style={{ margin: '10px 0 0 0', fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                  {a.generation_prompt || '—'}
                 </pre>
-              </div>
-            )}
+              )}
+            </div>
+            <div className="panel-card" style={{ marginTop: 12, padding: 10 }}>
+              <button className="btn" onClick={() => setShowMetadataJson((v) => !v)}>
+                {showMetadataJson ? 'metadata_json 접기' : 'metadata_json 펼치기'}
+              </button>
+              {showMetadataJson && (
+                <pre style={{ margin: '10px 0 0 0', fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                  {JSON.stringify(a.metadata_json || a.metadata || {}, null, 2)}
+                </pre>
+              )}
+            </div>
           </div>
 
           <div>
@@ -287,7 +328,7 @@ function CandidatesTab({ items, loading, onPromote }) {
         const url = c.image_url
           || `/api/asset-candidates/image?project=${encodeURIComponent(c.project)}&asset_key=${encodeURIComponent(c.asset_key)}&job_id=${encodeURIComponent(c.job_id)}&slot_index=${c.slot_index}`;
         return (
-          <div key={`${c.job_id}-${c.slot_index}`} className="asset-card">
+          <div key={`${c.job_id}-${c.slot_index}`} className={`asset-card ${c.is_picked ? 'selected' : ''}`}>
             <div className="thumb-box">
               <img src={url} alt="" loading="lazy"/>
               {c.is_picked && <span className="vbdg pass">PRIMARY</span>}
@@ -295,12 +336,72 @@ function CandidatesTab({ items, loading, onPromote }) {
             <div className="strip">
               <span className="asset-key">slot {c.slot_index}</span>
               <button
-                className="btn"
+                className={c.is_picked ? 'btn' : 'btn btn-primary'}
                 onClick={() => onPromote(c)}
                 disabled={c.is_picked}
                 style={{ padding: '2px 8px', fontSize: 10 }}
-              >primary</button>
+              >{c.is_picked ? 'current' : 'primary로 교체'}</button>
             </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function HistoryCarousel({ items, loading, onRestore, disabled }) {
+  if (loading && items.length === 0) return <window.Skeleton height={120}/>;
+  if (items.length === 0) {
+    return <window.EmptyState title="이력 없음" hint="primary 교체 / 재생성 이력이 여기에 쌓입니다."/>;
+  }
+  return (
+    <div style={{ display: 'flex', gap: 10, overflowX: 'auto', paddingBottom: 2 }}>
+      {items.map((h, idx) => {
+        const imgUrl = h.image_url || (h.asset_id ? `/api/assets/${h.asset_id}/image?v=${h.version}` : null);
+        return (
+          <div
+            key={h.version}
+            className="panel-card"
+            style={{
+              minWidth: 142,
+              maxWidth: 142,
+              padding: 8,
+              borderColor: idx === 0 ? 'var(--accent-info)' : 'var(--border-subtle)',
+            }}
+          >
+            <div
+              style={{
+                height: 92,
+                borderRadius: 4,
+                overflow: 'hidden',
+                background: 'var(--bg-elev-3)',
+                border: '1px solid var(--border-subtle)',
+                display: 'grid',
+                placeItems: 'center',
+              }}
+            >
+              {imgUrl ? (
+                <img src={imgUrl} alt="" loading="lazy" style={{ maxWidth: '100%', maxHeight: '100%', imageRendering: 'pixelated' }} />
+              ) : (
+                <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>no preview</span>
+              )}
+            </div>
+            <div style={{ marginTop: 6, fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+              v{h.version} · {_fmtTs(h.snapshot_at || h.created_at)}
+            </div>
+            <div style={{ marginTop: 4 }}>
+              <span className={`pill ${h.validation_status === 'pass' ? 'pill-ok' : h.validation_status === 'fail' ? 'pill-fail' : ''}`}>
+                {h.validation_status || '—'}
+              </span>
+            </div>
+            <button
+              className="btn"
+              style={{ marginTop: 6, width: '100%' }}
+              onClick={() => onRestore(h)}
+              disabled={disabled}
+            >
+              이 버전 복원
+            </button>
           </div>
         );
       })}

@@ -60,6 +60,7 @@ function BatchNew() {
 
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState(null);
+  const [showJsonPreview, setShowJsonPreview] = useState(true);
 
   // Catalog 에서 넘어온 prefill (?model / ?lora / ?project / ?asset_key / ?category).
   // 이름이 카탈로그에 존재해야 선반영; 없는 이름이면 조용히 무시 (사용자 오입력 방지).
@@ -111,6 +112,7 @@ function BatchNew() {
 
   const step1Valid = project.trim() && assetKey.trim() && category.trim();
   const step2Valid = prompts.some((p) => p.trim()) && selectedModels.length > 0 && expandedCount > 0;
+  const hasInvalidFixedSeed = seedMode === 'fixed' && seedsText.trim() && (!seedList || seedList.length === 0);
 
   // 실제 전송될 spec — step 3 JSON preview + submit 공용.
   const specPayload = useMemo(() => ({
@@ -179,9 +181,9 @@ function BatchNew() {
       />
 
       <div className="wizard-steps">
-        <div className={`step ${step === 1 ? 'active' : ''} ${step > 1 ? 'done' : ''}`}>1 · identity</div>
-        <div className={`step ${step === 2 ? 'active' : ''} ${step > 2 ? 'done' : ''}`}>2 · spec</div>
-        <div className={`step ${step === 3 ? 'active' : ''}`}>3 · review</div>
+        <div className={`step ${step === 1 ? 'active' : ''} ${step > 1 ? 'done' : ''}`}>1 · target</div>
+        <div className={`step ${step === 2 ? 'active' : ''} ${step > 2 ? 'done' : ''}`}>2 · generation</div>
+        <div className={`step ${step === 3 ? 'active' : ''}`}>3 · common+enqueue</div>
       </div>
 
       {result && (
@@ -197,6 +199,11 @@ function BatchNew() {
               <button className="btn" onClick={() => { setResult(null); setStep(1); }}>다시 만들기</button>
               <a
                 className="btn btn-primary"
+                href={`/app/batches/${result.batch_id}`}
+                onClick={(e) => { e.preventDefault(); window.navigate(`/batches/${result.batch_id}`); }}
+              >batch 상세 열기</a>
+              <a
+                className="btn"
                 href={`/app/cherry-pick/${result.batch_id}`}
                 onClick={(e) => { e.preventDefault(); window.navigate(`/cherry-pick/${result.batch_id}`); }}
               >cherry-pick 열기</a>
@@ -207,7 +214,7 @@ function BatchNew() {
 
       {step === 1 && (
         <div className="panel-card">
-          <h3>1. 대상 에셋</h3>
+          <h3>1. Target</h3>
           <div className="form-grid">
             <label>
               <span>project</span>
@@ -230,6 +237,7 @@ function BatchNew() {
             <label style={{ gridColumn: 'span 2' }}>
               <span>asset_key</span>
               <input className="input" value={assetKey} onChange={(e) => setAssetKey(e.target.value)} placeholder="e.g. marine_v2_idle"/>
+              {!assetKey.trim() && <div className="hint" style={{ color: 'var(--accent-reject)' }}>asset_key 는 필수입니다.</div>}
             </label>
           </div>
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
@@ -243,7 +251,7 @@ function BatchNew() {
       {step === 2 && (
         <div style={{ display: 'grid', gap: 14, gridTemplateColumns: '2fr 1fr' }}>
           <div className="panel-card">
-            <h3>2a. prompts</h3>
+            <h3>2. Generation · prompts</h3>
             {prompts.map((p, i) => (
               <div key={i} style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
                 <textarea
@@ -264,6 +272,9 @@ function BatchNew() {
               </div>
             ))}
             <button type="button" className="btn" onClick={() => setPrompts((ps) => [...ps, ''])}>+ prompt 추가</button>
+            {!prompts.some((p) => p.trim()) && (
+              <div className="hint" style={{ color: 'var(--accent-reject)', marginTop: 6 }}>최소 1개 prompt가 필요합니다.</div>
+            )}
 
             <label className="block" style={{ marginTop: 14 }}>
               <span>negative prompt (common)</span>
@@ -287,6 +298,9 @@ function BatchNew() {
                   );
                 })}
               </div>
+            )}
+            {selectedModels.length === 0 && (
+              <div className="hint" style={{ color: 'var(--accent-reject)', marginTop: 6 }}>최소 1개 model 선택이 필요합니다.</div>
             )}
 
             <h3 style={{ marginTop: 18 }}>2c. loras matrix</h3>
@@ -322,6 +336,9 @@ function BatchNew() {
                 <label style={{ gridColumn: 'span 2' }}>
                   <span>seeds (쉼표/공백)</span>
                   <input className="input" value={seedsText} onChange={(e) => setSeedsText(e.target.value)} placeholder="42, 123, 999"/>
+                  {hasInvalidFixedSeed && (
+                    <div className="hint" style={{ color: 'var(--accent-reject)' }}>고정 seed를 1개 이상 숫자로 입력하세요.</div>
+                  )}
                 </label>
               )}
             </div>
@@ -380,9 +397,12 @@ function BatchNew() {
 
           <div style={{ gridColumn: 'span 2', display: 'flex', justifyContent: 'space-between' }}>
             <button className="btn" onClick={() => setStep(1)}>← 이전</button>
-            <button className="btn btn-primary" disabled={!step2Valid} onClick={() => setStep(3)}>
-              검토 →
-            </button>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button className="btn" onClick={() => { setStep(3); setShowJsonPreview(true); }}>↗ 미리보기 JSON</button>
+              <button className="btn btn-primary" disabled={!step2Valid || hasInvalidFixedSeed} onClick={() => setStep(3)}>
+                검토 →
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -390,7 +410,7 @@ function BatchNew() {
       {step === 3 && (
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
           <div className="panel-card">
-            <h3>3. 확인</h3>
+            <h3>3. Common params + Enqueue</h3>
             <dl className="meta-block">
               <dt>project</dt><dd>{project}</dd>
               <dt>asset_key</dt><dd>{assetKey}</dd>
@@ -417,6 +437,7 @@ function BatchNew() {
               <dd style={{ color: overLimit ? 'var(--accent-warning)' : 'var(--accent-pick)', fontWeight: 600 }}>
                 {expandedCount}장 {overLimit ? '⚠' : ''}
               </dd>
+              <dt>N 계산식</dt><dd style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>prompts × models × lora_groups × seeds</dd>
             </dl>
             {overLimit && (
               <div style={{
@@ -434,7 +455,7 @@ function BatchNew() {
                 className={`btn ${overLimit ? '' : 'btn-primary'}`}
                 style={overLimit ? { background: 'var(--accent-warning)', color: '#000' } : undefined}
                 onClick={submit}
-                disabled={submitting || expandedCount === 0}
+                disabled={submitting || expandedCount === 0 || hasInvalidFixedSeed}
               >
                 {submitting ? '… 생성 중' : `▶ 배치 생성 (${expandedCount})${overLimit ? ' · 확인' : ''}`}
               </button>
@@ -444,26 +465,31 @@ function BatchNew() {
           <div className="panel-card" style={{ padding: 0 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', borderBottom: '1px solid var(--border-subtle)' }}>
               <h3 style={{ margin: 0 }}>JSON preview · POST /api/batches</h3>
-              <button
-                className="btn"
-                onClick={() => {
-                  try {
-                    navigator.clipboard.writeText(JSON.stringify(specPayload, null, 2));
-                    toasts.push({ kind: 'info', message: 'JSON 복사됨', ttl: 1500 });
-                  } catch (_) { /* noop */ }
-                }}
-              >copy</button>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button className="btn" onClick={() => setShowJsonPreview((v) => !v)}>{showJsonPreview ? 'hide' : 'show'}</button>
+                <button
+                  className="btn"
+                  onClick={() => {
+                    try {
+                      navigator.clipboard.writeText(JSON.stringify(specPayload, null, 2));
+                      toasts.push({ kind: 'info', message: 'JSON 복사됨', ttl: 1500 });
+                    } catch (_) { /* noop */ }
+                  }}
+                >copy</button>
+              </div>
             </div>
-            <pre style={{
-              margin: 0, padding: 14,
-              fontFamily: 'var(--font-mono)', fontSize: 11,
-              color: 'var(--text-secondary)',
-              whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-              maxHeight: 520, overflow: 'auto',
-              background: 'transparent',
-            }}>
-              {JSON.stringify(specPayload, null, 2)}
-            </pre>
+            {showJsonPreview && (
+              <pre style={{
+                margin: 0, padding: 14,
+                fontFamily: 'var(--font-mono)', fontSize: 11,
+                color: 'var(--text-secondary)',
+                whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                maxHeight: 520, overflow: 'auto',
+                background: 'transparent',
+              }}>
+                {JSON.stringify(specPayload, null, 2)}
+              </pre>
+            )}
           </div>
         </div>
       )}

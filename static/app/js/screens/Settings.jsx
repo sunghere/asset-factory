@@ -41,23 +41,49 @@ function Settings() {
   const [keymap, setKeymap] = useState(() => normalizeOnOff(window.localStorage.getItem(LS_KEYS.keymap), 'on'));
   const [motion, setMotion] = useState(() => window.localStorage.getItem(LS_KEYS.motion) || 'full');
   const [analytics, setAnalytics] = useState(() => normalizeOnOff(window.localStorage.getItem(LS_KEYS.analytics), 'off'));
+  const [saveState, setSaveState] = useState('idle'); // idle | saving | saved | failed
+  const [saveLabel, setSaveLabel] = useState('');
 
-  // Debounced autosave for the simple toggles (API key saved explicitly).
-  useEffect(() => { window.localStorage.setItem(LS_KEYS.gridCols, gridCols); }, [gridCols]);
-  useEffect(() => { window.localStorage.setItem(LS_KEYS.autoAdvance, autoAdvance); }, [autoAdvance]);
-  useEffect(() => { window.localStorage.setItem(LS_KEYS.keymap, keymap); }, [keymap]);
-  useEffect(() => { window.localStorage.setItem(LS_KEYS.motion, motion); }, [motion]);
-  useEffect(() => { window.localStorage.setItem(LS_KEYS.analytics, analytics); }, [analytics]);
+  // Debounced autosave + state indicator for preference fields.
+  useEffect(() => {
+    setSaveState('saving');
+    setSaveLabel('· 저장 중');
+    const t = setTimeout(() => {
+      try {
+        window.localStorage.setItem(LS_KEYS.gridCols, gridCols);
+        window.localStorage.setItem(LS_KEYS.autoAdvance, autoAdvance);
+        window.localStorage.setItem(LS_KEYS.keymap, keymap);
+        window.localStorage.setItem(LS_KEYS.motion, motion);
+        window.localStorage.setItem(LS_KEYS.analytics, analytics);
+        setSaveState('saved');
+        setSaveLabel('✓ 저장됨');
+      } catch (e) {
+        setSaveState('failed');
+        setSaveLabel('! 실패');
+      }
+    }, 200);
+    return () => clearTimeout(t);
+  }, [gridCols, autoAdvance, keymap, motion, analytics]);
 
   function saveApiKey() {
-    const v = apiKeyDraft.trim();
-    if (v) window.localStorage.setItem(LS_KEYS.apiKey, v);
-    else window.localStorage.removeItem(LS_KEYS.apiKey);
-    setApiKey(v);
-    // Notify same-tab listeners (PersistentBanners, TopBar chip). Cross-tab
-    // changes are picked up by the native 'storage' event.
-    try { window.dispatchEvent(new CustomEvent('af:apikey-changed')); } catch { /* ignore */ }
-    toasts.push({ kind: 'success', message: v ? 'API key 저장됨' : 'API key 삭제됨' });
+    setSaveState('saving');
+    setSaveLabel('· 저장 중');
+    try {
+      const v = apiKeyDraft.trim();
+      if (v) window.localStorage.setItem(LS_KEYS.apiKey, v);
+      else window.localStorage.removeItem(LS_KEYS.apiKey);
+      setApiKey(v);
+      // Notify same-tab listeners (PersistentBanners, TopBar chip). Cross-tab
+      // changes are picked up by the native 'storage' event.
+      try { window.dispatchEvent(new CustomEvent('af:apikey-changed')); } catch { /* ignore */ }
+      setSaveState('saved');
+      setSaveLabel('✓ 저장됨');
+      toasts.push({ kind: 'success', message: v ? 'API key 저장됨' : 'API key 삭제됨' });
+    } catch (e) {
+      setSaveState('failed');
+      setSaveLabel('! 실패');
+      toasts.push({ kind: 'error', message: 'API key 저장 실패' });
+    }
   }
 
   const versionInfo = window.__AF_VERSION__ || { version: 'dev', host: window.location.host };
@@ -65,15 +91,20 @@ function Settings() {
   return (
     <div>
       <window.PageToolbar
+        right={(
+          <span className={`chip ${saveState === 'failed' ? 'fail' : ''}`} style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+            {saveLabel || '·'}
+          </span>
+        )}
         info={{
           title: 'settings',
-          text: '로컬 전용 환경설정. X-API-Key, 그리드 열 수, Enter 후 자동진행, 모션 선호도를 브라우저 localStorage 에 저장합니다. 서버 전송 없음.',
+          text: '로컬 전용 환경설정. X-API-Key를 제외한 모든 옵션은 200ms 디바운스로 자동 저장됩니다. 서버 전송 없음.',
         }}
       />
 
       <div style={{ display: 'grid', gap: 16, gridTemplateColumns: '1fr 1fr' }}>
         <div className="panel-card">
-          <h3>API key</h3>
+          <h3>Request Auth · API key</h3>
           <p style={{ color: 'var(--text-muted)', fontSize: 12, marginTop: 0 }}>
             <code>X-API-Key</code> 헤더로 모든 POST/PATCH/DELETE 요청에 자동 첨부됩니다. 현재 저장값:&nbsp;
             <code>{mask(apiKey) || '— 없음 —'}</code>
@@ -95,12 +126,12 @@ function Settings() {
             >지우기</button>
           </div>
           <p style={{ color: 'var(--text-faint)', fontSize: 11, marginTop: 10 }}>
-            (서버에 전송되지 않고 브라우저 저장소에만 남습니다. 공용 PC면 쓰지 마세요.)
+            일부 write API는 key 없으면 401이 발생합니다. 저장값은 브라우저에만 보관되며 공용 PC에서는 사용하지 마세요.
           </p>
         </div>
 
         <div className="panel-card">
-          <h3>표시 옵션</h3>
+          <h3>UI/UX Preferences (local-only)</h3>
           <div className="form-grid">
             <label>
               <span>cherry-pick 그리드 열</span>
@@ -142,7 +173,7 @@ function Settings() {
             </label>
           </div>
           <p style={{ color: 'var(--text-faint)', fontSize: 11, marginTop: 10 }}>
-            자동 저장. CSS 변수는 다음 새로고침에 반영됩니다. analytics 는
+            자동 저장(200ms 디바운스). CSS 변수는 다음 새로고침에 반영됩니다. analytics 는
             서버 전송 없이 <code>console.debug</code> 로만 남으므로 QA 용입니다.
           </p>
         </div>

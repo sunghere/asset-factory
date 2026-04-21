@@ -77,10 +77,12 @@ const api = {
   getProjectSpec: (id) => request('GET', `/api/projects/${encodeURIComponent(id)}/spec`),
 
   // Batches
-  listBatches: ({ since, limit } = {}) => {
+  listBatches: ({ since, limit, status, project } = {}) => {
     const qs = new URLSearchParams();
     if (since) qs.set('since', since);
     if (limit) qs.set('limit', String(limit));
+    if (status) qs.set('status', status);
+    if (project) qs.set('project', project);
     const q = qs.toString();
     return request('GET', `/api/batches${q ? '?' + q : ''}`);
   },

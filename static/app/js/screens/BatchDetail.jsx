@@ -94,13 +94,24 @@ function BatchDetail({ batchId }) {
             <span className="hint" style={{ marginLeft: 10, fontFamily: 'var(--font-mono)' }}>{batchId}</span>
           </h1>
         </div>
-        {batchRow && (
-          <a
-            className="btn btn-primary"
-            href={`/app/cherry-pick/${batchId}`}
-            onClick={(e) => { e.preventDefault(); window.navigate(`/cherry-pick/${batchId}`); }}
-          >▶ cherry-pick 열기</a>
-        )}
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button className="btn" onClick={() => { detail.reload(); tasks.reload(); candidates.reload(); }}>↻ 새로고침</button>
+          <button
+            className="btn"
+            disabled={failedTaskCount === 0}
+            onClick={onRetryFailed}
+            title={failedTaskCount ? `${failedTaskCount} 건 재큐잉` : '실패 태스크 없음'}
+          >
+            ▶ 실패만 재생성 ({failedTaskCount})
+          </button>
+          {batchRow && (
+            <a
+              className="btn btn-primary"
+              href={`/app/cherry-pick/${batchId}`}
+              onClick={(e) => { e.preventDefault(); window.navigate(`/cherry-pick/${batchId}`); }}
+            >↗ 체리픽으로</a>
+          )}
+        </div>
       </div>
 
       {batchRow && (
@@ -129,11 +140,7 @@ function BatchDetail({ batchId }) {
       </div>
 
       {tab === 'tasks' && (
-        <TasksView
-          tasks={tasks}
-          failedCount={failedTaskCount}
-          onRetryFailed={onRetryFailed}
-        />
+        <TasksView tasks={tasks} />
       )}
 
       {candidates.loading && !candidates.data && <window.Skeleton height={200}/>}
@@ -218,9 +225,22 @@ function SpecView({ detail }) {
     ['first_created',   detail.first_created_at],
     ['last_updated',    detail.last_updated_at],
   ];
+  const curl = `curl -s \"${window.location.origin}/api/batches/${encodeURIComponent(detail.batch_id || '')}\"`;
+
+  async function copyCurl() {
+    try {
+      await navigator.clipboard.writeText(curl);
+      window.toast?.('curl copied');
+    } catch {
+      // no-op fallback
+    }
+  }
 
   return (
     <div style={{ display: 'grid', gap: 12 }}>
+      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+        <button className="btn" onClick={copyCurl}>복사 curl</button>
+      </div>
       <div className="panel-card">
         <h3 style={{ margin: '0 0 8px' }}>meta</h3>
         <dl className="meta-block">
@@ -335,7 +355,7 @@ function renderValue(v) {
   return String(v);
 }
 
-function TasksView({ tasks, failedCount, onRetryFailed }) {
+function TasksView({ tasks }) {
   if (tasks.loading && !tasks.data) return <window.Skeleton height={200}/>;
   if (tasks.error) {
     return <div className="error-banner">
@@ -357,16 +377,11 @@ function TasksView({ tasks, failedCount, onRetryFailed }) {
         fontFamily: 'var(--font-mono)', fontSize: 12,
       }}>
         <span className="pill">queued <b style={{ marginLeft: 4 }}>{byStatus.queued || 0}</b></span>
-        <span className="pill pill-warn">running <b style={{ marginLeft: 4 }}>{byStatus.running || 0}</b></span>
+        <span className="pill pill-warn">processing <b style={{ marginLeft: 4 }}>{(byStatus.running || 0) + (byStatus.processing || 0)}</b></span>
         <span className="pill pill-ok">done <b style={{ marginLeft: 4 }}>{byStatus.done || 0}</b></span>
         <span className="pill pill-fail">failed <b style={{ marginLeft: 4 }}>{byStatus.failed || 0}</b></span>
         <div style={{ flex: 1 }}/>
-        <button
-          className="btn btn-primary"
-          disabled={failedCount === 0}
-          onClick={onRetryFailed}
-          title={failedCount ? `${failedCount} 건 재큐잉` : '실패 태스크 없음'}
-        >↻ 실패만 재생성 ({failedCount})</button>
+        <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>last_error 펼쳐서 실패 원인 확인</span>
       </div>
 
       <div className="panel-card" style={{ padding: 0, overflow: 'auto' }}>

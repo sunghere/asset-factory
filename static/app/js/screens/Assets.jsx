@@ -2,8 +2,8 @@
      - Left: filter sidebar (project / status / validation / category),
        driven by /api/assets/summary so counts are always truthful.
      - Right: responsive image grid with status dot + validation badge.
-     - URL 쿼리 직렬화: 필터/정렬/페이지/검색을 ?p=&s=&v=&c=&q=&sort=&dir=&page=&pageSize=
-       로 보존하여 링크 공유 가능.
+    - URL 쿼리 직렬화: 멀티 필터/정렬/검색/표시량을 ?p=&s=&v=&c=&q=&sort=&dir=&limit=
+      로 보존하여 링크 공유 가능.
      - 정렬: created / updated / asset_key / color_count (클라이언트 정렬).
      - Bulk actions: 선택 시 '선택 승인 / 선택 거부 / 선택 재검증 / 선택 재생성'.
        검증 fail 만 모드에서는 기존 '재검증 / 실패분 재생성' 일괄 API 노출.
@@ -28,8 +28,6 @@ const SORT_OPTIONS = [
   { key: 'asset_key',  label: 'asset_key' },
   { key: 'color_count',label: 'color_count' },
 ];
-const PAGE_SIZES = [24, 48, 96, 200];
-
 // URL query 유틸. history-router 기준으로 location.search 를 사용한다.
 function _parseUrlQuery() {
   const search = typeof window !== 'undefined' ? (window.location.search || '') : '';
@@ -56,53 +54,63 @@ function _writeUrlQuery(params) {
   }
 }
 
+function _toggleSetValue(setter, key) {
+  setter((prev) => {
+    const next = new Set(prev);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    return next;
+  });
+}
+
+function _relativeTime(ts) {
+  if (!ts) return 'time n/a';
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return 'time n/a';
+  const diffSec = Math.floor((Date.now() - d.getTime()) / 1000);
+  if (diffSec < 60) return `${Math.max(1, diffSec)}s ago`;
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
+  return `${Math.floor(diffSec / 86400)}d ago`;
+}
+
 function Assets() {
   const toasts = window.useToasts();
   const initial = useMemo(() => _parseUrlQuery(), []);
 
-  const [project, setProject] = useState(initial.p || '');
-  const [status, setStatus] = useState(initial.s || '');
-  const [validation, setValidation] = useState(initial.v || '');
-  const [category, setCategory] = useState(initial.c || '');
+  const [projectSet, setProjectSet] = useState(() => new Set((initial.p || '').split(',').filter(Boolean)));
+  const [statusSet, setStatusSet] = useState(() => new Set((initial.s || '').split(',').filter(Boolean)));
+  const [validationSet, setValidationSet] = useState(() => new Set((initial.v || '').split(',').filter(Boolean)));
+  const [categorySet, setCategorySet] = useState(() => new Set((initial.c || '').split(',').filter(Boolean)));
   const [q, setQ] = useState(initial.q || '');
   const [sortKey, setSortKey] = useState(initial.sort || 'updated');
   const [sortDir, setSortDir] = useState(initial.dir === 'asc' ? 'asc' : 'desc');
-  const [page, setPage] = useState(Number(initial.page) > 0 ? Number(initial.page) : 1);
-  const [pageSize, setPageSize] = useState(
-    PAGE_SIZES.includes(Number(initial.pageSize)) ? Number(initial.pageSize) : 48,
-  );
+  const [visibleLimit, setVisibleLimit] = useState(Number(initial.limit) > 0 ? Number(initial.limit) : 96);
 
   const [selected, setSelected] = useState(() => new Set());
   const lastAnchorIdx = useRef(null);
   const gridRef = useRef(null);
+  const sentinelRef = useRef(null);
 
   // URL 동기화 — 필터/검색/정렬/페이지 바뀔 때마다 search 업데이트.
   useEffect(() => {
     _writeUrlQuery({
-      p: project, s: status, v: validation, c: category, q,
+      p: Array.from(projectSet).join(','),
+      s: Array.from(statusSet).join(','),
+      v: Array.from(validationSet).join(','),
+      c: Array.from(categorySet).join(','),
+      q,
       sort: sortKey !== 'updated' ? sortKey : '',
       dir: sortDir !== 'desc' ? sortDir : '',
-      page: page !== 1 ? page : '',
-      pageSize: pageSize !== 48 ? pageSize : '',
+      limit: visibleLimit !== 96 ? visibleLimit : '',
     });
-  }, [project, status, validation, category, q, sortKey, sortDir, page, pageSize]);
+  }, [projectSet, statusSet, validationSet, categorySet, q, sortKey, sortDir, visibleLimit]);
 
   const projects = window.useAsync(() => window.api.listProjects().catch(() => []), []);
 
-  const summary = window.useAsync(
-    () => window.api.assetSummary(project || undefined),
-    [project],
-  );
+  const summary = window.useAsync(() => window.api.assetSummary(), []);
 
-  const assets = window.useAsync(
-    () => window.api.listAssets({
-      project: project || undefined,
-      status: status || undefined,
-      validation_status: validation || undefined,
-      category: category || undefined,
-    }),
-    [project, status, validation, category],
-  );
+  const assets = window.useAsync(() => window.api.listAssets({}), []);
 
   const onSseBatch = useCallback((batch) => {
     if (!Array.isArray(batch) || !batch.length) return;
@@ -125,18 +133,27 @@ function Assets() {
   }, [summary, assets]);
   window.useSSE?.(onSseBatch);
 
-  // 필터 변경 시 선택/페이지 초기화.
-  useEffect(() => { setSelected(new Set()); setPage(1); lastAnchorIdx.current = null; },
-    [project, status, validation, category, q, sortKey, sortDir, pageSize]);
+  // 필터 변경 시 선택/표시 상한 초기화.
+  useEffect(() => {
+    setSelected(new Set());
+    setVisibleLimit(96);
+    lastAnchorIdx.current = null;
+  }, [projectSet, statusSet, validationSet, categorySet, q, sortKey, sortDir]);
 
   const filtered = useMemo(() => {
     const xs = assets.data || [];
     const needle = q.trim().toLowerCase();
-    const base = !needle ? xs : xs.filter((a) =>
-      (a.asset_key || '').toLowerCase().includes(needle)
-      || (a.category || '').toLowerCase().includes(needle)
-      || (a.id || '').toLowerCase().includes(needle)
-    );
+    const base = xs.filter((a) => {
+      const projectOk = projectSet.size === 0 || projectSet.has(a.project || '');
+      const statusOk = statusSet.size === 0 || statusSet.has(a.status || '');
+      const validationOk = validationSet.size === 0 || validationSet.has(a.validation_status || '');
+      const categoryOk = categorySet.size === 0 || categorySet.has(a.category || '');
+      if (!(projectOk && statusOk && validationOk && categoryOk)) return false;
+      if (!needle) return true;
+      return (a.asset_key || '').toLowerCase().includes(needle)
+        || (a.category || '').toLowerCase().includes(needle)
+        || (a.id || '').toLowerCase().includes(needle);
+    });
     const dir = sortDir === 'asc' ? 1 : -1;
     const getKey = (a) => {
       switch (sortKey) {
@@ -153,16 +170,21 @@ function Assets() {
       if (ka > kb) return 1 * dir;
       return 0;
     });
-  }, [assets.data, q, sortKey, sortDir]);
+  }, [assets.data, projectSet, statusSet, validationSet, categorySet, q, sortKey, sortDir]);
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
-  const rows = useMemo(() => {
-    const p = Math.min(page, totalPages);
-    const start = (p - 1) * pageSize;
-    return filtered.slice(start, start + pageSize);
-  }, [filtered, page, pageSize, totalPages]);
+  const rows = useMemo(() => filtered.slice(0, visibleLimit), [filtered, visibleLimit]);
 
-  useEffect(() => { if (page > totalPages) setPage(totalPages); }, [page, totalPages]);
+  useEffect(() => {
+    if (!sentinelRef.current) return undefined;
+    if (visibleLimit >= filtered.length) return undefined;
+    const obs = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) {
+        setVisibleLimit((n) => Math.min(filtered.length, n + 96));
+      }
+    }, { rootMargin: '200px' });
+    obs.observe(sentinelRef.current);
+    return () => obs.disconnect();
+  }, [visibleLimit, filtered.length]);
 
   // shift-click 다중 선택을 위한 anchor 관리.
   const toggle = useCallback((id, idx, opts = {}) => {
@@ -291,7 +313,7 @@ function Assets() {
               <span style={{ opacity: 0.6 }}>/ 총 {summary.data?.total ?? '—'}</span>
             </span>
             <span className="chip" style={{ opacity: 0.7 }}>
-              page {Math.min(page, totalPages)}/{totalPages}
+              shown {rows.length}/{filtered.length}
             </span>
           </>
         }
@@ -323,7 +345,7 @@ function Assets() {
         }
         info={{
           title: 'assets',
-          text: '각 asset_key 의 canonical pick (승인된 1장). 썸네일 클릭 = 상세, shift/⌘+click 또는 shift+↑↓ = 다중 선택. 필터/정렬/페이지는 URL 에 자동 직렬화.',
+          text: '각 asset_key 의 canonical pick (승인된 1장). 썸네일 클릭 = 상세, shift/⌘+click 또는 shift+↑↓ = 다중 선택. 필터/정렬 상태는 URL 에 자동 직렬화.',
         }}
       />
 
@@ -331,7 +353,7 @@ function Assets() {
         <aside className="filter-side panel-card" style={{ position: 'sticky', top: 16 }}>
           <h4>Project</h4>
           <label className="row">
-            <input type="radio" checked={!project} onChange={() => setProject('')}/>
+            <input type="checkbox" checked={projectSet.size === 0} onChange={() => setProjectSet(new Set())}/>
             <span>전체</span>
           </label>
           {(projects.data?.items || []).map((p) => {
@@ -339,7 +361,7 @@ function Assets() {
             const label = typeof p === 'string' ? p : (p.name ?? p.id ?? String(p));
             return (
               <label key={id} className="row">
-                <input type="radio" checked={project === id} onChange={() => setProject(id)}/>
+                <input type="checkbox" checked={projectSet.has(id)} onChange={() => _toggleSetValue(setProjectSet, id)}/>
                 <span>{label}</span>
               </label>
             );
@@ -347,36 +369,36 @@ function Assets() {
 
           <h4>Status</h4>
           <label className="row">
-            <input type="radio" checked={!status} onChange={() => setStatus('')}/>
+            <input type="checkbox" checked={statusSet.size === 0} onChange={() => setStatusSet(new Set())}/>
             <span>전체 <b style={{ color: 'var(--text-faint)', marginLeft: 4 }}>{summary.data?.total || 0}</b></span>
           </label>
           {STATUS_OPTIONS.map((opt) => (
             <label key={opt.key} className="row">
-              <input type="radio" checked={status === opt.key} onChange={() => setStatus(opt.key)}/>
+              <input type="checkbox" checked={statusSet.has(opt.key)} onChange={() => _toggleSetValue(setStatusSet, opt.key)}/>
               <span>{opt.label} <b style={{ color: 'var(--text-faint)', marginLeft: 4 }}>{byStatus[opt.key] || 0}</b></span>
             </label>
           ))}
 
           <h4>Validation</h4>
           <label className="row">
-            <input type="radio" checked={!validation} onChange={() => setValidation('')}/>
+            <input type="checkbox" checked={validationSet.size === 0} onChange={() => setValidationSet(new Set())}/>
             <span>전체</span>
           </label>
           {VALIDATION_OPTIONS.map((opt) => (
             <label key={opt.key} className="row">
-              <input type="radio" checked={validation === opt.key} onChange={() => setValidation(opt.key)}/>
+              <input type="checkbox" checked={validationSet.has(opt.key)} onChange={() => _toggleSetValue(setValidationSet, opt.key)}/>
               <span>{opt.label} <b style={{ color: 'var(--text-faint)', marginLeft: 4 }}>{byValidation[opt.key] || 0}</b></span>
             </label>
           ))}
 
           <h4>Category</h4>
           <label className="row">
-            <input type="radio" checked={!category} onChange={() => setCategory('')}/>
+            <input type="checkbox" checked={categorySet.size === 0} onChange={() => setCategorySet(new Set())}/>
             <span>전체</span>
           </label>
           {Object.entries(byCategory).map(([k, count]) => (
             <label key={k} className="row">
-              <input type="radio" checked={category === k} onChange={() => setCategory(k)}/>
+              <input type="checkbox" checked={categorySet.has(k)} onChange={() => _toggleSetValue(setCategorySet, k)}/>
               <span>{k} <b style={{ color: 'var(--text-faint)', marginLeft: 4 }}>{count}</b></span>
             </label>
           ))}
@@ -401,18 +423,19 @@ function Assets() {
             </div>
           )}
 
-          {filtered.length > 0 && (
-            <PaginationBar
-              page={Math.min(page, totalPages)}
-              totalPages={totalPages}
-              pageSize={pageSize}
-              total={filtered.length}
-              onPage={setPage}
-              onPageSize={setPageSize}
-            />
+          {filtered.length > rows.length && (
+            <div style={{ marginTop: 12, display: 'flex', justifyContent: 'center' }}>
+              <button
+                className="btn"
+                onClick={() => setVisibleLimit((n) => Math.min(filtered.length, n + 96))}
+              >
+                더 불러오기 ({rows.length}/{filtered.length})
+              </button>
+            </div>
           )}
+          <div ref={sentinelRef} style={{ height: 1 }} />
 
-          {(selected.size > 0 || (validation === 'fail' && rows.length > 0)) && (
+          {(selected.size > 0 || (validationSet.has('fail') && rows.length > 0)) && (
             <div className="bulk-bar">
               {selected.size > 0 ? (
                 <>
@@ -446,11 +469,11 @@ function Assets() {
                   <div style={{ flex: 1 }}/>
                   <button
                     className="btn"
-                    onClick={() => runBulkApi(() => window.api.revalidateFailed(project || undefined), '재검증')}
+                    onClick={() => runBulkApi(() => window.api.revalidateFailed(undefined), '재검증')}
                   >재검증</button>
                   <button
                     className="btn btn-primary"
-                    onClick={() => runBulkApi(() => window.api.regenerateFailed(project || undefined), '재생성')}
+                    onClick={() => runBulkApi(() => window.api.regenerateFailed(undefined), '재생성')}
                   >실패분 재생성</button>
                 </>
               )}
@@ -458,37 +481,6 @@ function Assets() {
           )}
         </main>
       </div>
-    </div>
-  );
-}
-
-function PaginationBar({ page, totalPages, pageSize, total, onPage, onPageSize }) {
-  const first = Math.min(total, (page - 1) * pageSize + 1);
-  const last = Math.min(total, page * pageSize);
-  return (
-    <div style={{
-      marginTop: 12, padding: '10px 14px',
-      display: 'flex', alignItems: 'center', gap: 8,
-      fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-muted)',
-      border: '1px solid var(--border-subtle)', borderRadius: 4,
-    }}>
-      <span>{first.toLocaleString()}–{last.toLocaleString()} / {total.toLocaleString()}</span>
-      <div style={{ flex: 1 }}/>
-      <button className="btn" onClick={() => onPage(1)} disabled={page <= 1} title="첫 페이지">⟪</button>
-      <button className="btn" onClick={() => onPage(page - 1)} disabled={page <= 1} title="이전">‹</button>
-      <span style={{ padding: '0 6px' }}>{page} / {totalPages}</span>
-      <button className="btn" onClick={() => onPage(page + 1)} disabled={page >= totalPages} title="다음">›</button>
-      <button className="btn" onClick={() => onPage(totalPages)} disabled={page >= totalPages} title="마지막">⟫</button>
-      <div style={{ width: 16 }}/>
-      <label>page size</label>
-      <select
-        className="input"
-        value={pageSize}
-        onChange={(e) => onPageSize(Number(e.target.value))}
-        style={{ width: 80 }}
-      >
-        {PAGE_SIZES.map((s) => <option key={s} value={s}>{s}</option>)}
-      </select>
     </div>
   );
 }
@@ -530,8 +522,13 @@ function AssetCard({ a, selected, onSelect }) {
       <div className="strip">
         <span className="asset-key" title={a.asset_key}>{a.asset_key}</span>
         <span className="meta">
+          seed {a.generation_seed ?? '—'} · {_relativeTime(a.updated_at || a.created_at)}
+        </span>
+      </div>
+      <div className="strip" style={{ marginTop: 2 }}>
+        <span className="meta">
           {a.width}×{a.height}
-          {typeof a.color_count === 'number' ? ` · c${a.color_count}` : ''}
+          {typeof a.color_count === 'number' ? ` · colors ${a.color_count}` : ''}
         </span>
       </div>
     </div>

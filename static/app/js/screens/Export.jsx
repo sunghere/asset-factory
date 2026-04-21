@@ -91,6 +91,7 @@ function Export() {
   const [saveManifest, setSaveManifest] = useState(true);
   const [exporting, setExporting] = useState(false);
   const [view, setView] = useState('tree'); // 'tree' | 'table'
+  const [lastExport, setLastExport] = useState(null);
 
   const projects = window.useAsync(() => window.api.listProjects().catch(() => []), []);
   const summary = window.useAsync(
@@ -131,6 +132,7 @@ function Export() {
         output_dir: outputDir,
         save_manifest: saveManifest,
       });
+      setLastExport(res);
       toasts.push({
         kind: 'success',
         message: `내보내기 완료 · ${res.exported_count}개 → ${res.output_dir}`,
@@ -171,9 +173,9 @@ function Export() {
         }}
       />
 
-      <div style={{ display: 'grid', gap: 16, gridTemplateColumns: '1fr 1.4fr' }}>
+      <div style={{ display: 'grid', gap: 16, gridTemplateColumns: '300px 1fr 320px', alignItems: 'start' }}>
         <div className="panel-card">
-          <h3>대상 설정</h3>
+          <h3>필터</h3>
           <div className="form-grid">
             <label style={{ gridColumn: 'span 2' }}>
               <span>프로젝트 <span className="hint">(빈 값 = 전체)</span></span>
@@ -203,7 +205,7 @@ function Export() {
             </label>
 
             <label style={{ gridColumn: 'span 2' }}>
-              <span>변경 이후</span>
+              <span>since</span>
               <select
                 className="input"
                 value={sincePreset}
@@ -229,31 +231,7 @@ function Export() {
                 placeholder="~/workspace/assets"
               />
             </label>
-            <label style={{ gridColumn: 'span 2', display: 'flex', gap: 8, alignItems: 'center' }}>
-              <input
-                type="checkbox"
-                checked={saveManifest}
-                onChange={(e) => setSaveManifest(e.target.checked)}
-              />
-              <span>asset-manifest.json 생성</span>
-            </label>
           </div>
-
-          <div style={{ marginTop: 16, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <button
-              type="button"
-              className="btn btn-primary"
-              onClick={doExport}
-              disabled={exporting || items.length === 0}
-              title={items.length === 0 ? '내보낼 승인본이 없습니다' : `${_fmtBytes(totalBytes)} 복사`}
-            >
-              {exporting ? '복사 중…' : `내보내기 (${items.length}건 · ${_fmtBytes(totalBytes)})`}
-            </button>
-            <button type="button" className="btn" onClick={manifest.reload}>미리보기 새로고침</button>
-          </div>
-          <p style={{ color: 'var(--text-faint)', fontSize: 11, marginTop: 10 }}>
-            경로는 서버가 허용한 allowlist 내부여야 합니다. 없으면 자동 생성됩니다.
-          </p>
         </div>
 
         <div className="panel-card" style={{ padding: 0, overflow: 'hidden' }}>
@@ -288,6 +266,17 @@ function Export() {
               {manifest.loading && <span className="hint" style={{ alignSelf: 'center' }}>로드 중…</span>}
             </div>
           </div>
+
+          {lastExport && (
+            <div style={{ padding: '10px 16px', borderBottom: '1px solid var(--border-subtle)', background: 'var(--bg-elev-2)' }}>
+              <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+                결과 · {lastExport.exported_count}개 → {lastExport.output_dir}
+              </div>
+              <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)', marginTop: 4 }}>
+                manifest: {lastExport.manifest_path || lastExport.manifest_url || (saveManifest ? 'saved (path not returned)' : 'disabled')}
+              </div>
+            </div>
+          )}
 
           {manifest.error ? (
             <div style={{ padding: 16 }}>
@@ -338,6 +327,39 @@ function Export() {
             </div>
           )}
         </div>
+
+        <aside className="panel-card" style={{ position: 'sticky', top: 16 }}>
+          <h3>내보내기</h3>
+          <label style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+            <input
+              type="checkbox"
+              checked={saveManifest}
+              onChange={(e) => setSaveManifest(e.target.checked)}
+            />
+            <span>manifest 저장</span>
+          </label>
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-muted)', marginBottom: 10 }}>
+            target: {outputDir || '(unset)'}
+            <br />
+            payload: {items.length} items · {_fmtBytes(totalBytes)}
+          </div>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={doExport}
+            disabled={exporting || items.length === 0}
+            title={items.length === 0 ? '내보낼 승인본이 없습니다' : `${_fmtBytes(totalBytes)} 복사`}
+            style={{ width: '100%' }}
+          >
+            {exporting ? '복사 중…' : '▶ 내보내기'}
+          </button>
+          <button type="button" className="btn" onClick={manifest.reload} style={{ width: '100%', marginTop: 8 }}>
+            미리보기 새로고침
+          </button>
+          <p style={{ color: 'var(--text-faint)', fontSize: 11, marginTop: 10 }}>
+            경로는 서버 allowlist 내부만 허용됩니다. 필요 시 디렉토리를 자동 생성합니다.
+          </p>
+        </aside>
       </div>
     </div>
   );

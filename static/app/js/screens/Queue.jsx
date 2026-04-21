@@ -6,8 +6,24 @@
 
 const { useMemo, useState, useEffect, useRef } = React;
 
-// 1장당 평균 픽 시간(초). 대시보드 직관 (한 장당 3~4초) 기반.
-const _QUEUE_SEC_PER_CANDIDATE = 3;
+// 스펙 기준 ETA: 남은 후보 1장당 약 1.5초.
+const _QUEUE_SEC_PER_CANDIDATE = 1.5;
+const SINCE_PRESETS = [
+  { key: 'today', label: '오늘 00:00 (KST)' },
+  { key: '24h', label: '최근 24시간' },
+  { key: '7d', label: '최근 7일' },
+];
+
+function _sinceIso(key) {
+  const now = new Date();
+  if (key === '24h') return new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
+  if (key === '7d') return new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const kstNow = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Seoul' }));
+  kstNow.setHours(0, 0, 0, 0);
+  // KST midnight -> UTC ISO
+  const utcTs = kstNow.getTime() - (9 * 60 * 60 * 1000);
+  return new Date(utcTs).toISOString();
+}
 
 function _relTime(iso) {
   if (!iso) return '—';
@@ -23,7 +39,7 @@ function _relTime(iso) {
 
 function _formatEta(totalRemaining) {
   const sec = totalRemaining * _QUEUE_SEC_PER_CANDIDATE;
-  if (sec < 60) return `${sec}초`;
+  if (sec < 60) return `${Math.round(sec)}초`;
   if (sec < 3600) return `${Math.round(sec / 60)}분`;
   const h = Math.floor(sec / 3600);
   const m = Math.round((sec % 3600) / 60);
@@ -31,7 +47,10 @@ function _formatEta(totalRemaining) {
 }
 
 function Queue() {
-  const queue = window.useAsync(() => window.api.cherryPickQueue({ limit: 200 }), []);
+  const [sincePreset, setSincePreset] = useState('today');
+  const [hideCompleted, setHideCompleted] = useState(true);
+  const sinceIso = useMemo(() => _sinceIso(sincePreset), [sincePreset]);
+  const queue = window.useAsync(() => window.api.cherryPickQueue({ since: sinceIso, limit: 200 }), [sinceIso]);
   const toasts = window.useToasts ? window.useToasts() : null;
   const [filter, setFilter] = useState('all');
   const [search, setSearch] = useState('');
@@ -56,6 +75,7 @@ function Queue() {
 
   const rows = useMemo(() => {
     let items = queue.data?.items || [];
+    if (hideCompleted) items = items.filter((b) => !b.approved);
     if (filter !== 'all') items = items.filter((b) => (b.project || 'default') === filter);
     if (search.trim()) {
       const s = search.trim().toLowerCase();
@@ -64,7 +84,7 @@ function Queue() {
       );
     }
     return items.sort((a, b) => new Date(b.first_created_at) - new Date(a.first_created_at));
-  }, [queue.data, filter, search]);
+  }, [queue.data, filter, search, hideCompleted]);
 
   useEffect(() => {
     if (cursor >= rows.length) setCursor(Math.max(0, rows.length - 1));
@@ -98,6 +118,23 @@ function Queue() {
   return (
     <div>
       <div className="filter-row" style={{ display: 'flex', gap: 8, marginBottom: 14, alignItems: 'center', flexWrap: 'wrap' }}>
+        <label style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)' }}>since</label>
+        <select
+          className="input"
+          value={sincePreset}
+          onChange={(e) => setSincePreset(e.target.value)}
+          style={{ width: 170 }}
+        >
+          {SINCE_PRESETS.map((p) => <option key={p.key} value={p.key}>{p.label}</option>)}
+        </select>
+        <label className="row" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginLeft: 4 }}>
+          <input
+            type="checkbox"
+            checked={hideCompleted}
+            onChange={(e) => setHideCompleted(e.target.checked)}
+          />
+          <span>숨김:완료된 batch</span>
+        </label>
         <span className={`pill ${filter === 'all' ? 'active' : ''}`} onClick={() => setFilter('all')}>
           all <b style={{ marginLeft: 4 }}>{queue.data?.items?.length ?? 0}</b>
         </span>
@@ -143,13 +180,28 @@ function Queue() {
             )}
             {queue.data && rows.length === 0 && (
               <tr><td colSpan={5} style={{ padding: 30 }}>
-                <window.EmptyState glyph="∅" title="큐 비어있음" hint="필터/검색을 비우거나 새 batch 를 등록하세요."/>
+                <window.EmptyState
+                  glyph="∅"
+                  title="오늘 처리할 batch가 없습니다"
+                  hint="새 배치를 등록하려면 아래 curl 예시를 실행하거나 수동 배치 화면으로 이동하세요."
+                  action={(
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      <button className="btn btn-primary" onClick={() => window.navigate('/batches/new')}>/batches/new 열기</button>
+                      <code style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)' }}>
+                        curl -X POST /api/batches -H 'Content-Type: application/json' -d ...
+                      </code>
+                    </div>
+                  )}
+                />
               </td></tr>
             )}
             {rows.map((b, idx) => {
               const done = (b.total || 0) - (b.remaining || 0);
               const active = idx === cursor;
               const category = b.category || b.asset_category || null;
+              const rejected = Number(b.rejected_count || 0);
+              const picked = Number(b.picked_candidates || (b.approved ? 1 : 0));
+              const statusIcon = b.approved ? '✓' : ((done === 0 && rejected === 0) ? '★' : '◐');
               return (
                 <tr
                   key={b.batch_id}
@@ -159,7 +211,7 @@ function Queue() {
                   style={active ? { outline: '1px solid var(--accent-pick)', outlineOffset: -1 } : undefined}
                 >
                   <td style={{ color: active ? 'var(--accent-pick)' : 'var(--text-faint)', textAlign: 'center' }}>
-                    {active ? '▶' : '◐'}
+                    {active ? '▶' : statusIcon}
                   </td>
                   <td>
                     <div style={{ fontFamily: 'var(--font-mono)', fontSize: 15, fontWeight: 600, marginBottom: 4 }}>
@@ -170,6 +222,12 @@ function Queue() {
                       {category && <span className="chip">{category}</span>}
                       <span className="chip" style={{ color: 'var(--accent-approve)' }}>
                         남음 <b style={{ marginLeft: 4 }}>{b.remaining}</b>
+                      </span>
+                      <span className="chip" style={{ color: 'var(--text-muted)' }}>
+                        rejected {rejected}
+                      </span>
+                      <span className="chip" style={{ color: 'var(--text-muted)' }}>
+                        picked {picked}
                       </span>
                       <span className="chip" style={{ color: 'var(--text-muted)' }}>
                         총 {b.total}
@@ -215,6 +273,31 @@ function Queue() {
                         onClose={() => setMenuOpen(null)}
                         onOpen={() => window.navigate(`/cherry-pick/${b.batch_id}`)}
                         onDetail={() => window.navigate(`/batches/${b.batch_id}`)}
+                        onRejectAll={async () => {
+                          try {
+                            const cand = await window.api.listBatchCandidates(b.batch_id);
+                            const items = cand?.items || cand?.candidates || [];
+                            let ok = 0;
+                            for (const c of items) {
+                              if (!c || c.status === 'rejected' || c.is_rejected) continue;
+                              try {
+                                await window.api.rejectCandidate(b.batch_id, c.id);
+                                ok++;
+                              } catch (_) { /* noop */ }
+                            }
+                            toasts?.push?.({
+                              kind: 'info',
+                              message: `이 batch 모두 reject 처리: ${ok}건`,
+                              ttl: 2500,
+                            });
+                            queue.reload();
+                          } catch (err) {
+                            toasts?.push?.({
+                              kind: 'error',
+                              message: `일괄 reject 실패: ${err?.message || err}`,
+                            });
+                          }
+                        }}
                         onCopyId={() => {
                           try {
                             navigator.clipboard.writeText(b.batch_id);
@@ -252,7 +335,7 @@ function Queue() {
   );
 }
 
-function RowMenu({ onClose, onOpen, onDetail, onCopyId }) {
+function RowMenu({ onClose, onOpen, onDetail, onRejectAll, onCopyId }) {
   // Popover 스타일. 외부 클릭은 상위 <div> onClick 에서 setMenuOpen(null) 로 처리.
   const stop = (fn) => (e) => { e.stopPropagation(); onClose(); fn(); };
   return (
@@ -272,6 +355,9 @@ function RowMenu({ onClose, onOpen, onDetail, onCopyId }) {
       </button>
       <button className="btn" style={{ width: '100%', justifyContent: 'flex-start', textAlign: 'left' }} onClick={stop(onDetail)}>
         상세 보기
+      </button>
+      <button className="btn" style={{ width: '100%', justifyContent: 'flex-start', textAlign: 'left' }} onClick={stop(onRejectAll)}>
+        이 batch 모두 reject
       </button>
       <button className="btn" style={{ width: '100%', justifyContent: 'flex-start', textAlign: 'left' }} onClick={stop(onCopyId)}>
         batch_id 복사

@@ -195,8 +195,8 @@ function CatalogCard({ item, kind, active, onSelect }) {
         </div>
       )}
       <div style={{ marginTop: 'auto', display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)' }}>
-        <span>{u?.task_count ? `${u.task_count} tasks` : '\u00A0'}</span>
-        <span>{u?.last_used_at ? _relTime(u.last_used_at) : '\u00A0'}</span>
+        <span>{u?.task_count ? `${u.task_count} tasks` : 'tasks —'}</span>
+        <span>{u?.last_used_at ? `last ${_relTime(u.last_used_at)}` : 'last —'}</span>
       </div>
     </div>
   );
@@ -211,6 +211,9 @@ function DetailPanel({ kind, item, onClose }) {
   );
 
   const prefillHref = `/app/batches/new?${kind}=${encodeURIComponent(name || '')}`;
+  const description = item.description || item.desc || item.notes || null;
+  const samplePrompt = item.sample_prompt || item.example_prompt || null;
+  const compatibleModels = item.compatible_models || item.compatible || item.compat_models || [];
 
   return (
     <aside className="panel-card" style={{
@@ -237,8 +240,26 @@ function DetailPanel({ kind, item, onClose }) {
         {item.hash && (<><dt>hash</dt><dd style={{ fontFamily: 'var(--font-mono)' }}>{String(item.hash).slice(0, 16)}</dd></>)}
         {item.weight_range && (<><dt>weight range</dt><dd>{item.weight_range[0]}–{item.weight_range[1]}</dd></>)}
         {item.weight_default != null && (<><dt>default weight</dt><dd>{item.weight_default}</dd></>)}
-        {item.notes && (<><dt>notes</dt><dd>{item.notes}</dd></>)}
+        {description && (<><dt>description</dt><dd>{description}</dd></>)}
       </dl>
+
+      {samplePrompt && (
+        <div>
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)', marginBottom: 4 }}>SAMPLE PROMPT</div>
+          <pre style={{ margin: 0, padding: 8, background: 'var(--bg-elev-2)', borderRadius: 4, fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+            {samplePrompt}
+          </pre>
+        </div>
+      )}
+
+      {Array.isArray(compatibleModels) && compatibleModels.length > 0 && (
+        <div>
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)', marginBottom: 4 }}>COMPATIBLE MODELS</div>
+          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+            {compatibleModels.map((m) => <span key={m} className="pill" style={{ fontSize: 10 }}>{m}</span>)}
+          </div>
+        </div>
+      )}
 
       {item.tags && item.tags.length > 0 && (
         <div>
@@ -298,6 +319,16 @@ function DetailPanel({ kind, item, onClose }) {
       >
         ▶ 이 {kind} 로 batch 만들기
       </a>
+      <button
+        className="btn"
+        onClick={() => {
+          try {
+            navigator.clipboard.writeText(name || '');
+          } catch (_) { /* noop */ }
+        }}
+      >
+        이름 복사
+      </button>
     </aside>
   );
 }

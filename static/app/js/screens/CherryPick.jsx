@@ -54,7 +54,10 @@ function CherryPick({ batchId }) {
   const [loraFilters, setLoraFilters] = useStateCP(() => new Set()); // 활성 lora id 집합
   const [compareSet, setCompareSet] = useStateCP(() => new Set()); // candidate id 집합
   const [filterQuery, setFilterQuery] = useStateCP('');
+  const [modelFilter, setModelFilter] = useStateCP('all');
   const [visibleLimit, setVisibleLimit] = useStateCP(60); // 1차 렌더 상한 — IO 로 확장.
+  const [assetKeyDraft, setAssetKeyDraft] = useStateCP('');
+  const [nextBatchCountdown, setNextBatchCountdown] = useStateCP(null); // {batchId, sec}
   const filterInputRef = useRefCP(null);
   const gridRef = useRefCP(null);
   const sentinelRef = useRefCP(null);
@@ -76,6 +79,11 @@ function CherryPick({ batchId }) {
     setItems(list);
     setCursor((c) => Math.min(c, Math.max(0, list.length - 1)));
   }, [candidates.data]);
+
+  useEffectCP(() => {
+    const key = (batchDetail.data?.asset_key || candidates.data?.batch?.asset_key || '').trim();
+    setAssetKeyDraft(key);
+  }, [batchId, batchDetail.data?.asset_key, candidates.data?.batch?.asset_key]);
 
   // Cherry-pick session bracket — opt-in analytics only.
   // Emits:
@@ -130,6 +138,14 @@ function CherryPick({ batchId }) {
     return Array.from(map.values()).slice(0, 9);
   }, [items]);
 
+  const modelCatalog = useMemoCP(() => {
+    const set = new Set();
+    for (const c of items) {
+      if (c.generation_model) set.add(c.generation_model);
+    }
+    return Array.from(set);
+  }, [items]);
+
   // 보이는 후보 (hide rejected + lora filter + text filter 적용).
   const visibleItems = useMemoCP(() => {
     return items.filter((c) => {
@@ -147,16 +163,17 @@ function CherryPick({ batchId }) {
         const hay = `${c.generation_model || ''} ${c.generation_prompt || ''} ${c.validation_status || ''}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
+      if (modelFilter !== 'all' && c.generation_model !== modelFilter) return false;
       return true;
     });
-  }, [items, hideRejected, loraFilters, filterQuery]);
+  }, [items, hideRejected, loraFilters, filterQuery, modelFilter]);
 
   // cursor는 visibleItems 기준. 원본 items 인덱스를 보존하지 않아도 OK.
   const cur = visibleItems[cursor] || null;
   const remaining = visibleItems.filter((c) => c.status !== 'rejected' && c.status !== 'approved').length;
 
   // 필터가 바뀌면 visible limit 리셋. 그래야 필터 결과가 60 이하일 때 전체 노출.
-  useEffectCP(() => { setVisibleLimit(60); }, [hideRejected, filterQuery, loraFilters]);
+  useEffectCP(() => { setVisibleLimit(60); }, [hideRejected, filterQuery, loraFilters, modelFilter]);
 
   // cursor 가 현재 렌더된 범위 너머로 이동하면 limit 확장.
   useEffectCP(() => {
@@ -253,11 +270,14 @@ function CherryPick({ batchId }) {
   const pick = useCallbackCP(async () => {
     if (!cur) return;
     const project = meta?.project || cur.project || 'default';
-    const assetKey = meta?.asset_key || cur.asset_key;
+    const assetKey = (assetKeyDraft || meta?.asset_key || cur.asset_key || '').trim();
     if (!assetKey) {
       toasts.push({ kind: 'error', message: 'asset_key 정보 없음 — 확정 불가' });
       return;
     }
+    const pendingAfterThisPick = items.filter((c) =>
+      c.id !== cur.id && c.status !== 'rejected' && c.status !== 'approved'
+    ).length;
     try {
       const resp = await window.api.approveFromCandidate({
         candidate_id: cur.id,
@@ -278,10 +298,19 @@ function CherryPick({ batchId }) {
       sessionCountsRef.current.approved += 1;
       track('pick', { verdict: 'approve', id: cur.id, cursor, asset_key: assetKey });
       if (autoAdvance) move(1);
+      if (pendingAfterThisPick === 0) {
+        try {
+          const q = await window.api.cherryPickQueue({ limit: 200 });
+          const next = (q?.items || []).find((b) => !b.approved && b.batch_id !== batchId && Number(b.remaining || 0) > 0);
+          if (next?.batch_id) setNextBatchCountdown({ batchId: next.batch_id, sec: 3 });
+        } catch (_) {
+          // next batch lookup 실패는 무시
+        }
+      }
     } catch (err) {
       toasts.push({ kind: 'error', message: `확정 실패: ${err.message || err}` });
     }
-  }, [cur, meta, setStatusLocal, toasts, autoAdvance, move, track, cursor]);
+  }, [cur, meta, assetKeyDraft, items, setStatusLocal, toasts, autoAdvance, move, track, cursor, batchId]);
 
   const toggleLoraFilterByIndex = useCallbackCP((idx) => {
     const lora = loraCatalog[idx - 1];
@@ -332,6 +361,22 @@ function CherryPick({ batchId }) {
 
   const approvedCount = items.filter((c) => c.status === 'approved').length;
   const rejectedCount = items.filter((c) => c.status === 'rejected').length;
+  const remainingCount = Math.max(items.length - approvedCount - rejectedCount, 0);
+
+  useEffectCP(() => {
+    if (!nextBatchCountdown) return undefined;
+    const id = setInterval(() => {
+      setNextBatchCountdown((prev) => {
+        if (!prev) return null;
+        if (prev.sec <= 1) {
+          window.navigate(`/cherry-pick/${prev.batchId}`);
+          return null;
+        }
+        return { ...prev, sec: prev.sec - 1 };
+      });
+    }, 1000);
+    return () => clearInterval(id);
+  }, [nextBatchCountdown]);
 
   return (
     <div className="cherry-screen">
@@ -344,10 +389,12 @@ function CherryPick({ batchId }) {
             <span style={{ color: 'var(--text-muted)' }}>{batchId.slice(0, 12)}…</span>
           </div>
           <h1 style={{ margin: '4px 0 0' }}>
-            {meta?.asset_key || '…'} <span className="hint">({meta?.project || 'default'})</span>
+            오늘 큐 › {meta?.asset_key || '…'} <span className="hint">({meta?.project || 'default'})</span>
           </h1>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <button className="btn" onClick={() => candidates.reload()} title="reload">↻ reload</button>
+          <button className="btn" onClick={() => window.navigate('/queue')} title="queue">batch 목록</button>
           <label className="row" style={{ fontSize: 12 }}>
             <input
               type="checkbox"
@@ -365,6 +412,37 @@ function CherryPick({ batchId }) {
             onChange={(e) => setFilterQuery(e.target.value)}
             style={{ width: 180, fontSize: 12 }}
           />
+          <select
+            className="input"
+            value={modelFilter}
+            onChange={(e) => setModelFilter(e.target.value)}
+            style={{ width: 180, fontSize: 12 }}
+            title="model filter"
+          >
+            <option value="all">model: all</option>
+            {modelCatalog.map((m) => <option key={m} value={m}>{m}</option>)}
+          </select>
+          <select
+            className="input"
+            value="__none__"
+            onChange={(e) => {
+              const id = e.target.value;
+              if (id !== '__none__') {
+                setLoraFilters((s) => {
+                  const next = new Set(s);
+                  if (next.has(id)) next.delete(id);
+                  else next.add(id);
+                  return next;
+                });
+              }
+              e.target.value = '__none__';
+            }}
+            style={{ width: 170, fontSize: 12 }}
+            title="lora filter"
+          >
+            <option value="__none__">lora toggle…</option>
+            {loraCatalog.map((l) => <option key={l.id} value={l.id}>{l.id}</option>)}
+          </select>
           <button
             className="btn ghost"
             onClick={() => setCompareOpen(true)}
@@ -388,20 +466,25 @@ function CherryPick({ batchId }) {
             {' · '}
             <span>✕ {rejectedCount}</span>
             {' · '}
-            <span>{remaining}/{items.length} 남음</span>
+            <span>{remainingCount}/{items.length} 남음</span>
           </span>
         </div>
       </div>
 
-      {/* Progress (간단 버전 — 추후 SegProgress 컴포넌트가 생기면 교체) */}
+      {nextBatchCountdown && (
+        <div className="panel-card" style={{ marginBottom: 10, padding: '8px 12px', display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+            배치 완료. {nextBatchCountdown.sec}초 후 다음 배치로 이동합니다.
+          </span>
+          <button className="btn" style={{ marginLeft: 'auto' }} onClick={() => setNextBatchCountdown(null)}>취소</button>
+          <button className="btn btn-primary" onClick={() => window.navigate(`/cherry-pick/${nextBatchCountdown.batchId}`)}>지금 이동</button>
+        </div>
+      )}
+
+      {/* Progress */}
       {items.length > 0 && (
         <div
           className="panel-card"
-          role="progressbar"
-          aria-valuenow={approvedCount}
-          aria-valuemin={0}
-          aria-valuemax={items.length}
-          aria-label="승인 진행도"
           style={{
             padding: '8px 14px',
             marginBottom: 12,
@@ -413,17 +496,10 @@ function CherryPick({ batchId }) {
           }}
         >
           <span style={{ color: 'var(--text-muted)' }}>오늘 큐 › {meta?.asset_key || batchId.slice(0, 8)}</span>
-          <div style={{ flex: 1, height: 6, background: 'var(--bg-recess)', borderRadius: 3, overflow: 'hidden' }}>
-            <div
-              style={{
-                width: `${items.length ? (approvedCount / items.length) * 100 : 0}%`,
-                height: '100%',
-                background: 'var(--accent-approve)',
-                transition: 'width 200ms',
-              }}
-            />
+          <div style={{ flex: 1 }}>
+            <window.SegProgress approved={approvedCount} rejected={rejectedCount} total={items.length}/>
           </div>
-          <span>{approvedCount} / {items.length}</span>
+          <span>✓ {approvedCount} · ✕ {rejectedCount} · 남음 {remainingCount}</span>
         </div>
       )}
 
@@ -453,10 +529,13 @@ function CherryPick({ batchId }) {
             <div style={{ gridColumn: '1 / -1' }}>
               <window.EmptyState
                 glyph="∅"
-                title={items.length === 0 ? '후보 없음' : '필터 결과 없음'}
+                title={items.length === 0 ? '후보 없음' : (hideRejected ? '모두 rejected' : '필터 결과 없음')}
                 hint={items.length === 0
                   ? '이 배치에는 후보가 없습니다.'
-                  : '필터를 풀거나 반려 숨김을 해제해보세요.'}
+                  : (hideRejected ? '모두 rejected 입니다. [x]를 풀고 다시 보세요.' : '필터를 풀거나 반려 숨김을 해제해보세요.')}
+                action={hideRejected && items.length > 0
+                  ? <button className="btn btn-primary" onClick={() => setHideRejected(false)}>[x] 풀고 다시 보기</button>
+                  : undefined}
               />
             </div>
           )}
@@ -511,6 +590,8 @@ function CherryPick({ batchId }) {
           <SidePanel
             cur={cur}
             meta={meta}
+            assetKeyDraft={assetKeyDraft}
+            onAssetKeyChange={setAssetKeyDraft}
             compareSet={compareSet}
             onReject={reject}
             onCompareToggle={toggleCompare}
@@ -570,7 +651,7 @@ function CherryPick({ batchId }) {
   );
 }
 
-function SidePanel({ cur, meta, compareSet, onReject, onCompareToggle, onPick, onZoom }) {
+function SidePanel({ cur, meta, assetKeyDraft, onAssetKeyChange, compareSet, onReject, onCompareToggle, onPick, onZoom }) {
   if (!cur) {
     return (
       <aside className="panel-card cherry-side" style={{ padding: 16, minHeight: 420 }}>
@@ -626,7 +707,16 @@ function SidePanel({ cur, meta, compareSet, onReject, onCompareToggle, onPick, o
         }}
       >
         <dt style={{ color: 'var(--text-faint)' }}>asset_key</dt>
-        <dd style={{ margin: 0 }}>{meta?.asset_key || cur.asset_key || '—'}</dd>
+        <dd style={{ margin: 0 }}>
+          <input
+            className="input"
+            value={assetKeyDraft}
+            onChange={(e) => onAssetKeyChange(e.target.value)}
+            placeholder={meta?.asset_key || cur.asset_key || 'asset_key'}
+            style={{ width: '100%', fontSize: 12 }}
+          />
+          <div style={{ fontSize: 10, color: 'var(--text-faint)', marginTop: 2 }}>현재 배치 승인 요청에 사용</div>
+        </dd>
         <dt style={{ color: 'var(--text-faint)' }}>candidate</dt>
         <dd style={{ margin: 0 }}>#{cur.id} · slot {cur.slot_index}</dd>
         <dt style={{ color: 'var(--text-faint)' }}>seed</dt>
@@ -693,7 +783,7 @@ function SidePanel({ cur, meta, compareSet, onReject, onCompareToggle, onPick, o
         >{compareSet.has(cur.id) ? 'v 비교 해제' : 'v 비교 추가'}</button>
         <button
           type="button"
-          className="btn primary"
+          className="btn btn-primary"
           onClick={onPick}
           disabled={cur.status === 'approved'}
           style={{ marginLeft: 'auto' }}
@@ -774,7 +864,7 @@ function HelpDialog({ open, onClose, keymapEnabled = true, autoAdvance = true })
       title="CherryPick 단축키"
       description="키보드에서 손이 떠나지 않도록 설계되었습니다."
       size="md"
-      footer={<button className="btn primary" onClick={onClose}>확인</button>}
+      footer={<button className="btn btn-primary" onClick={onClose}>확인</button>}
     >
       {!keymapEnabled && (
         <div
