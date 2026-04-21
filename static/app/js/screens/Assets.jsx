@@ -30,30 +30,27 @@ const SORT_OPTIONS = [
 ];
 const PAGE_SIZES = [24, 48, 96, 200];
 
-// URL query 유틸. hashchange SPA 에서는 location.hash 가 `#/assets?foo=bar` 형태라서
-// 쿼리 부분만 조작한다.
-function _parseHashQuery() {
-  const hash = typeof window !== 'undefined' ? (window.location.hash || '') : '';
-  const qIdx = hash.indexOf('?');
-  if (qIdx < 0) return {};
-  const search = hash.slice(qIdx + 1);
-  const sp = new URLSearchParams(search);
+// URL query 유틸. history-router 기준으로 location.search 를 사용한다.
+function _parseUrlQuery() {
+  const search = typeof window !== 'undefined' ? (window.location.search || '') : '';
+  const sp = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search);
   const out = {};
   for (const [k, v] of sp) out[k] = v;
   return out;
 }
 
-function _writeHashQuery(params) {
-  const hash = typeof window !== 'undefined' ? (window.location.hash || '') : '';
-  const qIdx = hash.indexOf('?');
-  const base = qIdx < 0 ? hash : hash.slice(0, qIdx);
+function _writeUrlQuery(params) {
+  const path = typeof window !== 'undefined' ? (window.location.pathname || '') : '';
   const sp = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
     if (v != null && v !== '') sp.set(k, String(v));
   }
   const qs = sp.toString();
-  const next = qs ? `${base}?${qs}` : base;
-  if (next !== hash) {
+  const next = qs ? `${path}?${qs}` : path;
+  const current = typeof window !== 'undefined'
+    ? `${window.location.pathname}${window.location.search || ''}`
+    : '';
+  if (next !== current) {
     // replaceState 로 히스토리 스팸 방지.
     window.history.replaceState(null, '', next);
   }
@@ -61,7 +58,7 @@ function _writeHashQuery(params) {
 
 function Assets() {
   const toasts = window.useToasts();
-  const initial = useMemo(() => _parseHashQuery(), []);
+  const initial = useMemo(() => _parseUrlQuery(), []);
 
   const [project, setProject] = useState(initial.p || '');
   const [status, setStatus] = useState(initial.s || '');
@@ -79,9 +76,9 @@ function Assets() {
   const lastAnchorIdx = useRef(null);
   const gridRef = useRef(null);
 
-  // URL 동기화 — 필터/검색/정렬/페이지 바뀔 때마다 hash 업데이트.
+  // URL 동기화 — 필터/검색/정렬/페이지 바뀔 때마다 search 업데이트.
   useEffect(() => {
-    _writeHashQuery({
+    _writeUrlQuery({
       p: project, s: status, v: validation, c: category, q,
       sort: sortKey !== 'updated' ? sortKey : '',
       dir: sortDir !== 'desc' ? sortDir : '',

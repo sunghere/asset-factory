@@ -210,7 +210,7 @@ function DetailPanel({ kind, item, onClose }) {
     [kind, name],
   );
 
-  const prefillHref = `#/batches/new?${kind}=${encodeURIComponent(name || '')}`;
+  const prefillHref = `/app/batches/new?${kind}=${encodeURIComponent(name || '')}`;
 
   return (
     <aside className="panel-card" style={{
@@ -263,7 +263,7 @@ function DetailPanel({ kind, item, onClose }) {
             {batches.data.items.map((b) => (
               <li key={b.batch_id}>
                 <a
-                  href={`#/batches/${b.batch_id}`}
+                  href={`/app/batches/${b.batch_id}`}
                   onClick={(e) => { e.preventDefault(); window.navigate(`/batches/${b.batch_id}`); }}
                   style={{
                     display: 'flex', justifyContent: 'space-between', alignItems: 'center',
