@@ -32,8 +32,11 @@ from validator import validate_asset
 load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
-DB_PATH = DATA_DIR / "asset-factory.db"
+DATA_DIR = Path(os.getenv("ASSET_FACTORY_DATA_DIR", str(BASE_DIR / "data"))).expanduser().resolve()
+DB_PATH = Path(os.getenv("ASSET_FACTORY_DB_PATH", str(DATA_DIR / "asset-factory.db"))).expanduser().resolve()
+EXPORT_ROOT = Path(
+    os.getenv("ASSET_FACTORY_EXPORT_ROOT", str(Path.home() / "workspace" / "assets"))
+).expanduser().resolve()
 CATALOG_YAML_PATH = Path(
     os.getenv("SD_CATALOG_PATH", str(BASE_DIR / "config" / "sd_catalog.yml"))
 )
@@ -47,7 +50,7 @@ def _allowed_roots() -> list[Path]:
     호출 시점에 동적으로 계산하므로 테스트에서 ``server.DATA_DIR`` 등을
     monkeypatch 할 수 있다."""
     extra = os.getenv("ASSET_FACTORY_ALLOWED_ROOTS", "")
-    roots: list[Path] = [DATA_DIR.resolve(), (Path.home() / "workspace" / "assets").resolve()]
+    roots: list[Path] = [DATA_DIR.resolve(), EXPORT_ROOT.resolve()]
     if extra:
         for chunk in extra.split(":"):
             cleaned = chunk.strip()
@@ -163,7 +166,7 @@ class ExportRequest(BaseModel):
     project: str | None = None
     category: str | None = None
     since: str | None = None
-    output_dir: str = str(Path.home() / "workspace" / "assets")
+    output_dir: str = str(EXPORT_ROOT)
     save_manifest: bool = True
 
 
@@ -785,6 +788,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     global worker_task, gc_worker_task
     await db.init()
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if os.getenv("ASSET_FACTORY_MOCK_MODE") == "1":
+        print(f"[MOCK MODE] DATA_DIR={DATA_DIR} DB_PATH={DB_PATH} EXPORT_ROOT={EXPORT_ROOT}")
     # 이전 실행 중 'processing' 상태로 멈춘 태스크를 큐로 복귀시킨다.
     await db.recover_orphan_tasks()
     worker_task = asyncio.create_task(generation_worker())
