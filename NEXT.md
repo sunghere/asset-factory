@@ -8,47 +8,25 @@ _작성: 2026-04-20 · 세션 종료 시점_
 
 ## 최근작업
 
-### SPA 리뉴얼 (Asset Factory Redesign v0.2) 마무리
-11개 화면을 React + Babel CDN SPA 로 포팅 완료. 기획 설계문서
-(`docs/SCREEN_SPEC_v0.2.md`) 기준 구현.
+### 테스트 커버리지 보강 (2026-04-21)
 
-- **`/` · `/cherry-pick` → `/app/*` redirect** (legacy 경로 완전 제거)
-- **레거시 static HTML/JS 퍼지** — `static/index.html`, `static/cherry-pick.html`,
-  `static/app.js`, `static/style.css` 삭제. `/legacy` 라우트 제거.
-  (followups §6 · DONE)
-- **헤더 경량화** — 각 화면의 큰 타이틀/디스크립션 제거. `PageToolbar` +
-  `PageInfo` (팝오버) 조합으로 대체. `static/app/js/hooks.jsx`,
-  `static/app/css/app.css`.
-- **Validation 뱃지** — `Thumb` 컴포넌트에 `warn` prop 추가, `.bdg.warn` CSS.
-  CherryPick 후보 그리드, Assets `AssetCard`, BatchDetail 후보 그리드 3군데에서
-  `validation_status='fail'` 시 빨간 뱃지 + `validation_message` tooltip.
-  (followups §7a · DONE)
-- **Batch spec 집계 API** — `GET /api/batches/{batch_id}` 신규
-  (`server.py`, `models.py::Database.get_batch_detail`). 응답에
-  `meta` / `tasks` / `candidates` / `spec(axes+common+task_count)` 포함.
-  `BatchDetail.jsx` 의 `SpecView` 를 이 페이로드 기반으로 재작성
-  (meta · axes · common params · candidates 4블록, `mixed` 뱃지).
-  (followups §7b · DONE)
-- **cat-raising 테스트 시드** — `scripts/seed_cat_raising.py` (멱등).
-  3개 design 배치 (`btc_seed_cr_baby_idle`, `btc_seed_cr_baby_eat`,
-  `btc_seed_cr_btn_feed`) + 후보 PNG. validation mix / 다축 spec /
-  active queued 시나리오 커버. queued 태스크는 `next_attempt_at = 2099-01-01`
-  로 박아서 worker 가 claim 하지 않도록 처리.
-  실행: `.venv/bin/python scripts/seed_cat_raising.py`
-  (followups §8 · DONE)
-- **검수 후속 (2026-04-20)** — `AssetDetail` `useSSE` 가 배열 배치를 처리하도록 수정;
-  `Assets`·`Export` 화면에 갤러리/보내기 관련 SSE 무효화 추가;
-  `tests/test_redirect.py` 에 `GET /` → `/app/` 핀;
-  `tests/test_api_tasks.py` 에 `API_KEY` 설정 시 `retry-failed` 401 계약.
+- `tests/test_generator.py` 신규 — `SDClient.health_check/list_models/list_loras`,
+  `txt2img` payload·bad info 처리, `_request_json` retry/HTTP error 분기,
+  저장 helper 2종 경로 sanitization까지 단위 테스트 추가.
+- `tests/test_validator_unit.py` 신규 — PNG 성공 케이스, size/palette/format
+  복합 실패 케이스, `_count_colors()` palette overflow fallback 추가.
+- `tests/test_catalog_api.py` — invalid YAML, fallback field/title/alias, invalid
+  metadata entry skip 케이스 보강.
+- `tests/test_gc_policy.py` — rejected path 로딩 schema error fallback, candidates
+  루트 밖 파일 보호 케이스 추가.
+- `.gitignore` 에 `.coverage` 추가 (coverage 산출물 추적 방지).
 
 ### 검증
-- `pytest tests/` 전부 pass (검수 후속: `GET /` 리다이렉트 · `retry-failed` API 키 계약 추가 후 **104** 기준).
-- `/api/batches/{id}` · `/api/cherry-pick/queue` curl 확인: 시드 배치 3종
-  (`total=4/4`, `total=4/4`, `total=2, done=1, active=1`) 모두 정상 집계.
-
-### 관련 문서
-- `docs/asset-factory-redesign-followups.md` — §6/§7a/§7b/§8 DONE 마킹 완료.
-  남은 backend followup §1–§5 는 이번 세션 범위 밖 (별도 이슈 후보).
+- `.venv/bin/python -m pytest tests/ -q` → **122 passed**
+- `.venv/bin/python -m ruff check .` → **All checks passed**
+- `.venv/bin/coverage run -m pytest tests/ -q && .venv/bin/coverage report -m`
+  → 전체 **87%**, `generator.py` **97%**, `validator.py` **100%**,
+  `catalog.py` **95%**, `candidate_gc.py` **88%**
 
 ---
 
