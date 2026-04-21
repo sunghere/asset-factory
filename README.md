@@ -81,7 +81,7 @@ POST /api/mcp/design_asset    POST /api/batches
   - SD 오류 분류: `timeout` / `oom` / `unreachable` / `sd_server_error` / `sd_client_error`
 - **API Key**: `.env`의 `API_KEY` 설정 시 변경 계열 엔드포인트(`POST/PATCH/DELETE`)에 `x-api-key` 필요
 - **SSE 이벤트**: `GET /api/events`로 작업/검증/내보내기/후보 선택 이벤트 스트림
-- **순수 HTML/JS UI**: `/` (`static/index.html`) — 빌드 도구 없이 바로 동작
+- **React+Babel SPA (빌드 도구 없음)**: `/` 는 `/app/` 으로 리다이렉트, SPA 셸은 `static/app/index.html`
 
 ---
 
@@ -109,6 +109,10 @@ python3 -m venv .venv
 ```env
 SD_HOST=192.168.50.225:7860       # AUTOMATIC1111 WebUI 호스트
 API_KEY=                          # 비워두면 인증 없이 동작
+ASSET_FACTORY_DATA_DIR=           # 기본: ./data (mock 분리 실행 시 별도 루트)
+ASSET_FACTORY_DB_PATH=            # 기본: $ASSET_FACTORY_DATA_DIR/asset-factory.db
+ASSET_FACTORY_EXPORT_ROOT=        # 기본: ~/workspace/assets
+ASSET_FACTORY_MOCK_MODE=0         # 1이면 시작 시 mock 배너 로그 출력
 MIN_FREE_DISK_MB=50               # 생성/내보내기 전 디스크 가드
 CANDIDATE_GC_MAX_AGE_DAYS=7
 CANDIDATE_GC_MAX_BYTES_GB=1
@@ -123,12 +127,39 @@ CANDIDATE_GC_INTERVAL_SEC=3600
 
 브라우저로 `http://localhost:8000` 접속.
 
+### 3-1) 전체 화면 mock 환경 (격리 DB/파일)
+
+```bash
+./scripts/run_ui_mock_env.sh
+```
+
+이 명령은 `data/mock-ui` 루트에 분리 DB/후보/승인/export를 만들고, 서버를 mock 모드로 띄운 뒤 화면 검증용 시드(`ui-mock` 프로젝트)를 주입합니다. 체크 포인트는 `docs/UI_MOCK_CHECKLIST.md`를 참고하세요.
+
 ### 4) SD 헬스체크
 
 ```bash
 curl http://localhost:8000/api/health
 curl http://localhost:8000/api/health/sd
 ```
+
+### 5) Isolated UI mock mode (all screens)
+
+Use a fully isolated DB/data root for spec-level UI review:
+
+```bash
+chmod +x scripts/run_ui_mock_env.sh
+scripts/run_ui_mock_env.sh
+```
+
+Default mock roots:
+
+- DB: `data/mock-ui/asset-factory.db`
+- Data: `data/mock-ui/`
+- Export: `data/mock-ui/export`
+
+The runner script seeds deterministic data for all `/app/*` routes, then starts
+the server on `http://127.0.0.1:18000`.
+Detailed visual QA steps: `docs/UI_MOCK_CHECKLIST.md`.
 
 ---
 
