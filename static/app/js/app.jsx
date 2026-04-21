@@ -5,6 +5,17 @@
 
 const { useMemo } = React;
 
+// Legacy screens (/regen, /monitor, /errors) were retired in v0.2:
+//   /regen    → superseded by /batches/new (with prefill query params)
+//   /monitor  → merged into /system (DB/Worker/Logs blocks)
+//   /errors   → replaced by PersistentBanners + ErrorPanel in Dashboard
+// We keep a hard redirect for /regen because it's deep-linked from the old
+// legacy UI. /monitor and /errors 404 → side nav already points at /system.
+function LegacyRedirect({ to }) {
+  React.useEffect(() => { window.navigate(to, { replace: true }); }, [to]);
+  return null;
+}
+
 const ROUTES = [
   { pattern: '/',                       nav: 'dashboard', render: () => <window.Dashboard/> },
   { pattern: '/queue',                  nav: 'queue',     render: () => <window.Queue/> },
@@ -18,9 +29,7 @@ const ROUTES = [
   { pattern: '/export',                 nav: 'export',    render: () => <window.Export/> },
   { pattern: '/system',                 nav: 'system',    render: () => <window.System/> },
   { pattern: '/settings',               nav: 'settings',  render: () => <window.Settings/> },
-  { pattern: '/regen',                  nav: 'batches',   render: () => <window.Regen/> },
-  { pattern: '/monitor',                nav: 'monitor',   render: () => <window.Monitor/> },
-  { pattern: '/errors',                 nav: null,        render: () => <window.Errors/> },
+  { pattern: '/regen',                  nav: 'batches',   render: () => <LegacyRedirect to="/batches/new"/> },
 ];
 
 function App() {

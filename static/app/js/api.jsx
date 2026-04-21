@@ -1,4 +1,23 @@
-/* Tiny fetch + EventSource wrapper. Exposes window.api. */
+/* Tiny fetch + EventSource wrapper. Exposes window.api.
+
+   One-shot legacy localStorage migration:
+     assetFactoryApiKey  → af_api_key
+   Runs at bundle evaluation time (before any request()). If af_api_key is
+   already set, we never overwrite it; the legacy key is just removed to
+   keep devtools tidy. Missing/unsupported localStorage is ignored. */
+(function migrateApiKey() {
+  try {
+    const ls = window.localStorage;
+    if (!ls) return;
+    const legacy = ls.getItem('assetFactoryApiKey');
+    if (legacy == null) return;
+    const current = ls.getItem('af_api_key');
+    if (!current && legacy) ls.setItem('af_api_key', legacy);
+    ls.removeItem('assetFactoryApiKey');
+  } catch {
+    // storage disabled (private mode / quota) — nothing to migrate.
+  }
+})();
 
 class ApiError extends Error {
   constructor(status, statusText, body) {
@@ -44,16 +63,26 @@ const api = {
   // Catalog
   models: () => request('GET', '/api/sd/catalog/models'),
   loras: () => request('GET', '/api/sd/catalog/loras'),
+  catalogUsage: () => request('GET', '/api/sd/catalog/usage'),
+  catalogUsageBatches: ({ model, lora, limit = 20 } = {}) => {
+    const qs = new URLSearchParams();
+    if (model) qs.set('model', model);
+    if (lora) qs.set('lora', lora);
+    qs.set('limit', String(limit));
+    return request('GET', `/api/sd/catalog/usage/batches?${qs.toString()}`);
+  },
 
   // Projects
   listProjects: () => request('GET', '/api/projects'),
   getProjectSpec: (id) => request('GET', `/api/projects/${encodeURIComponent(id)}/spec`),
 
   // Batches
-  listBatches: ({ since, limit } = {}) => {
+  listBatches: ({ since, limit, status, project } = {}) => {
     const qs = new URLSearchParams();
     if (since) qs.set('since', since);
     if (limit) qs.set('limit', String(limit));
+    if (status) qs.set('status', status);
+    if (project) qs.set('project', project);
     const q = qs.toString();
     return request('GET', `/api/batches${q ? '?' + q : ''}`);
   },
@@ -61,6 +90,10 @@ const api = {
     request('GET', `/api/batches/${encodeURIComponent(batchId)}`),
   listBatchCandidates: (batchId) =>
     request('GET', `/api/batches/${encodeURIComponent(batchId)}/candidates`),
+  listBatchTasks: (batchId) =>
+    request('GET', `/api/batches/${encodeURIComponent(batchId)}/tasks`),
+  retryFailedTasks: (batchId) =>
+    request('POST', `/api/batches/${encodeURIComponent(batchId)}/retry-failed`),
   rejectCandidate: (batchId, candidateId) =>
     request('POST', `/api/batches/${encodeURIComponent(batchId)}/candidates/${candidateId}/reject`),
   unrejectCandidate: (batchId, candidateId) =>
@@ -102,6 +135,8 @@ const api = {
   },
   selectAssetCandidate: (id, body) =>
     request('POST', `/api/assets/${encodeURIComponent(id)}/select-candidate`, { body }),
+  restoreAssetHistory: (id, version) =>
+    request('POST', `/api/assets/${encodeURIComponent(id)}/restore-history`, { body: { version } }),
   regenerateAsset: (id) =>
     request('POST', `/api/assets/${encodeURIComponent(id)}/regenerate`),
   validateAsset: (id) =>
@@ -132,16 +167,38 @@ const api = {
 
   // Export
   runExport: (body) => request('POST', '/api/export', { body }),
-  getManifest: (project) => {
-    const q = project ? `?project=${encodeURIComponent(project)}` : '';
-    return request('GET', `/api/export/manifest${q}`);
+  getManifest: ({ project, category, since } = {}) => {
+    const params = new URLSearchParams();
+    if (project) params.set('project', project);
+    if (category) params.set('category', category);
+    if (since) params.set('since', since);
+    const q = params.toString();
+    return request('GET', `/api/export/manifest${q ? `?${q}` : ''}`);
   },
 
   // System
   runGc: () => request('POST', '/api/system/gc/run'),
+  systemDb: () => request('GET', '/api/system/db'),
+  systemWorker: () => request('GET', '/api/system/worker'),
+  systemLogs: ({ level, limit } = {}) => {
+    const qs = new URLSearchParams();
+    if (level) qs.set('level', level);
+    if (limit) qs.set('limit', String(limit));
+    const q = qs.toString();
+    return request('GET', `/api/system/logs/recent${q ? '?' + q : ''}`);
+  },
 
   // Convenience builders
   imageUrl: (asset) => asset?.image_url || (asset?.id ? `/api/assets/${asset.id}/image` : null),
+  candidateImageUrl: (candidate, size) => {
+    if (!candidate) return null;
+    const base = candidate.image_url
+      || (candidate.id ? `/api/asset-candidates/${candidate.id}/image` : null);
+    if (!base) return null;
+    if (!size) return base;
+    const sep = base.includes('?') ? '&' : '?';
+    return `${base}${sep}size=${size}`;
+  },
 
   // SSE
   events(onEvent, onError) {

@@ -1,0 +1,26 @@
+{
+  "$schema_comment": "Asset Factory SPA bootstrap manifest. Order matters: Babel transforms and eval-in-global runs sequentially, so dependencies (api → hooks → router → chrome → screens → app) must load top-down. Add new screens under 'screens' and keep 'core' + 'app' as the first/last bucket.",
+  "core": [
+    "/static/app/js/api.jsx",
+    "/static/app/js/hooks.jsx",
+    "/static/app/js/router.jsx",
+    "/static/app/js/chrome.jsx"
+  ],
+  "screens": [
+    "/static/app/js/screens/Dashboard.jsx",
+    "/static/app/js/screens/Queue.jsx",
+    "/static/app/js/screens/CherryPick.jsx",
+    "/static/app/js/screens/Assets.jsx",
+    "/static/app/js/screens/AssetDetail.jsx",
+    "/static/app/js/screens/Batches.jsx",
+    "/static/app/js/screens/BatchDetail.jsx",
+    "/static/app/js/screens/BatchNew.jsx",
+    "/static/app/js/screens/Catalog.jsx",
+    "/static/app/js/screens/Export.jsx",
+    "/static/app/js/screens/System.jsx",
+    "/static/app/js/screens/Settings.jsx"
+  ],
+  "app": [
+    "/static/app/js/app.jsx"
+  ]
+}

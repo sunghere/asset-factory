@@ -796,13 +796,28 @@ class Database:
             )
             await conn.commit()
 
-    async def list_approved_assets(self, project: str | None = None) -> list[dict[str, Any]]:
-        """승인된 에셋 목록을 반환한다."""
+    async def list_approved_assets(
+        self,
+        project: str | None = None,
+        category: str | None = None,
+        since: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """승인된 에셋 목록을 반환한다.
+
+        ``project`` · ``category`` 는 단순 equality, ``since`` 는 ISO8601 문자열로
+        ``updated_at >= since`` (없으면 ``created_at``) 비교한다.
+        """
         query = "SELECT * FROM assets WHERE status='approved'"
         params: list[Any] = []
         if project:
             query += " AND project=?"
             params.append(project)
+        if category:
+            query += " AND category=?"
+            params.append(category)
+        if since:
+            query += " AND COALESCE(updated_at, created_at) >= ?"
+            params.append(since)
         query += " ORDER BY asset_key ASC"
 
         async with aiosqlite.connect(self.db_path) as conn:
@@ -1096,6 +1111,286 @@ class Database:
             "candidates": candidates,
             "spec": spec,
         }
+
+    async def system_stats(self) -> dict[str, Any]:
+        """System.jsx DB 블록용 row count / sqlite 파일 메타.
+
+        파일 크기/경로는 server.py 측에서 주입하고, 여기서는 순수 DB 쿼리만 한다.
+        """
+        out: dict[str, Any] = {}
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            for table in ("jobs", "generation_tasks", "asset_candidates", "assets"):
+                cur = await conn.execute(f"SELECT COUNT(*) AS n FROM {table}")
+                row = await cur.fetchone()
+                out[table] = int(row["n"] or 0) if row else 0
+            # Worker 가 현재 붙잡고 있을 수 있는 태스크 / 큐 깊이 등
+            cur = await conn.execute(
+                "SELECT COUNT(*) AS n FROM generation_tasks "
+                "WHERE status='queued' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)",
+                (utc_now(),),
+            )
+            row = await cur.fetchone()
+            out["queued_due"] = int(row["n"] or 0) if row else 0
+            cur = await conn.execute(
+                "SELECT COUNT(*) AS n FROM generation_tasks WHERE status='queued'"
+            )
+            row = await cur.fetchone()
+            out["queued_total"] = int(row["n"] or 0) if row else 0
+            cur = await conn.execute(
+                "SELECT COUNT(*) AS n FROM generation_tasks WHERE status='processing'"
+            )
+            row = await cur.fetchone()
+            out["processing"] = int(row["n"] or 0) if row else 0
+            cur = await conn.execute(
+                "SELECT COUNT(*) AS n FROM generation_tasks WHERE status='failed'"
+            )
+            row = await cur.fetchone()
+            out["failed"] = int(row["n"] or 0) if row else 0
+        return out
+
+    async def aggregate_catalog_usage(self) -> dict[str, Any]:
+        """Catalog 카드에 노출할 모델/LoRA 사용 통계.
+
+        ``generation_tasks`` 전체를 스캔해서 다음을 집계한다:
+
+        * ``models`` — ``model_name`` 별 ``task_count`` · ``batch_count`` ·
+          ``last_used_at`` (가장 최근 ``updated_at``).
+        * ``loras`` — ``lora_spec_json`` 을 파싱해 각 ``name`` 별 동일 통계.
+
+        집계는 프로세스 메모리에서 이뤄지므로 수십만 row 까지는 단순 집계로 버틴다
+        (운영 체감 · v0.2 규모). 그 이상이면 인덱스/마테리얼라이즈 고려.
+        """
+        models: dict[str, dict[str, Any]] = {}
+        loras: dict[str, dict[str, Any]] = {}
+
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cur = await conn.execute(
+                """
+                SELECT model_name, lora_spec_json, batch_id, updated_at
+                FROM generation_tasks
+                """
+            )
+            rows = await cur.fetchall()
+
+        def _bump(bucket: dict[str, dict[str, Any]], name: str, batch_id: str | None, updated_at: str | None) -> None:
+            slot = bucket.setdefault(
+                name, {"task_count": 0, "batch_ids": set(), "last_used_at": None}
+            )
+            slot["task_count"] += 1
+            if batch_id:
+                slot["batch_ids"].add(batch_id)
+            if updated_at and (slot["last_used_at"] is None or updated_at > slot["last_used_at"]):
+                slot["last_used_at"] = updated_at
+
+        for r in rows:
+            name = r["model_name"]
+            if name:
+                _bump(models, str(name), r["batch_id"], r["updated_at"])
+            raw = r["lora_spec_json"]
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(data, list):
+                continue
+            # 고유 lora 이름만 집계 (같은 task 가 동일 lora 를 중복 언급해도 1회).
+            seen_names: set[str] = set()
+            for spec in data:
+                if isinstance(spec, dict):
+                    nm = spec.get("name")
+                elif isinstance(spec, str):
+                    nm = spec
+                else:
+                    nm = None
+                if isinstance(nm, str) and nm and nm not in seen_names:
+                    seen_names.add(nm)
+                    _bump(loras, nm, r["batch_id"], r["updated_at"])
+
+        def _finalize(bucket: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+            out: dict[str, dict[str, Any]] = {}
+            for k, v in bucket.items():
+                out[k] = {
+                    "task_count": v["task_count"],
+                    "batch_count": len(v["batch_ids"]),
+                    "last_used_at": v["last_used_at"],
+                }
+            return out
+
+        return {"models": _finalize(models), "loras": _finalize(loras)}
+
+    async def list_batches_using_catalog(
+        self,
+        *,
+        model_name: str | None = None,
+        lora_name: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """특정 model/LoRA 를 사용한 최근 batch 역참조 목록.
+
+        Catalog 상세 패널의 "최근 배치" 리스트에서 사용. ``model_name`` 은
+        ``generation_tasks.model_name`` 과 정확 일치, ``lora_name`` 은
+        ``lora_spec_json`` 을 JSON 파싱해서 ``name`` 필드를 비교한다.
+
+        과거에는 문자열 LIKE(``"name": "foo"``)에 의존했는데, 이 방식은
+        compact JSON(``{"name":"foo"}``)처럼 공백 직렬화가 다르면 누락된다.
+        여기서는 row 단위로 안전하게 파싱해 whitespace/직렬화 차이에 무관하게
+        동일 semantic payload 를 매칭한다.
+        """
+        if not model_name and not lora_name:
+            return []
+
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cur = await conn.execute(
+                """
+                SELECT batch_id, asset_key, project, model_name, lora_spec_json, updated_at
+                FROM generation_tasks
+                WHERE batch_id IS NOT NULL
+                ORDER BY updated_at DESC
+                """
+            )
+            rows = await cur.fetchall()
+
+        def _row_has_lora(raw: Any, needle: str) -> bool:
+            if not raw:
+                return False
+            try:
+                data = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                return False
+            if not isinstance(data, list):
+                return False
+            for spec in data:
+                if isinstance(spec, dict) and spec.get("name") == needle:
+                    return True
+                if isinstance(spec, str) and spec == needle:
+                    return True
+            return False
+
+        grouped: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            batch_id = row["batch_id"]
+            if not batch_id:
+                continue
+            if model_name and row["model_name"] != model_name:
+                continue
+            if lora_name and not _row_has_lora(row["lora_spec_json"], lora_name):
+                continue
+
+            slot = grouped.setdefault(
+                str(batch_id),
+                {
+                    "batch_id": str(batch_id),
+                    "asset_key": row["asset_key"],
+                    "project": row["project"],
+                    "last_updated_at": row["updated_at"],
+                    "task_count": 0,
+                },
+            )
+            slot["task_count"] += 1
+            updated_at = row["updated_at"]
+            if updated_at and (
+                slot.get("last_updated_at") is None or updated_at > slot["last_updated_at"]
+            ):
+                slot["last_updated_at"] = updated_at
+
+        items = sorted(
+            grouped.values(),
+            key=lambda it: it.get("last_updated_at") or "",
+            reverse=True,
+        )
+        return items[: int(limit)]
+
+    async def list_batch_tasks(self, batch_id: str) -> list[dict[str, Any]]:
+        """한 batch 의 ``generation_tasks`` 행을 UI 에서 필요한 컬럼만 반환한다.
+
+        BatchDetail Tasks 탭에서 `id/model/seed/status/attempts/last_error/
+        next_attempt_at/updated_at` 을 표로 그리기 위한 엔드포인트.
+        """
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cur = await conn.execute(
+                """
+                SELECT
+                    id,
+                    model_name,
+                    seed,
+                    status,
+                    retries,
+                    max_retries,
+                    last_error,
+                    next_attempt_at,
+                    created_at,
+                    updated_at
+                FROM generation_tasks
+                WHERE batch_id=?
+                ORDER BY
+                    CASE status
+                        WHEN 'failed' THEN 0
+                        WHEN 'processing' THEN 1
+                        WHEN 'queued' THEN 2
+                        WHEN 'done' THEN 3
+                        ELSE 4
+                    END,
+                    created_at ASC
+                """,
+                (batch_id,),
+            )
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def retry_failed_batch_tasks(self, batch_id: str) -> list[int]:
+        """해당 batch 에서 ``status='failed'`` 인 태스크를 큐로 되돌린다.
+
+        retry 카운터는 보존하되 ``status='queued'`` + ``next_attempt_at=now`` 로
+        놓아 워커가 다음 tick 에 곧바로 claim 하게 만든다. 되돌린 task id 리스트
+        반환.
+        """
+        now = utc_now()
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cur = await conn.execute(
+                "SELECT id, job_id FROM generation_tasks WHERE batch_id=? AND status='failed'",
+                (batch_id,),
+            )
+            rows = [dict(r) for r in await cur.fetchall()]
+            if not rows:
+                return []
+            ids = [int(r["id"]) for r in rows]
+            job_ids = list({r["job_id"] for r in rows if r.get("job_id")})
+            placeholders = ",".join("?" * len(ids))
+            await conn.execute(
+                f"""
+                UPDATE generation_tasks
+                SET status='queued',
+                    last_error=NULL,
+                    next_attempt_at=?,
+                    updated_at=?
+                WHERE id IN ({placeholders})
+                """,
+                (now, now, *ids),
+            )
+            # 연결된 jobs.failed_count 를 재계산해서 상태가 따라 오도록 한다.
+            for job_id in job_ids:
+                await conn.execute(
+                    """
+                    UPDATE jobs
+                    SET failed_count = (
+                        SELECT COUNT(*) FROM generation_tasks
+                        WHERE job_id=? AND status='failed'
+                    ),
+                    updated_at=?
+                    WHERE id=?
+                    """,
+                    (job_id, now, job_id),
+                )
+            await conn.commit()
+        for job_id in job_ids:
+            await self.refresh_job_status(job_id)
+        return ids
 
     async def get_candidate_by_id(self, candidate_id: int) -> dict[str, Any] | None:
         """후보 단건 조회 (id 기준)."""
