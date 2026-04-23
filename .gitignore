@@ -1,4 +1,5 @@
 .venv/
+.coverage
 data/*.db
 data/*.pid
 data/*.log
