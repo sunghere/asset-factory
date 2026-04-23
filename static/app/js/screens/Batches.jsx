@@ -14,9 +14,13 @@ const SINCE_PRESETS = [
   { key: '7d', label: '7d', hours: 168 },
 ];
 
-function _sinceIso(hours) {
-  if (!hours) return undefined;
-  return new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+function _batchesSinceIso(hours) {
+  if (!Number.isFinite(hours) || hours <= 0) return undefined;
+  const ms = Date.now() - hours * 60 * 60 * 1000;
+  const d = new Date(ms);
+  const ts = d.getTime();
+  if (!Number.isFinite(ts)) return undefined;
+  return d.toISOString();
 }
 
 function Batches() {
@@ -26,7 +30,7 @@ function Batches() {
   const [q, setQ] = useState('');
   const sinceIso = useMemo(() => {
     const preset = SINCE_PRESETS.find((x) => x.key === sinceFilter);
-    return _sinceIso(preset?.hours ?? null);
+    return _batchesSinceIso(preset?.hours ?? null);
   }, [sinceFilter]);
   const batches = window.useAsync(
     () => window.api.listBatches({ limit: 200, since: sinceIso }),
