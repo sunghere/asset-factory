@@ -359,3 +359,61 @@ def test_patch_seed_propagates_to_all_ksamplers() -> None:
     assert patched["11"]["inputs"]["steps"] == 22
     assert patched["16"]["inputs"]["steps"] == 22
     assert set(report.applied["seed"]) == {"11", "16"}
+
+
+# ----------------------------------------------------------------------------
+# P1.a — ksampler_overrides multi-stage 안전 패치
+# ----------------------------------------------------------------------------
+
+
+def test_ksampler_overrides_targets_only_matching_title() -> None:
+    """multi-stage 워크플로우 (stage1 + hires KSampler 2개) 에서 hires 만 다른
+    steps/cfg 를 박을 수 있어야 한다 — 일괄 패치 후 title 매칭 노드만 덮어씀."""
+    wf = _v38_like()
+    wf["16"] = {
+        "class_type": "KSampler",
+        "inputs": {"seed": 0, "steps": 20, "cfg": 6.0, "sampler_name": "dpmpp_2m", "scheduler": "karras"},
+        "_meta": {"title": "KSampler #2 (HiRes)"},
+    }
+    patched, report = patch_workflow(
+        wf,
+        seed=42,
+        steps=30,
+        cfg=7.0,
+        ksampler_overrides={r"hires|refine": {"steps": 8, "cfg": 4.0}},
+    )
+    # 일괄 적용: 두 KSampler 모두 seed=42, steps=30, cfg=7.0
+    # 그 다음 ksampler_overrides 가 hires 노드만 steps=8, cfg=4.0 으로 덮어씀
+    assert patched["11"]["inputs"]["steps"] == 30  # stage1 그대로
+    assert patched["11"]["inputs"]["cfg"] == 7.0
+    assert patched["16"]["inputs"]["steps"] == 8   # hires 만 override
+    assert patched["16"]["inputs"]["cfg"] == 4.0
+    assert patched["11"]["inputs"]["seed"] == 42   # seed 는 양쪽 다 일괄
+    assert patched["16"]["inputs"]["seed"] == 42
+    assert "ksampler_overrides[hires|refine]" in report.applied
+    assert report.applied["ksampler_overrides[hires|refine]"] == ["16"]
+
+
+def test_ksampler_overrides_unmatched_pattern_recorded_in_skipped() -> None:
+    """매칭 노드 0개 → skipped 에 기록, 에러는 안 남."""
+    wf = _v38_like()
+    patched, report = patch_workflow(
+        wf,
+        ksampler_overrides={r"never_matches_anything": {"steps": 99}},
+    )
+    assert "ksampler_overrides[never_matches_anything]" in report.skipped
+    # KSampler 11 의 steps 는 원본 그대로 (override 적용 안 됨)
+    assert patched["11"]["inputs"]["steps"] == 30
+
+
+def test_ksampler_overrides_empty_dict_silently_skipped() -> None:
+    """value 가 빈 dict 또는 None 이면 조용히 스킵 (오류 없음)."""
+    wf = _v38_like()
+    patched, report = patch_workflow(
+        wf,
+        ksampler_overrides={r"#": {}},
+    )
+    # 빈 dict → 스킵, applied/skipped 어디에도 안 들어감
+    assert "ksampler_overrides[#]" not in report.applied
+    # 원본 그대로
+    assert patched["11"]["inputs"]["steps"] == 30

@@ -249,7 +249,8 @@ def test_recover_orphan_tasks_requeues_processing(isolated) -> None:
 # --------------------------------------------------------------------------------
 def test_generate_returns_507_when_disk_low(isolated, monkeypatch) -> None:  # noqa: ANN001
     """디스크 가드가 507 Insufficient Storage로 즉시 응답."""
-    def _raise(_path):  # noqa: ANN001
+    def _raise(*_args, **_kwargs):  # noqa: ANN001, ANN002, ANN003
+        # 시그니처 호환: _check_disk_space(path) 와 (path, required_mb=...) 둘 다 수용
         raise RuntimeError("simulated low disk")
 
     monkeypatch.setattr(server, "_check_disk_space", _raise)

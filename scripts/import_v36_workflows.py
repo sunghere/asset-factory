@@ -23,7 +23,7 @@ import os
 import re
 import shutil
 from pathlib import Path
-from typing import Any, Tuple
+from typing import Any
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -122,29 +122,29 @@ def render_category_yaml(category: str, spec: dict[str, Any]) -> str:
 
     들여쓰기 / 따옴표 / outputs 인라인 형식 등은 기존 매니페스트와 일관.
     """
-    I = "  "  # 한 단계 들여쓰기 = 2 space
+    INDENT = "  "  # 한 단계 들여쓰기 = 2 space
     lines: list[str] = []
-    lines.append(f"{I}{category}:")
-    lines.append(f'{I*2}description: {_q(spec["description"])}')
-    lines.append(f"{I*2}variants:")
+    lines.append(f"{INDENT}{category}:")
+    lines.append(f'{INDENT * 2}description: {_q(spec["description"])}')
+    lines.append(f"{INDENT * 2}variants:")
     for vname, v in spec["variants"]:
         lines.append("")
-        lines.append(f"{I*3}{vname}:")
-        lines.append(f'{I*4}description: {_q(v["description"])}')
-        lines.append(f"{I*4}file: {category}/{v['src']}")
+        lines.append(f"{INDENT * 3}{vname}:")
+        lines.append(f'{INDENT * 4}description: {_q(v["description"])}')
+        lines.append(f"{INDENT * 4}file: {category}/{v['src']}")
         if v.get("primary"):
-            lines.append(f"{I*4}primary: true")
-        lines.append(f"{I*4}outputs:")
+            lines.append(f"{INDENT * 4}primary: true")
+        lines.append(f"{INDENT * 4}outputs:")
         for title, label, prim in v["outputs"]:
             primary_str = ", primary: true" if prim else ""
             lines.append(
-                f'{I*5}- {{ node_title: "{title}", label: {label}{primary_str} }}'
+                f'{INDENT * 5}- {{ node_title: "{title}", label: {label}{primary_str} }}'
             )
         if v["defaults"]:
-            lines.append(f"{I*4}defaults:")
+            lines.append(f"{INDENT * 4}defaults:")
             for k, val in v["defaults"].items():
                 rendered = _q(val) if isinstance(val, str) else str(val)
-                lines.append(f"{I*5}{k}: {rendered}")
+                lines.append(f"{INDENT * 5}{k}: {rendered}")
     return "\n".join(lines)
 
 
@@ -177,7 +177,7 @@ def main() -> None:
 
     # ---- 1) 산출물 존재 확인 ----
     missing: list[Path] = []
-    for category, spec in PLAN.items():
+    for _category, spec in PLAN.items():
         for _, v in spec["variants"]:
             src = SOURCE_DIR / v["src"]
             if not src.exists():
@@ -192,34 +192,65 @@ def main() -> None:
             "    python generate_cd_workflows.py"
         )
 
-    # ---- 2) 파일 복사 ----
-    copied = 0
-    for category, spec in PLAN.items():
-        target = WORKFLOWS_DIR / category
-        target.mkdir(parents=True, exist_ok=True)
-        for _, v in spec["variants"]:
-            src = SOURCE_DIR / v["src"]
-            dst = target / v["src"]
-            shutil.copy2(src, dst)
-            print(f"  copy  {category}/{v['src']}")
-            copied += 1
-
-    # ---- 3) registry.yml 갱신 ----
+    # ---- 2) registry.yml 합성 (메모리에서만, 디스크 미반영) ----
+    # P1.g — atomicity. 모든 카테고리의 새 블록을 미리 합성한 뒤
+    # 1) tmp 파일에 한 번 write,
+    # 2) 파일 복사 → 성공 시,
+    # 3) tmp → registry.yml 로 rename (또는 부분 실패 시 tmp 삭제).
     registry_path = WORKFLOWS_DIR / "registry.yml"
-    text = registry_path.read_text(encoding="utf-8")
+    if not registry_path.exists():
+        raise SystemExit(f"[ERROR] registry.yml 없음: {registry_path}")
+    original_text = registry_path.read_text(encoding="utf-8")
+    new_text = original_text
     for category, spec in PLAN.items():
         new_block = render_category_yaml(category, spec)
-        text = replace_category_block(text, category, new_block)
-    registry_path.write_text(text, encoding="utf-8")
-    print(f"\n[i] registry.yml updated")
+        new_text = replace_category_block(new_text, category, new_block)
 
-    # ---- 4) sanity check ----
+    # ---- 3) 파일 복사 (이전 dst 백업 → 실패 시 복구) ----
+    backups: list[tuple[Path, bytes | None]] = []  # (dst, 기존 bytes 또는 None)
+    copied = 0
     try:
-        import yaml
-        yaml.safe_load(registry_path.read_text(encoding="utf-8"))
-        print("[i] registry.yml YAML 파싱 OK")
+        for category, spec in PLAN.items():
+            target = WORKFLOWS_DIR / category
+            target.mkdir(parents=True, exist_ok=True)
+            for _, v in spec["variants"]:
+                src = SOURCE_DIR / v["src"]
+                dst = target / v["src"]
+                # 기존 파일 보존 (롤백용)
+                backups.append(
+                    (dst, dst.read_bytes() if dst.exists() else None)
+                )
+                shutil.copy2(src, dst)
+                print(f"  copy  {category}/{v['src']}")
+                copied += 1
     except Exception as exc:    # noqa: BLE001
-        print(f"[WARN] registry.yml YAML 파싱 실패 — 수동 확인 필요: {exc}")
+        print(f"[ERROR] 파일 복사 중 실패: {exc} → 롤백 시작")
+        for dst, prev in backups:
+            try:
+                if prev is None:
+                    if dst.exists():
+                        dst.unlink()
+                else:
+                    dst.write_bytes(prev)
+            except Exception as rb_exc:    # noqa: BLE001
+                print(f"  [WARN] 롤백 실패 {dst}: {rb_exc}")
+        raise SystemExit("[ABORT] 파일 복사 실패 — registry.yml 변경 안 됨") from exc
+
+    # ---- 4) registry.yml 원자적 교체 (tmp 파일 → rename) ----
+    tmp_path = registry_path.with_suffix(registry_path.suffix + ".tmp")
+    try:
+        tmp_path.write_text(new_text, encoding="utf-8")
+        # YAML 파싱 사전 검증 — 깨진 YAML 을 main 파일로 옮기지 않음
+        import yaml
+        yaml.safe_load(tmp_path.read_text(encoding="utf-8"))
+        tmp_path.replace(registry_path)
+        print("\n[i] registry.yml updated (atomic rename)")
+    except Exception as exc:    # noqa: BLE001
+        if tmp_path.exists():
+            tmp_path.unlink()
+        # 파일 복사는 이미 끝났지만 registry 만 안 바뀐 상태로 남음
+        # — 사용자가 다음 실행에서 복구 가능
+        raise SystemExit(f"[ABORT] registry.yml 갱신 실패: {exc}") from exc
 
     print(f"\n[OK] {copied} files copied + registry.yml 갱신.")
     print("\n다음 단계:")

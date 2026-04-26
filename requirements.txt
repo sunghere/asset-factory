@@ -8,3 +8,4 @@ python-dotenv==1.2.2
 pyyaml==6.0.3
 pytest==9.0.3
 httpx==0.28.1
+aioresponses==0.7.8

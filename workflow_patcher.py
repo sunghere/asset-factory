@@ -11,12 +11,23 @@
     prompt, negative_prompt        → CLIPTextEncode (title 로 positive/negative 구분)
     seed                           → 모든 KSampler 의 seed 동기화 (변형 간 일관성)
     steps, cfg, sampler_name,
-    scheduler                      → 모든 KSampler
+    scheduler                      → 모든 KSampler 일괄 적용 ⚠️ multi-stage 주의
     pose_image                     → LoadImage where title contains "Pose grid"
     controlnet_strength            → ControlNetApply
     lora_strengths {name: weight}  → LoraLoader (`lora_name` 으로 매칭)
     checkpoint                     → CheckpointLoaderSimple
     width, height                  → EmptyLatentImage
+    ksampler_overrides             → multi-stage workflow 의 stage 별 KSampler 값
+                                     ({title_regex: {field: value}}) — 일괄 적용 후 덮어씀
+
+⚠️ Multi-stage 위험:
+    V38 hires 처럼 stage1 + hires 두 개의 KSampler 를 가진 워크플로우에서
+    ``steps``/``cfg`` 를 같은 값으로 박으면 hires refine 의도 (낮은 steps) 가
+    깨진다. ``ksampler_overrides`` 로 title 매칭 stage 만 별도 값으로 덮어쓸 것:
+
+        ksampler_overrides={
+            r"hires|refine": {"steps": 8, "cfg": 4.0},
+        }
 
 Roadmap:
 - ControlNet 워크플로우 외 다른 LoadImage 가 등장하면 `title_match` 추가 필요
@@ -190,11 +201,17 @@ def patch_workflow(
     checkpoint: str | None = None,
     width: int | None = None,
     height: int | None = None,
+    ksampler_overrides: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[WorkflowJson, PatchReport]:
     """워크플로우 API JSON 의 패치된 사본을 반환한다.
 
     None 인 인자는 무시. 매칭되는 노드가 없는 키는 `report.skipped` 에 기록만
     하고 진행 (변형마다 노드 구성이 다르므로 정상 동작).
+
+    ``ksampler_overrides`` 는 multi-stage 워크플로우의 stage 별 KSampler 값.
+    일괄 패치 (``seed``/``steps``/``cfg``/``sampler_name``/``scheduler``) 가
+    먼저 적용된 뒤, 이 dict 의 title 정규식에 매칭되는 KSampler 만 그 값으로
+    덮어쓴다. 예: ``{r"hires|refine": {"steps": 8, "cfg": 4.0}}``.
     """
     wf = copy.deepcopy(api_json)
     applied: dict[str, list[str]] = {}
@@ -235,6 +252,23 @@ def patch_workflow(
             applied["lora_strengths"] = applied_loras
         if not applied_loras and lora_strengths:
             skipped.append("lora_strengths")
+
+    # Multi-stage stage-별 KSampler 덮어쓰기 (블록 일괄 적용 후 적용)
+    if ksampler_overrides:
+        for title_pattern, overrides in ksampler_overrides.items():
+            if not isinstance(overrides, dict) or not overrides:
+                continue
+            matches = find_nodes(wf, "KSampler", title_match=title_pattern)
+            apply_key = f"ksampler_overrides[{title_pattern}]"
+            if not matches:
+                skipped.append(apply_key)
+                continue
+            applied[apply_key] = []
+            for nid, node in matches:
+                inputs = node.setdefault("inputs", {})
+                for field_name, value in overrides.items():
+                    inputs[str(field_name)] = value
+                applied[apply_key].append(nid)
 
     return wf, PatchReport(applied=applied, skipped=skipped)
 

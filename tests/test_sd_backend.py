@@ -256,7 +256,10 @@ def test_comfyui_backend_needs_conversion_blocked(tmp_path: Path) -> None:
 def test_comfyui_backend_no_outputs_match(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """ComfyUI 가 SaveImage 결과를 줬는데 registry 가 인지 못 하는 노드면 빈 outputs."""
+    """ComfyUI 가 SaveImage 결과를 줬는데 registry 가 인지 못 하는 노드면 빈 outputs.
+
+    P1.e — 에러 메시지에 expected_titles 와 actual_nodes 가 모두 포함돼야 함.
+    """
     reg = _build_registry(tmp_path)
     client = ComfyUIClient("comfy.local")
 
@@ -266,12 +269,51 @@ def test_comfyui_backend_no_outputs_match(
 
     monkeypatch.setattr(client, "submit_and_wait", fake_submit_and_wait)
     backend = ComfyUIBackend(client, reg)
-    with pytest.raises(SDError, match="매칭되는 SaveImage 결과 없음"):
+    with pytest.raises(SDError) as ei:
         asyncio.run(backend.generate({
             "prompt": "x",
             "workflow_category": "sprite",
             "workflow_variant": "v",
         }))
+    msg = str(ei.value)
+    # P1.e — 디버깅 도움이 되는 메타가 메시지에 포함
+    assert "expected_titles" in msg
+    assert "actual_nodes" in msg
+    assert "Save Stage1" in msg or "Save PixelAlpha" in msg  # registry expected
+    assert "99" in msg  # actual node id
+
+
+def test_comfyui_backend_random_seed_when_task_seed_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P2.4 — task.seed 가 None 이면 random 64-bit seed 가 자동 주입되고
+    outcome.seed 에 그 값이 기록되며 워크플로우의 KSampler 에도 박힌다."""
+    reg = _build_registry(tmp_path)
+    client = ComfyUIClient("comfy.local")
+    captured: dict[str, Any] = {}
+
+    async def fake_submit_and_wait(api_json: dict, timeout: float | None = None) -> ComfyUIResult:
+        captured["api_json"] = api_json
+        return _comfy_result(
+            "p3",
+            [("13", "s.png", b"S"), ("16", "p.png", b"P"), ("18", "a.png", b"A")],
+        )
+
+    monkeypatch.setattr(client, "submit_and_wait", fake_submit_and_wait)
+    backend = ComfyUIBackend(client, reg)
+
+    outcome = asyncio.run(backend.generate({
+        "prompt": "x",
+        "workflow_category": "sprite",
+        "workflow_variant": "v",
+        # seed 의도적으로 미명시
+    }))
+    # outcome.seed 가 None 이 아니어야 (random 주입됨)
+    assert outcome.seed is not None
+    assert isinstance(outcome.seed, int)
+    assert 0 <= outcome.seed < 2**63
+    # KSampler 노드에도 같은 seed 박힘
+    assert captured["api_json"]["11"]["inputs"]["seed"] == outcome.seed
 
 
 def test_comfyui_backend_invalid_workflow_params_json(tmp_path: Path) -> None:

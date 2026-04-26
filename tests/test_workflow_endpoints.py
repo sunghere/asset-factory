@@ -100,8 +100,10 @@ def isolated(tmp_path, monkeypatch):  # noqa: ANN001
             "comfyui": ComfyUIBackend(server.comfyui_client, reg),
         }),
     )
-    # 디스크 가드는 테스트용으로 패스
-    monkeypatch.setattr(server, "_ensure_disk_space_for_enqueue", lambda: None)
+    # 디스크 가드는 테스트용으로 패스. 시그니처 호환: () 와 (expected_files=N) 둘 다 수용.
+    monkeypatch.setattr(
+        server, "_ensure_disk_space_for_enqueue", lambda *_a, **_kw: None,
+    )
     return db
 
 

@@ -27,9 +27,7 @@ from catalog import load_catalog_yaml, merge_loras, merge_models
 from generator import (
     SDClient,
     SDError,
-    save_candidate_slot_image,
     save_candidate_slot_outputs,
-    save_generated_image,
     save_generated_outputs,
 )
 from generator_comfyui import ComfyUIClient
@@ -537,9 +535,13 @@ def expand_design_batch(spec: DesignBatchRequest) -> list[dict[str, Any]]:
     return tasks
 
 
-def _check_disk_space(path: Path) -> None:
-    """생성 전 디스크 여유 공간을 검사한다."""
-    min_mb = int(os.getenv("MIN_FREE_DISK_MB", "50"))
+def _check_disk_space(path: Path, required_mb: int | None = None) -> None:
+    """생성 전 디스크 여유 공간을 검사한다.
+
+    ``required_mb`` 명시되면 그 값을 최소 요구로 사용 (override). 미명시 시
+    환경변수 ``MIN_FREE_DISK_MB`` (기본 50MB).
+    """
+    min_mb = required_mb if required_mb is not None else int(os.getenv("MIN_FREE_DISK_MB", "50"))
     min_free = min_mb * 1024 * 1024
     usage = shutil.disk_usage(path)
     if usage.free < min_free:
@@ -548,10 +550,18 @@ def _check_disk_space(path: Path) -> None:
         )
 
 
-def _ensure_disk_space_for_enqueue() -> None:
-    """enqueue API에서 즉시 507 응답으로 변환되는 디스크 가드."""
+def _ensure_disk_space_for_enqueue(expected_files: int = 1) -> None:
+    """enqueue API에서 즉시 507 응답으로 변환되는 디스크 가드.
+
+    P2.3 — ComfyUI 변형은 한 task 가 N장 출력 (V38 full = 5장) → candidates_total 곱
+    하면 디스크 요구가 N배. ``expected_files`` 로 baseline + 파일당 추가 MB 를 더해
+    상향. 기본 1 (단일 출력 = 기존 동작 호환).
+    """
+    base_mb = int(os.getenv("MIN_FREE_DISK_MB", "50"))
+    per_file_mb = int(os.getenv("MIN_FREE_DISK_PER_FILE_MB", "5"))
+    required_mb = base_mb + per_file_mb * max(0, expected_files - 1)
     try:
-        _check_disk_space(DATA_DIR)
+        _check_disk_space(DATA_DIR, required_mb=required_mb)
     except RuntimeError as exc:
         raise HTTPException(status_code=507, detail=str(exc)) from exc
 
@@ -1136,8 +1146,6 @@ async def workflows_generate(request: WorkflowGenerateRequest) -> dict[str, Any]
     polling, 완료된 candidate 는 cherry-pick UI (``/cherry-pick?batch=...``) 또는
     기존 ``/api/assets`` 흐름으로 본다.
     """
-    _ensure_disk_space_for_enqueue()
-
     try:
         variant = workflow_registry.variant(
             request.workflow_category, request.workflow_variant
@@ -1152,6 +1160,12 @@ async def workflows_generate(request: WorkflowGenerateRequest) -> dict[str, Any]
                 f"호출 불가 (status={variant.status})"
             ),
         )
+
+    # P2.3 — 변형의 출력 수 × candidates_total 만큼 디스크 가드 상향
+    outputs_per_task = max(1, len(variant.outputs))
+    _ensure_disk_space_for_enqueue(
+        expected_files=outputs_per_task * max(1, int(request.candidates_total))
+    )
 
     job_id = str(uuid.uuid4())
     job_type = "workflow_single" if request.candidates_total == 1 else "workflow_design"

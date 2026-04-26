@@ -113,7 +113,7 @@ async def cmd_run(args: argparse.Namespace) -> int:
     print(f"  outputs     : {[o.label for o in variant.outputs]}")
     print(f"  primary     : {variant.primary_output.label if variant.primary_output else None}")
 
-    print(f"\n=== patch report ===")
+    print("\n=== patch report ===")
     for k, ids in report.applied.items():
         print(f"  applied  {k:20s} -> nodes {ids}")
     for k in report.skipped:
@@ -155,7 +155,7 @@ async def cmd_run(args: argparse.Namespace) -> int:
         print(f"[ERROR] 워크플로우 실행 실패: {exc}", file=sys.stderr)
         return 4
 
-    print(f"\n=== 결과 ===")
+    print("\n=== 결과 ===")
     print(f"  prompt_id : {result.prompt_id}")
     print(f"  outputs   : {len(result.outputs)} images")
 

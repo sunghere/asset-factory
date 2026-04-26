@@ -160,7 +160,20 @@ class WorkflowRegistry:
         ]
 
     def to_catalog(self) -> dict[str, Any]:
-        """REST 응답에 그대로 쓸 수 있는 카탈로그 dict."""
+        """REST 응답에 그대로 쓸 수 있는 카탈로그 dict.
+
+        P1.f — 호스트 fs 구조 노출 회피. ``file`` 은 ``self.root`` 기준 상대경로
+        만 노출 (예: ``sprite/PoseExtract_V37_api.json``). resolve 결과가 root
+        밖이면 (이론상 없지만 안전망) ``has_file: True`` 만 표시하고 경로는 숨김.
+        """
+        def _relative_file(p: Path | None) -> str | None:
+            if p is None:
+                return None
+            try:
+                return p.relative_to(self.root).as_posix()
+            except ValueError:
+                return None  # root 밖 — 경로 노출 안 함
+
         return {
             "version": int(self._raw.get("version", 1)),
             "categories": {
@@ -175,7 +188,8 @@ class WorkflowRegistry:
                             "available": v.available,
                             "status": v.status,
                             "primary": v.primary,
-                            "file": str(v.file) if v.file else None,
+                            "file": _relative_file(v.file),
+                            "has_file": v.file is not None,
                             "outputs": [
                                 {"label": o.label, "primary": o.primary}
                                 for o in v.outputs
