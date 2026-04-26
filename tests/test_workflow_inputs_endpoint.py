@@ -299,6 +299,73 @@ def test_upload_decompression_bomb_returns_400(
 
 
 # ----------------------------------------------------------------------------
+# 추가 회귀 — 경계값, 응답 shape, env-var
+# ----------------------------------------------------------------------------
+
+
+def test_upload_exact_boundary_at_max_input_bytes_passes(
+    isolated: _FakeComfyClient, monkeypatch,
+) -> None:
+    """``len(bytes) == MAX_INPUT_BYTES`` (off-by-one boundary) 는 통과.
+
+    가드는 ``> MAX_INPUT_BYTES`` 이므로 정확히 같으면 OK 여야.
+    """
+    png = _png_bytes(size=(16, 16))
+    monkeypatch.setattr(server, "MAX_INPUT_BYTES", len(png))  # exactly 같게
+    with TestClient(server.app) as client:
+        r = client.post(
+            "/api/workflows/inputs",
+            files={"file": ("c.png", png, "image/png")},
+        )
+    assert r.status_code == 200, r.text
+
+
+def test_upload_one_byte_over_max_input_bytes_returns_413(
+    isolated: _FakeComfyClient, monkeypatch,
+) -> None:
+    """``len(bytes) == MAX_INPUT_BYTES + 1`` → 413."""
+    png = _png_bytes(size=(16, 16))
+    monkeypatch.setattr(server, "MAX_INPUT_BYTES", len(png) - 1)
+    with TestClient(server.app) as client:
+        r = client.post(
+            "/api/workflows/inputs",
+            files={"file": ("c.png", png, "image/png")},
+        )
+    assert r.status_code == 413
+    assert isolated.calls == []
+
+
+def test_max_input_bytes_default_is_20mb() -> None:
+    """env-var 미설정 시 디폴트 20MB. 운영 회귀 가드."""
+    assert server.MAX_INPUT_BYTES == 20 * 1024 * 1024
+
+
+def test_upload_comfy_response_missing_name_returns_502(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """ComfyUI 가 200 응답인데 ``name`` 누락 → 502 (downstream contract 깨짐).
+
+    원래는 우리가 응답을 그대로 forward 하면 후속 ``load_images.<label>`` 에 박을
+    값이 없어 generate 가 의미없는 LoadImage 를 받게 된다. 502 로 빠르게 fail.
+    """
+    db = Database(tmp_path / "wf.db")
+    asyncio.run(db.init())
+    monkeypatch.setattr(server, "db", db)
+    monkeypatch.setattr(server, "api_key", None)
+    # ``name`` 키 없는 응답 — 일종의 ComfyUI 측 회귀 시나리오
+    bad_fake = _FakeComfyClient(response={"subfolder": "x", "type": "input"})
+    monkeypatch.setattr(server, "comfyui_client", bad_fake)
+
+    with TestClient(server.app) as client:
+        r = client.post(
+            "/api/workflows/inputs",
+            files={"file": ("c.png", _png_bytes(), "image/png")},
+        )
+    assert r.status_code == 502
+    assert "예상 shape" in r.json().get("detail", "") or "name" in r.json().get("detail", "")
+
+
+# ----------------------------------------------------------------------------
 # downstream errors
 # ----------------------------------------------------------------------------
 
@@ -528,3 +595,89 @@ def test_from_asset_comfyui_unreachable_returns_502(isolated_with_data) -> None:
             json={"asset_id": asset_id},
         )
     assert r.status_code == 502
+
+
+def test_from_asset_polyglot_in_disk_file_is_stripped_before_forward(
+    isolated_with_data, tmp_path: Path, monkeypatch,
+) -> None:
+    """디스크 파일이 polyglot (real PNG + appended ZIP) 이어도 동일 정화 패스 거침.
+
+    ``upsert_scanned_asset`` 가 사용자 임의 디렉토리를 스캔해 등록한 PNG 가
+    polyglot 일 가능성 — 자체 생성 이미지 가정이 약하므로 ``from-asset`` 도
+    ``_decode_and_reencode_image`` 적용해야 한다 (P1 보안 갭).
+    """
+    captured: dict[str, bytes] = {}
+
+    class _CapturingFake(_FakeComfyClient):
+        async def upload_input_image(  # type: ignore[override]
+            self, image_bytes: bytes, filename: str,
+            subfolder: str = "asset-factory", overwrite: bool = True,
+        ) -> dict[str, str]:
+            captured["bytes"] = image_bytes
+            return await super().upload_input_image(
+                image_bytes, filename, subfolder, overwrite,
+            )
+
+    fake = _CapturingFake()
+    monkeypatch.setattr(server, "comfyui_client", fake)
+
+    real_png = _png_bytes(size=(16, 16))
+    polyglot_path = isolated_with_data["data"] / "polyglot.png"
+    polyglot_path.write_bytes(real_png + b"PK\x03\x04EVIL_FROM_ASSET")
+    asset_id = _seed_asset(
+        isolated_with_data["db"],
+        project="cat", asset_key="polyglot",
+        image_path=polyglot_path,
+    )
+
+    with TestClient(server.app) as client:
+        r = client.post(
+            "/api/workflows/inputs/from-asset",
+            json={"asset_id": asset_id},
+        )
+    assert r.status_code == 200, r.text
+    assert b"EVIL_FROM_ASSET" not in captured["bytes"]
+    assert b"PK\x03\x04" not in captured["bytes"]
+
+
+def test_from_asset_decompression_bomb_returns_400(
+    isolated_with_data, monkeypatch,
+) -> None:
+    """디스크 파일이 픽셀폭탄이라도 동일 정화 패스 거쳐 400."""
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 16)
+    bomb_path = isolated_with_data["data"] / "bomb.png"
+    bomb_path.write_bytes(_png_bytes(size=(8, 8)))
+    asset_id = _seed_asset(
+        isolated_with_data["db"],
+        project="cat", asset_key="bomb",
+        image_path=bomb_path,
+    )
+
+    with TestClient(server.app) as client:
+        r = client.post(
+            "/api/workflows/inputs/from-asset",
+            json={"asset_id": asset_id},
+        )
+    assert r.status_code == 400
+    assert isolated_with_data["fake"].calls == []
+
+
+def test_from_asset_image_path_is_directory_returns_500(
+    isolated_with_data,
+) -> None:
+    """``image_path`` 가 디렉토리로 잘못 등록된 경우 (DB 손상) → 500."""
+    dir_path = isolated_with_data["data"] / "isadir"
+    dir_path.mkdir()
+    asset_id = _seed_asset(
+        isolated_with_data["db"],
+        project="cat", asset_key="badrow",
+        image_path=dir_path,
+    )
+
+    with TestClient(server.app) as client:
+        r = client.post(
+            "/api/workflows/inputs/from-asset",
+            json={"asset_id": asset_id},
+        )
+    assert r.status_code == 500
+    assert isolated_with_data["fake"].calls == []

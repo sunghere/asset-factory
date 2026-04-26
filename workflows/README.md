@@ -236,13 +236,15 @@ curl -X POST http://localhost:8000/api/workflows/inputs \
 
 방어:
 - content-type whitelist: `image/png`, `image/jpeg`, `image/webp`
-- 크기 상한: 20MB → 413
+- 크기 상한: 20MB → 413. env-var `ASSET_FACTORY_MAX_INPUT_BYTES` 로 운영 override
 - PIL `Image.load()` 로 픽셀 디코딩 후 같은 포맷으로 재인코딩 → trailing
   payload (PNG 헤더 + ZIP/PHP polyglot) 자동 strip + EXIF/ICC 메타 정화. 400
 - `DecompressionBombError` 캐치 → 픽셀폭탄 입력도 400
 - `subfolder` 가 `[a-zA-Z0-9._-]{1,64}` 위반 시 `asset-factory` 로 정규화
 - 파일명도 sanitize 후 `<sha256[:12]>_<safe_original>.<ext>` 형태로 저장
-  (sha 는 *재인코딩된* bytes 기준)
+  (`..` 도 추가 strip, sha 는 *재인코딩된* bytes 기준)
+- `from-asset` 도 동일 정화 패스 거침 — `upsert_scanned_asset` 으로 임의 사용자
+  디렉토리 스캔 결과가 등록되는 케이스 방어
 
 ### Step 2 — 업로드 결과를 generate 호출에 박기
 

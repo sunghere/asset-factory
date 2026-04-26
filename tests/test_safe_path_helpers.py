@@ -111,18 +111,29 @@ def test_safe_input_filename_clamps_long_extension() -> None:
 
 
 def test_safe_input_filename_traversal_in_stem_neutralized() -> None:
+    """``../../../etc/passwd.png`` → ``..`` 가 ``_`` 로 추가 strip 돼 출력에 ``..`` 가
+    아예 안 남는다 (defense-in-depth, P1 리뷰 권장). 실제 path traversal 방어는
+    ``_safe_subfolder`` 가 책임 — 본 함수는 디스플레이 안전성 + 추가 보강."""
     out = server._safe_input_filename("../../../etc/passwd.png", b"x")
-    digest = _expected_digest(b"x")
-    # / \ . . 모두 _ 또는 . 로 치환됨. 실제 출력은
-    # "../../../etc/passwd" → rpartition("." )→ stem="../../../etc/passwd", ext="png"
-    # stem 안의 `/` `.` 중 `/` 만 _ 로 치환 (`.` 은 whitelist)
-    assert out == f"{digest}_.._.._.._etc_passwd.png"
+    assert ".." not in out  # 핵심 invariant
+    assert out.startswith(_expected_digest(b"x") + "_")
+    assert out.endswith(".png")
 
 
-def test_safe_input_filename_leading_dot_preserved() -> None:
-    """``.`` 은 whitelist 통과 — subfolder 검증과 책임 분리. 실제 traversal 방어는
-    ``_safe_subfolder`` 가 담당하고 파일명은 디스플레이 안전성만 확보."""
-    # "..png" 는 rpartition(".") → (".", ".", "png") 이라 stem="."
+def test_safe_input_filename_dotdot_never_appears_in_output() -> None:
+    """``..`` 가 출력에 절대 새지 않는다 (defense-in-depth invariant).
+
+    edge: stem 끝 ``.`` 과 ext separator ``.`` 가 결합해 ``..`` 부활하는
+    케이스도 ``strip(".")`` 으로 차단. ``..png`` 같이 stem 이 단일 ``.`` 라면
+    strip 후 빈 문자열 → fallback ``input``.
+    """
+    for raw in ("..png", "..foo..png", "a..b..c.png", "....png", "...."):
+        out = server._safe_input_filename(raw, b"x")
+        assert ".." not in out, f"failed for {raw!r}: got {out!r}"
+
+
+def test_safe_input_filename_dot_only_stem_falls_back_to_input() -> None:
+    """``..png`` → stem ``.`` strip 후 빈 문자열 → fallback ``input``."""
     out = server._safe_input_filename("..png", b"x")
     digest = _expected_digest(b"x")
-    assert out == f"{digest}_..png"
+    assert out == f"{digest}_input.png"
