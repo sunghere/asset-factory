@@ -82,6 +82,7 @@ class Database:
                     generation_model TEXT,
                     generation_prompt TEXT,
                     metadata_json TEXT,
+                    approval_mode TEXT NOT NULL DEFAULT 'manual',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     UNIQUE(project, asset_key)
@@ -121,6 +122,7 @@ class Database:
                     workflow_category TEXT,
                     workflow_variant TEXT,
                     workflow_params_json TEXT,
+                    approval_mode TEXT NOT NULL DEFAULT 'manual',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY(job_id) REFERENCES jobs(id)
@@ -163,11 +165,29 @@ class Database:
                 await conn.execute(
                     "ALTER TABLE generation_tasks ADD COLUMN workflow_params_json TEXT"
                 )
+            # Bypass(승인 우회) 모드. 'manual' (default) 또는 'bypass'.
+            # bypass 행은 cherry-pick UI 에 노출되지 않고 export manifest 에서도 제외.
+            if "approval_mode" not in col_names:
+                await conn.execute(
+                    "ALTER TABLE generation_tasks ADD COLUMN approval_mode TEXT NOT NULL DEFAULT 'manual'"
+                )
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_tasks_batch ON generation_tasks(batch_id)"
             )
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_tasks_backend ON generation_tasks(backend)"
+            )
+
+            # assets 테이블에 approval_mode 추가 (bypass 격리용)
+            asset_cursor = await conn.execute("PRAGMA table_info(assets)")
+            asset_rows = await asset_cursor.fetchall()
+            asset_cols = {row[1] for row in asset_rows}
+            if "approval_mode" not in asset_cols:
+                await conn.execute(
+                    "ALTER TABLE assets ADD COLUMN approval_mode TEXT NOT NULL DEFAULT 'manual'"
+                )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_assets_approval ON assets(approval_mode, project)"
             )
             await conn.execute(
                 """
@@ -213,6 +233,7 @@ class Database:
                     is_rejected INTEGER NOT NULL DEFAULT 0,
                     picked_at TEXT,
                     picked_asset_id TEXT,
+                    approval_mode TEXT NOT NULL DEFAULT 'manual',
                     created_at TEXT NOT NULL,
                     UNIQUE(project, asset_key, slot_index, job_id)
                 )
@@ -234,6 +255,10 @@ class Database:
             if "picked_asset_id" not in cand_cols:
                 await conn.execute(
                     "ALTER TABLE asset_candidates ADD COLUMN picked_asset_id TEXT"
+                )
+            if "approval_mode" not in cand_cols:
+                await conn.execute(
+                    "ALTER TABLE asset_candidates ADD COLUMN approval_mode TEXT NOT NULL DEFAULT 'manual'"
                 )
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_candidates_batch ON asset_candidates(batch_id)"
@@ -278,6 +303,7 @@ class Database:
                     candidate_slot, candidates_total,
                     batch_id, lora_spec_json, seed,
                     backend, workflow_category, workflow_variant, workflow_params_json,
+                    approval_mode,
                     created_at, updated_at
                 )
                 VALUES (
@@ -287,6 +313,7 @@ class Database:
                     :candidate_slot, :candidates_total,
                     :batch_id, :lora_spec_json, :seed,
                     :backend, :workflow_category, :workflow_variant, :workflow_params_json,
+                    :approval_mode,
                     :created_at, :updated_at
                 )
                 """,
@@ -302,6 +329,7 @@ class Database:
                     "workflow_category": task.get("workflow_category"),
                     "workflow_variant": task.get("workflow_variant"),
                     "workflow_params_json": task.get("workflow_params_json"),
+                    "approval_mode": task.get("approval_mode") or "manual",
                     "created_at": now,
                     "updated_at": now,
                 },
@@ -445,19 +473,20 @@ class Database:
                 """,
                 (now, job_id),
             )
+            payload.setdefault("approval_mode", "manual")
             await conn.execute(
                 """
                 INSERT INTO assets (
                     id, job_id, project, asset_key, category, status, image_path, width, height,
                     color_count, has_alpha, validation_status, validation_message,
                     generation_seed, generation_model, generation_prompt,
-                    metadata_json, created_at, updated_at
+                    metadata_json, approval_mode, created_at, updated_at
                 )
                 VALUES (
                     :id, :job_id, :project, :asset_key, :category, :status, :image_path, :width, :height,
                     :color_count, :has_alpha, :validation_status, :validation_message,
                     :generation_seed, :generation_model, :generation_prompt,
-                    :metadata_json, :created_at, :updated_at
+                    :metadata_json, :approval_mode, :created_at, :updated_at
                 )
                 ON CONFLICT(project, asset_key) DO UPDATE SET
                     job_id=excluded.job_id,
@@ -473,6 +502,7 @@ class Database:
                     generation_model=excluded.generation_model,
                     generation_prompt=excluded.generation_prompt,
                     metadata_json=excluded.metadata_json,
+                    approval_mode=excluded.approval_mode,
                     updated_at=excluded.updated_at
                 """,
                 payload,
@@ -606,8 +636,13 @@ class Database:
         status: str | None = None,
         category: str | None = None,
         validation_status: str | None = None,
+        include_bypassed: bool = False,
     ) -> list[dict[str, Any]]:
-        """필터 기반 에셋 목록 조회."""
+        """필터 기반 에셋 목록 조회.
+
+        ``include_bypassed=False`` (기본) 면 ``approval_mode='bypass'`` 자산은 제외 —
+        bypass 는 의도된 임시물이라 일반 list/UI 에서 안 보이게.
+        """
         conditions: list[str] = []
         params: list[Any] = []
         if project:
@@ -622,6 +657,8 @@ class Database:
         if validation_status:
             conditions.append("validation_status=?")
             params.append(validation_status)
+        if not include_bypassed:
+            conditions.append("approval_mode != 'bypass'")
 
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         query = f"""
@@ -829,11 +866,15 @@ class Database:
         project: str | None = None,
         category: str | None = None,
         since: str | None = None,
+        include_bypassed: bool = False,
     ) -> list[dict[str, Any]]:
         """승인된 에셋 목록을 반환한다.
 
         ``project`` · ``category`` 는 단순 equality, ``since`` 는 ISO8601 문자열로
         ``updated_at >= since`` (없으면 ``created_at``) 비교한다.
+
+        ``include_bypassed=False`` (기본) 면 ``approval_mode='bypass'`` 자산은 제외 —
+        export manifest 에서 임시물이 빠지게 하는 게 의도.
         """
         query = "SELECT * FROM assets WHERE status='approved'"
         params: list[Any] = []
@@ -846,6 +887,8 @@ class Database:
         if since:
             query += " AND COALESCE(updated_at, created_at) >= ?"
             params.append(since)
+        if not include_bypassed:
+            query += " AND approval_mode != 'bypass'"
         query += " ORDER BY asset_key ASC"
 
         async with aiosqlite.connect(self.db_path) as conn:
@@ -962,6 +1005,7 @@ class Database:
         generation_prompt: str | None,
         metadata_json: str | None,
         batch_id: str | None = None,
+        approval_mode: str = "manual",
     ) -> int:
         """후보 이미지 한 슬롯을 저장한다. INSERT OR REPLACE."""
         now = utc_now()
@@ -972,9 +1016,9 @@ class Database:
                     project, asset_key, slot_index, job_id, image_path,
                     width, height, color_count, validation_status, validation_message,
                     generation_seed, generation_model, generation_prompt, metadata_json,
-                    batch_id, is_rejected, created_at
+                    batch_id, is_rejected, approval_mode, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
                 ON CONFLICT(project, asset_key, slot_index, job_id) DO UPDATE SET
                     image_path=excluded.image_path,
                     width=excluded.width,
@@ -987,6 +1031,7 @@ class Database:
                     generation_prompt=excluded.generation_prompt,
                     metadata_json=excluded.metadata_json,
                     batch_id=excluded.batch_id,
+                    approval_mode=excluded.approval_mode,
                     created_at=excluded.created_at
                 """,
                 (
@@ -1005,6 +1050,7 @@ class Database:
                     generation_prompt,
                     metadata_json,
                     batch_id,
+                    approval_mode,
                     now,
                 ),
             )
@@ -1012,13 +1058,17 @@ class Database:
             return int(cursor.lastrowid)
 
     async def list_batch_candidates(self, batch_id: str) -> list[dict[str, Any]]:
-        """한 batch에 속한 모든 후보를 시간순으로 반환한다."""
+        """한 batch에 속한 모든 후보를 시간순으로 반환한다.
+
+        ``approval_mode='bypass'`` 후보는 cherry-pick UI 에 노출되지 않게 항상 제외.
+        bypass batch 결과는 별도로 `list_bypass_candidates(batch_id)` 로 조회.
+        """
         async with aiosqlite.connect(self.db_path) as conn:
             conn.row_factory = aiosqlite.Row
             cursor = await conn.execute(
                 """
                 SELECT * FROM asset_candidates
-                WHERE batch_id=?
+                WHERE batch_id=? AND approval_mode != 'bypass'
                 ORDER BY is_rejected ASC, created_at ASC, slot_index ASC
                 """,
                 (batch_id,),
