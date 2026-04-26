@@ -36,6 +36,14 @@ start_server() {
   echo "[dev] app=http://$HOST:$PORT/app/"
   echo "[dev] log=$LOG_FILE"
 
+  # Catalog metadata: external curated yaml from sincerity-skills repo
+  # Falls back to bundled config/sd_catalog.yml if external path missing.
+  EXTERNAL_CATALOG="$HOME/workspace/sincerity-skills/sd-catalog/sd_catalog.yml"
+  if [[ -f "$EXTERNAL_CATALOG" ]]; then
+    export SD_CATALOG_PATH="$EXTERNAL_CATALOG"
+    echo "[dev] sd_catalog=$SD_CATALOG_PATH (external)"
+  fi
+
   nohup "$ROOT_DIR/.venv/bin/uvicorn" server:app --host "$HOST" --port "$PORT" --reload \
     >"$LOG_FILE" 2>&1 < /dev/null &
   echo $! > "$PID_FILE"

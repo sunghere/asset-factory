@@ -4,6 +4,10 @@ data/*.db
 data/*.pid
 data/*.log
 data/candidates/
+data/approved/
+data/mock-ui/
+data/thumbs/
+.run/
 __pycache__/
 *.pyc
 .env
