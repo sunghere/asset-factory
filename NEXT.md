@@ -2,70 +2,114 @@
 
 > Transient 문서. 작성/삭제 규칙은 [`CLAUDE.md`](./CLAUDE.md#세션-핸드오프-nextmd) 참조.
 
-_작성: 2026-04-26 · 세션 종료 시점_
+_작성: 2026-04-27 · 세션 종료 시점_
 
 ---
 
 ## 최근작업
 
-### PR #14 머지 — ComfyUI 동적 입력 업로드 (2026-04-26)
+### `feat/skill-p0-gaps` 브랜치 — `docs/TODOS_for_SKILL.md` P0 3개 완료 (2026-04-27)
 
-[`223344b`](https://github.com/sunghere/asset-factory/commit/223344b) (squash). 8단계 + 1차 리뷰 P0 fix-up + 3자 리뷰 P1 fix-up 까지 한 PR 에 묶어 머지:
+세 커밋 독립 (각각 별 PR 가능), 회귀 `pytest -q --ignore=tests/test_generator_comfyui.py`
+263 → 294 통과. P0 가 머지되면 `~/workspace/sincerity-skills/asset-factory-api/SKILL.md`
+한 장으로 asset-relay-agent 등이 별도 변경 없이 모든 에셋 파이프라인을 실행 가능.
 
-- 신규 endpoint: `POST /api/workflows/inputs` (multipart, PIL 정화) + `/inputs/from-asset`
-- `ComfyUIClient.upload_input_image()` (multipart, retry, error 분류)
-- `workflow_patcher.load_images: dict` generic + `_LOAD_IMAGE_RULES` (`pose_image`/`source_image`)
-- 보안: PIL `load() + save()` 정화 (polyglot trailing strip + 메타 정화 +
-  `DecompressionBombError` 캐치), WEBP 무손실 보존 (RIFF VP8L fourcc 검사),
-  `_safe_subfolder`/`_safe_input_filename` path traversal 방어, 20MB env-var
-  가드 (`ASSET_FACTORY_MAX_INPUT_BYTES`), ComfyUI 응답 shape 검증
-- backward-compat: 기존 `pose_image` kwarg 그대로 동작 (`load_images` dict 에 합성)
-- 테스트 +75 (202 → 277), CI green (3.11/3.12 + CodeQL + Analyze)
-- [`workflows/README.md`](./workflows/README.md) "동적 입력 이미지 업로드" 섹션 + patcher 키 테이블 갱신
+- **`c371620`** — P0-2: `input_labels` 자동 추론 + catalog 노출.
+  - `workflow_patcher.find_load_image_label()` public helper.
+  - `workflow_registry.InputLabelSpec`, `infer_input_labels()`,
+    `VariantSpec.input_labels`, `_build_input_labels()` 머지 로직.
+  - 워크플로우 JSON 의 LoadImage 노드를 `_LOAD_IMAGE_RULES` 와 매칭해 자동 추출.
+    YAML `input_labels:` 섹션 있으면 description/required/default override —
+    추론에 없는 라벨 선언 시 startup 에러 (오타 방지).
+  - 실 registry 확인: sprite/pixel_alpha/hires/rembg_alpha/stage1/full/v37_*
+    → `pose_image`, sprite/pose_extract → `source_image`. illustration/icon/
+    pixel_bg 는 LoadImage 없어 빈 배열.
 
-리뷰 사이클 요약 — 두 번의 독립 서브에이전트 리뷰가 잡은 갭:
+- **`550b7c5`** — P0-1: bypass(승인 우회) 모드.
+  - 스키마: `assets`/`asset_candidates`/`generation_tasks` 에 `approval_mode`
+    TEXT NOT NULL DEFAULT 'manual' 컬럼 + ALTER 마이그레이션
+    (`models.py:_migrate_legacy_schema`). `idx_assets_approval` 인덱스.
+  - API: `WorkflowGenerateRequest.approval_mode: Literal['manual','bypass']`.
+    `list_project_assets`/`list_assets` 에 `include_bypassed=False` 기본.
+    `list_batch_candidates` 항상 bypass 제외 (cherry-pick 큐 오염 방지).
+    `export_assets`/`list_approved_assets` bypass 제외 + 응답에
+    `excluded_bypassed`. `/api/health` 에 `bypass_retention_days`.
+  - GC: `candidate_gc.run_gc_candidates(bypass_max_age_seconds)` +
+    `AF_BYPASS_RETENTION_DAYS` env (default 7). bypass 후보만 짧게 별도 청소,
+    bypass 로 promote 된 asset 은 GC 대상 아님 (chain 안전성).
 
-- **1차**: `Image.verify()` 가 PNG IEND 까지만 검증해 진짜 polyglot 통과 +
-  `DecompressionBombError` 가 except 절에 빠져 HTTP 500 누출 → `load() + save()` 패턴 + except 명시
-- **3자**: WEBP `quality` kwarg 누락으로 무손실 입력 silent lossy 변환 →
-  RIFF chunk fourcc (`VP8L`) 검사로 `lossless` flag 보존
+- **`192d45a`** — P0-3: `af` CLI 부트스트랩.
+  - typer 기반 `cli/` 패키지 (`cli/main.py`, `cli/http.py`,
+    `cli/commands/workflow.py`). `python -m cli` 또는 `scripts/af` 셔임.
+  - `af workflow catalog | describe | upload | gen`. `--input LABEL=VALUE`:
+    `@<path>` → 자동 upload, `asset:<id>`/UUID → from-asset upload, plain →
+    그대로. catalog 의 `input_labels` 와 대조해 unknown 라벨 시 가능 라벨
+    알려주며 친절 에러. `--bypass-approval` → request body 의
+    `approval_mode='bypass'`.
+  - 환경변수: `AF_API_KEY` > `API_KEY` 폴백, `AF_BASE_URL` (default
+    `http://localhost:8000`).
+  - requirements.txt: `typer==0.25.0`, `respx==0.23.1` 추가.
 
 ---
 
 ## 핸드오프
 
-### 통합 smoke (사용자 외부, ~30min)
+### PR 분리 + 머지 결정
 
-[`HANDOFF.md`](./HANDOFF.md) §2 단계 7 — 실 ComfyUI (`192.168.50.225:8188`) 로 PoseExtract end-to-end:
+세 커밋 모두 독립이라 다음 중 택일:
 
-1. curl 로 사용자 PNG 업로드 → 200 + `name` 반환
-2. 응답 `name` 을 `workflow_params.load_images.source_image` 에 박아 `sprite/pose_extract` generate
-3. PoseExtract 결과 asset 을 `/from-asset` 으로 다시 업로드 → ControlNet 변형 chain
-4. 기존 `sprite/pixel_alpha` 등이 `pose_image` kwarg 로 그대로 동작하는지 회귀
-
-자세한 curl 예시: [`workflows/README.md`](./workflows/README.md) "동적 입력 이미지 업로드".
-
-### 워크트리 잔재 (사용자 수동 정리)
-
-`.claude/worktrees/vigorous-torvalds-a1e1af` 가 다른 프로세스에 잡혀 (Windows
-file lock — Defender 스캔이거나 옛 Claude Code 프로세스 핸들) 본 세션에서 강제
-삭제 실패. git worktree 등록은 이미 빠져 있어 (`git worktree list --porcelain`
-에 없음) 저장소 오염 0, `.gitignore` 가 `.claude/` 막아 커밋 오염도 0.
-
-머신 재기동 후 수동:
+1. **한 PR (`feat/skill-p0-gaps` 그대로)** — 빠르지만 리뷰가 무거움.
+2. **3 PR (P0-2 → P0-1 → P0-3 순)** — `docs/TODOS_for_SKILL.md` 권장 형태.
+   P0-2 가 가장 작아 워밍업.
 
 ```bash
-rm -rf D:/DEV/asset-factory/.claude/worktrees/vigorous-torvalds-a1e1af
+# 옵션 2 의 첫 PR (P0-2 만):
+git checkout main
+git checkout -b feat/skill-p0-2-input-labels
+git cherry-pick c371620
+git push -u origin feat/skill-p0-2-input-labels
+gh pr create --title "feat(registry): catalog 응답에 input_labels 자동 추론 노출 (P0-2)"
 ```
 
-(`.claude/worktrees/gifted-pare-470077` 은 다른 활성 Claude 세션 흔적일 수 있어
-건드리지 않음 — 본 세션이 식별 못 함.)
+### 통합 smoke (사용자 외부, ~10min)
 
-### 후속 작업 (별도 PR)
+실 ComfyUI 로 end-to-end (현재 머지 안 됨 — 브랜치 위에서):
 
-[`docs/TODOS.md`](./docs/TODOS.md) 에서 픽업할 우선순위:
+```bash
+af workflow catalog | jq '.categories.sprite.variants.pixel_alpha.input_labels'
+af workflow upload ./pose.png   # → 이름 한 줄
+af workflow gen sprite/pixel_alpha tmp_test demo_001 "test prompt" \
+    --input pose_image=@./pose.png --bypass-approval --candidates 2 --wait
+af list tmp_test                          # bypass 안 보임 (OK)
+af list tmp_test --include-bypassed       # 보임
+af export tmp_test --manifest             # excluded_bypassed > 0 확인
+curl -s localhost:8000/api/health | jq .bypass_retention_days  # 7
+```
 
-- **P0** ComfyUI `input/` GC cron — 본 PR 머지 후 디스크 폭주 위험. `task.workflow_params_json` 의 load_images 참조 추적 → N일 미참조 파일 삭제
-- **P1** `af.mjs` CLI 신설 (~2h) — 본 PR 의 curl 2-step 을 wrapper 로 감싸 `af workflow upload` / `af workflow gen` 등 등장
-- **P1** task → task chain 자동화 (DB 마이그레이션 필요) — PoseExtract 결과를 다음 변형 입력으로 자동
-- **P1** PoseExtract 전용 화면 ([`docs/SCREEN_SPEC_v0.2.md`](./docs/SCREEN_SPEC_v0.2.md) 미반영)
+`af list`/`af get`/`af export` 는 본 PR 범위 밖 — REST 직접 호출 또는 Web UI
+사용. 추가가 필요하면 별도 PR.
+
+### `~/workspace/sincerity-skills/asset-factory-api/SKILL.md` 갱신
+
+P0 머지 후 SKILL.md 를 `docs/TODOS_for_SKILL.md` "최종 호출 인터페이스 (요약)"
+섹션 그대로 풀어쓰면 됨. 별도 코드 변경 불필요.
+
+### 미반영 P1/P2 (별도 트래커 유지)
+
+[`docs/TODOS_for_SKILL.md`](./docs/TODOS_for_SKILL.md) §P1/§P2 그대로. 특히:
+
+- **P1-5** `/api/workflows/generate` 응답 정형화 (`run_id`, `expected_outputs`,
+  `poll_url`) — `--wait` 의 폴링 의미가 명확해짐.
+- **P1-6** `from-asset` 엔드포인트에 `run_id + output_label` 추가. CLI 의
+  `--from-run <run_id> --output <label>` 시그니처는 P0-3 에서 예약 — 서버만
+  채우면 동작.
+- **P1-4** preset 이 catalog 에서 이미 resolve 된 형태로 노출되는데, 변형별
+  어떤 preset 이 적용됐는지 `recommended_negative_preset_name` 메타를 별도로
+  노출하면 사용자가 알기 쉬움.
+- **P2-9** `dry_run=true` — `workflow_patcher.PatchReport` 그대로 반환.
+
+### 환경 이슈
+
+`tests/test_generator_comfyui.py` 는 `aioresponses` 미설치로 collect 에러 —
+본 세션과 무관하게 기존부터 있던 환경 문제. `.venv/bin/pip install aioresponses`
+또는 `requirements.txt` 의 `aioresponses==0.7.8` 를 통해 설치.
