@@ -13,7 +13,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Literal
 from io import BytesIO
 from urllib.parse import quote
 
@@ -410,6 +410,10 @@ class WorkflowGenerateRequest(BaseModel):
     expected_size: int | None = None
     max_colors: int = Field(default=32, ge=1, le=256)
     max_retries: int = Field(default=3, ge=0, le=10)
+    # Bypass 모드 — 사람 cherry-pick 큐 우회. 'manual' (default) 또는 'bypass'.
+    # bypass 후보는 cherry-pick UI 에 안 뜨고, export manifest 에서도 제외된다.
+    # 임시 시뮬·sketch·체인 중간물 등 사람 검수 무의미한 케이스용.
+    approval_mode: Literal["manual", "bypass"] = "manual"
 
 
 class EventBroker:
@@ -851,6 +855,7 @@ async def handle_task(task: dict[str, Any]) -> None:
                 generation_prompt=task["prompt"],
                 metadata_json=metadata_json,
                 batch_id=batch_id,
+                approval_mode=task.get("approval_mode") or "manual",
             )
             if batch_id is not None:
                 await event_broker.publish(
@@ -889,6 +894,7 @@ async def handle_task(task: dict[str, Any]) -> None:
                         "generation_model": outcome.model,
                         "generation_prompt": task["prompt"],
                         "metadata_json": metadata_json,
+                        "approval_mode": task.get("approval_mode") or "manual",
                     },
                 )
             else:
@@ -916,6 +922,7 @@ async def handle_task(task: dict[str, Any]) -> None:
                     "generation_model": outcome.model,
                     "generation_prompt": task["prompt"],
                     "metadata_json": metadata_json,
+                    "approval_mode": task.get("approval_mode") or "manual",
                 },
             )
         await event_broker.publish(
@@ -1096,8 +1103,17 @@ async def app_redesign_catchall(path: str) -> FileResponse:
 
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
-    """기본 헬스체크."""
-    return {"ok": True, "service": "asset-factory"}
+    """기본 헬스체크 + 운영 설정값 노출.
+
+    ``bypass_retention_days`` 는 approval_mode='bypass' 후보의 자동 청소 기준
+    (env ``AF_BYPASS_RETENTION_DAYS``, 기본 7).
+    """
+    from candidate_gc import get_bypass_retention_days
+    return {
+        "ok": True,
+        "service": "asset-factory",
+        "bypass_retention_days": get_bypass_retention_days(),
+    }
 
 
 @app.get("/api/health/sd")
@@ -1478,6 +1494,7 @@ async def workflows_generate(request: WorkflowGenerateRequest) -> dict[str, Any]
                 "workflow_category": request.workflow_category,
                 "workflow_variant": request.workflow_variant,
                 "workflow_params_json": workflow_params_json,
+                "approval_mode": request.approval_mode,
             }
         )
     await db.mark_job_running(job_id)
@@ -1490,6 +1507,7 @@ async def workflows_generate(request: WorkflowGenerateRequest) -> dict[str, Any]
         "primary_output": (
             variant.primary_output.label if variant.primary_output else None
         ),
+        "approval_mode": request.approval_mode,
     }
 
 
@@ -1564,13 +1582,19 @@ async def list_project_assets(
     status: str | None = Query(default=None),
     category: str | None = Query(default=None),
     validation_status: str | None = Query(default=None),
+    include_bypassed: bool = Query(default=False),
 ) -> list[dict[str, Any]]:
-    """프로젝트별 에셋 목록 (스펙/클라이언트용 정식 엔드포인트)."""
+    """프로젝트별 에셋 목록 (스펙/클라이언트용 정식 엔드포인트).
+
+    ``include_bypassed=true`` 일 때만 bypass 모드 자산이 포함된다.
+    기본은 일반 검수 큐에 노출되지 않게 제외.
+    """
     return await db.list_assets(
         project=project_id,
         status=status,
         category=category,
         validation_status=validation_status,
+        include_bypassed=include_bypassed,
     )
 
 
@@ -2007,6 +2031,9 @@ async def approve_from_candidate(body: ApproveFromCandidateRequest) -> dict[str,
     )
 
     metadata_out = candidate.get("metadata_json") or json.dumps(meta, ensure_ascii=False)
+    # candidate 의 approval_mode 를 새 asset 으로 전파 — bypass candidate 가
+    # 사람 cherry-pick 으로 promote 돼도 자산은 여전히 bypass 격리 유지.
+    candidate_approval_mode = candidate.get("approval_mode") or "manual"
 
     existing = await db.get_asset_by_key(project, asset_key)
     if existing:
@@ -2024,6 +2051,7 @@ async def approve_from_candidate(body: ApproveFromCandidateRequest) -> dict[str,
             generation_model=candidate.get("generation_model"),
             generation_prompt=candidate.get("generation_prompt"),
             metadata_json=metadata_out,
+            approval_mode=candidate_approval_mode,
         )
         if not ok:
             raise HTTPException(status_code=500, detail="에셋 갱신에 실패했습니다.")
@@ -2053,6 +2081,7 @@ async def approve_from_candidate(body: ApproveFromCandidateRequest) -> dict[str,
             generation_model=candidate.get("generation_model"),
             generation_prompt=candidate.get("generation_prompt"),
             metadata_json=metadata_out,
+            approval_mode=candidate_approval_mode,
         )
     if body.set_status != "pending":
         await db.update_asset_status(asset_id=asset_id, status=body.set_status)
@@ -2153,13 +2182,18 @@ async def list_assets(
     status: str | None = Query(default=None),
     category: str | None = Query(default=None),
     validation_status: str | None = Query(default=None),
+    include_bypassed: bool = Query(default=False),
 ) -> list[dict[str, Any]]:
-    """에셋 목록 조회."""
+    """에셋 목록 조회.
+
+    ``include_bypassed=true`` 일 때만 bypass 모드 자산이 포함된다.
+    """
     return await db.list_assets(
         project=project,
         status=status,
         category=category,
         validation_status=validation_status,
+        include_bypassed=include_bypassed,
     )
 
 
@@ -2695,14 +2729,29 @@ async def batch_regenerate_failed(
 
 @app.post("/api/export", dependencies=[Depends(require_api_key)])
 async def export_assets(request: ExportRequest) -> dict[str, Any]:
-    """승인된 에셋을 대상 디렉토리로 복사한다."""
+    """승인된 에셋을 대상 디렉토리로 복사한다.
+
+    ``approval_mode='bypass'`` 자산은 의도된 임시물이라 export 와 manifest 양쪽
+    에서 모두 제외된다. 응답의 ``excluded_bypassed`` 로 제외된 수를 알린다.
+    """
     approved = await db.list_approved_assets(
         project=request.project,
         category=request.category,
         since=request.since,
     )
+    approved_with_bypass = await db.list_approved_assets(
+        project=request.project,
+        category=request.category,
+        since=request.since,
+        include_bypassed=True,
+    )
+    excluded_bypassed = len(approved_with_bypass) - len(approved)
     if not approved:
-        return {"exported_count": 0, "output_dir": request.output_dir}
+        return {
+            "exported_count": 0,
+            "output_dir": request.output_dir,
+            "excluded_bypassed": excluded_bypassed,
+        }
 
     # 사용자 입력 output_dir을 allowlist 내부로 제한한다(없는 디렉토리는 미리 만든다).
     raw_root = Path(request.output_dir).expanduser()
@@ -2766,7 +2815,12 @@ async def export_assets(request: ExportRequest) -> dict[str, Any]:
     await event_broker.publish(
         {"type": ev.EVT_EXPORT_COMPLETED, "count": exported_count, "output_dir": str(output_root), "manifest_path": manifest_path}
     )
-    return {"exported_count": exported_count, "output_dir": str(output_root), "manifest_path": manifest_path}
+    return {
+        "exported_count": exported_count,
+        "output_dir": str(output_root),
+        "manifest_path": manifest_path,
+        "excluded_bypassed": excluded_bypassed,
+    }
 
 
 @app.get("/api/export/manifest")
@@ -2785,6 +2839,10 @@ async def export_manifest(
     approved = await db.list_approved_assets(
         project=project, category=category, since=since
     )
+    approved_with_bypass = await db.list_approved_assets(
+        project=project, category=category, since=since, include_bypassed=True
+    )
+    excluded_bypassed = len(approved_with_bypass) - len(approved)
     items: list[dict[str, Any]] = []
     total_bytes = 0
     for asset in approved:
@@ -2813,7 +2871,12 @@ async def export_manifest(
                 "updated_at": asset.get("updated_at") or asset.get("created_at"),
             }
         )
-    return {"count": len(items), "total_bytes": total_bytes, "items": items}
+    return {
+        "count": len(items),
+        "total_bytes": total_bytes,
+        "items": items,
+        "excluded_bypassed": excluded_bypassed,
+    }
 
 
 async def sse_event_generator(

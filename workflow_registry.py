@@ -34,6 +34,35 @@ class WorkflowRegistryError(RuntimeError):
     """레지스트리 매니페스트 검증/로딩 실패."""
 
 
+def infer_input_labels(workflow_json: dict[str, Any]) -> tuple["InputLabelSpec", ...]:
+    """워크플로우 API JSON 을 스캔해 등록된 LoadImage 라벨을 자동 추출.
+
+    각 LoadImage 노드의 `_meta.title` 을 patcher 의 `_LOAD_IMAGE_RULES` 와 대조해
+    매칭되는 라벨을 InputLabelSpec 으로 반환. node.inputs.image 를 default 로
+    채운다. 라벨 중복 시 첫 매칭만 사용 (등록 라벨은 상호 배타적).
+
+    YAML 의 input_labels override 와 합쳐지기 전 베이스로 쓰인다.
+    """
+    # 지연 import — 순환 import 가능성 차단 + 임포트 실패해도 registry 자체는 로드됨
+    from workflow_patcher import find_load_image_label
+
+    seen: dict[str, InputLabelSpec] = {}
+    for node in workflow_json.values():
+        if not isinstance(node, dict):
+            continue
+        label = find_load_image_label(node)
+        if label is None or label in seen:
+            continue
+        default = node.get("inputs", {}).get("image")
+        seen[label] = InputLabelSpec(
+            label=label,
+            required=False,
+            default=str(default) if default is not None else None,
+            description="",
+        )
+    return tuple(seen.values())
+
+
 @dataclass(slots=True, frozen=True)
 class OutputSpec:
     """워크플로우의 한 SaveImage 출력 노드 메타.
@@ -44,6 +73,21 @@ class OutputSpec:
     node_title: str
     label: str
     primary: bool = False
+
+
+@dataclass(slots=True, frozen=True)
+class InputLabelSpec:
+    """변형이 `load_images` dict 로 받을 수 있는 LoadImage 라벨.
+
+    워크플로우 JSON 의 LoadImage 노드를 `workflow_patcher._LOAD_IMAGE_RULES` 와
+    매칭해 자동 추론한다. YAML `input_labels:` 섹션이 있으면 description /
+    required / default 를 라벨 단위로 override.
+    """
+
+    label: str
+    required: bool = False
+    default: str | None = None
+    description: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -59,6 +103,7 @@ class VariantSpec:
     primary: bool                   # 카테고리 대표 변형 여부
     outputs: tuple[OutputSpec, ...]
     defaults: dict[str, Any]
+    input_labels: tuple[InputLabelSpec, ...] = ()
 
     @property
     def available(self) -> bool:
@@ -195,6 +240,15 @@ class WorkflowRegistry:
                                 for o in v.outputs
                             ],
                             "defaults": v.defaults,
+                            "input_labels": [
+                                {
+                                    "label": il.label,
+                                    "required": il.required,
+                                    "default": il.default,
+                                    "description": il.description,
+                                }
+                                for il in v.input_labels
+                            ],
                         }
                         for vname, v in cat.variants.items()
                     },
@@ -277,6 +331,8 @@ class WorkflowRegistry:
             )
         defaults = {k: self._resolve_presets(v) for k, v in defaults_raw.items()}
 
+        input_labels = self._build_input_labels(category, name, data, file_path, status)
+
         return VariantSpec(
             category=category,
             name=str(name),
@@ -287,7 +343,74 @@ class WorkflowRegistry:
             primary=bool(data.get("primary", False)),
             outputs=outputs,
             defaults=defaults,
+            input_labels=input_labels,
         )
+
+    def _build_input_labels(
+        self,
+        category: str,
+        name: str,
+        data: dict[str, Any],
+        file_path: Path | None,
+        status: str,
+    ) -> tuple[InputLabelSpec, ...]:
+        """워크플로우 JSON 자동 추론 + YAML override 머지.
+
+        1. file 이 호출 가능하면 JSON 로드해 베이스 라벨 추론.
+        2. YAML 의 input_labels: 섹션이 있으면 같은 라벨에 description/required/
+           default 덮어씀.
+        3. YAML 에 추론에 없는 라벨이 있으면 startup 에러 (오타 방지).
+        """
+        # 베이스: 워크플로우 JSON 스캔으로 자동 추론.
+        # 깨진 JSON 은 여기서 raise 하지 않는다 — load_api_json() 이 호출 시점에
+        # 더 의미있는 에러를 낸다 (registry 로드는 best-effort 로 진행).
+        inferred: dict[str, InputLabelSpec] = {}
+        if status == "ready" and file_path is not None and file_path.exists():
+            try:
+                wf = json.loads(file_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                wf = None
+            if isinstance(wf, dict):
+                for spec in infer_input_labels(wf):
+                    inferred[spec.label] = spec
+
+        # YAML override
+        raw = data.get("input_labels")
+        if raw is None:
+            return tuple(inferred.values())
+        if not isinstance(raw, list):
+            raise WorkflowRegistryError(
+                f"variant {category}/{name} input_labels must be a list"
+            )
+
+        merged: dict[str, InputLabelSpec] = dict(inferred)
+        for item in raw:
+            if not isinstance(item, dict):
+                raise WorkflowRegistryError(
+                    f"variant {category}/{name} input_labels entry must be a mapping"
+                )
+            label = item.get("label")
+            if not label or not isinstance(label, str):
+                raise WorkflowRegistryError(
+                    f"variant {category}/{name} input_labels entry needs `label`"
+                )
+            if label not in inferred:
+                raise WorkflowRegistryError(
+                    f"variant {category}/{name} input_labels references unknown label "
+                    f"`{label}` (워크플로우 JSON 의 LoadImage 노드에서 추론되지 않음. "
+                    f"가능: {sorted(inferred.keys()) or 'none'})"
+                )
+            base = inferred[label]
+            merged[label] = InputLabelSpec(
+                label=label,
+                required=bool(item.get("required", base.required)),
+                default=(
+                    str(item["default"]) if item.get("default") is not None
+                    else base.default
+                ),
+                description=str(item.get("description", base.description)),
+            )
+        return tuple(merged.values())
 
     @staticmethod
     def _parse_output(category: str, variant: str, raw: Any) -> OutputSpec:

@@ -187,6 +187,30 @@ _LOAD_IMAGE_RULES: dict[str, _PatchRule] = {
 }
 
 
+def load_image_labels() -> tuple[str, ...]:
+    """등록된 LoadImage 라벨들 (catalog input_labels 추론용)."""
+    return tuple(_LOAD_IMAGE_RULES.keys())
+
+
+def find_load_image_label(node: dict[str, Any]) -> str | None:
+    """LoadImage 노드 1개를 _LOAD_IMAGE_RULES 와 매칭. 매칭되면 라벨, 아니면 None.
+
+    여러 라벨이 매칭되면 첫 번째 (dict 선언 순서) 를 반환 — 현 등록 라벨들은
+    title 패턴이 상호 배타적이라 중복 매칭은 발생하지 않는다.
+    """
+    if node.get("class_type") != "LoadImage":
+        return None
+    title = _node_title(node)
+    for label, rule in _LOAD_IMAGE_RULES.items():
+        pat = rule.title_match
+        if pat is None:
+            return label
+        regex = pat if isinstance(pat, re.Pattern) else re.compile(pat, re.IGNORECASE)
+        if regex.search(title):
+            return label
+    return None
+
+
 # ----------------------------------------------------------------------------
 # 메인 API
 # ----------------------------------------------------------------------------

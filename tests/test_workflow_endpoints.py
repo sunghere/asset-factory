@@ -348,3 +348,335 @@ async def _fetch_tasks(db: Database, job_id: str) -> list[dict]:
         )
         rows = await cur.fetchall()
         return [dict(r) for r in rows]
+
+
+# ----------------------------------------------------------------------------
+# Bypass 모드 (P0-1)
+# ----------------------------------------------------------------------------
+
+
+def test_generate_default_approval_mode_is_manual(isolated) -> None:  # noqa: ANN001
+    """approval_mode 미지정 → task 에 'manual' 저장."""
+    with TestClient(server.app) as client:
+        r = client.post("/api/workflows/generate", json={
+            "project": "proj",
+            "asset_key": "a",
+            "workflow_category": "sprite",
+            "workflow_variant": "v",
+            "prompt": "p",
+        })
+    assert r.status_code == 200, r.text
+    assert r.json()["approval_mode"] == "manual"
+    rows = asyncio.run(_fetch_tasks(isolated, r.json()["job_id"]))
+    assert rows[0]["approval_mode"] == "manual"
+
+
+def test_generate_bypass_mode_persists_flag(isolated) -> None:  # noqa: ANN001
+    """approval_mode='bypass' 가 task 에 그대로 저장되고 응답에 echo."""
+    with TestClient(server.app) as client:
+        r = client.post("/api/workflows/generate", json={
+            "project": "tmp_sketch",
+            "asset_key": "a",
+            "workflow_category": "sprite",
+            "workflow_variant": "v",
+            "prompt": "p",
+            "approval_mode": "bypass",
+        })
+    assert r.status_code == 200, r.text
+    assert r.json()["approval_mode"] == "bypass"
+    rows = asyncio.run(_fetch_tasks(isolated, r.json()["job_id"]))
+    assert rows[0]["approval_mode"] == "bypass"
+
+
+def test_generate_invalid_approval_mode_rejected(isolated) -> None:  # noqa: ANN001
+    """Literal 검증 — 'auto' 등 미정의 값은 422."""
+    with TestClient(server.app) as client:
+        r = client.post("/api/workflows/generate", json={
+            "project": "proj",
+            "asset_key": "a",
+            "workflow_category": "sprite",
+            "workflow_variant": "v",
+            "prompt": "p",
+            "approval_mode": "auto",
+        })
+    assert r.status_code == 422
+
+
+def _insert_bypass_asset(db, project: str, asset_key: str) -> str:
+    """테스트용: 직접 assets 테이블에 bypass 행 삽입."""
+    import aiosqlite
+    import uuid as _uuid
+
+    async def _go() -> str:
+        asset_id = str(_uuid.uuid4())
+        async with aiosqlite.connect(db.db_path) as conn:
+            await conn.execute(
+                """
+                INSERT INTO assets (
+                    id, job_id, project, asset_key, category, status,
+                    image_path, width, height, color_count,
+                    has_alpha, validation_status,
+                    approval_mode, created_at, updated_at
+                ) VALUES (?, NULL, ?, ?, 'sprite', 'approved', '/tmp/x.png',
+                          64, 64, 16, 0, 'pass', 'bypass',
+                          '2026-01-01T00:00:00', '2026-01-01T00:00:00')
+                """,
+                (asset_id, project, asset_key),
+            )
+            await conn.commit()
+        return asset_id
+
+    return asyncio.run(_go())
+
+
+def _insert_manual_asset(db, project: str, asset_key: str) -> str:
+    """테스트용: 직접 assets 테이블에 manual(approved) 행 삽입."""
+    import aiosqlite
+    import uuid as _uuid
+
+    async def _go() -> str:
+        asset_id = str(_uuid.uuid4())
+        async with aiosqlite.connect(db.db_path) as conn:
+            await conn.execute(
+                """
+                INSERT INTO assets (
+                    id, job_id, project, asset_key, category, status,
+                    image_path, width, height, color_count,
+                    has_alpha, validation_status,
+                    approval_mode, created_at, updated_at
+                ) VALUES (?, NULL, ?, ?, 'sprite', 'approved', '/tmp/m.png',
+                          64, 64, 16, 0, 'pass', 'manual',
+                          '2026-01-01T00:00:00', '2026-01-01T00:00:00')
+                """,
+                (asset_id, project, asset_key),
+            )
+            await conn.commit()
+        return asset_id
+
+    return asyncio.run(_go())
+
+
+def test_list_assets_excludes_bypass_by_default(isolated) -> None:  # noqa: ANN001
+    """include_bypassed 미지정 → bypass 자산 안 보임."""
+    _insert_manual_asset(isolated, "p", "manual_one")
+    _insert_bypass_asset(isolated, "p", "bypass_one")
+    with TestClient(server.app) as client:
+        r = client.get("/api/projects/p/assets")
+    assert r.status_code == 200
+    keys = {a["asset_key"] for a in r.json()}
+    assert keys == {"manual_one"}
+
+
+def test_list_assets_includes_bypassed_with_flag(isolated) -> None:  # noqa: ANN001
+    _insert_manual_asset(isolated, "p", "manual_one")
+    _insert_bypass_asset(isolated, "p", "bypass_one")
+    with TestClient(server.app) as client:
+        r = client.get("/api/projects/p/assets?include_bypassed=true")
+    assert r.status_code == 200
+    keys = {a["asset_key"] for a in r.json()}
+    assert keys == {"manual_one", "bypass_one"}
+
+
+def test_legacy_assets_endpoint_also_filters_bypass(isolated) -> None:  # noqa: ANN001
+    _insert_manual_asset(isolated, "p", "manual_one")
+    _insert_bypass_asset(isolated, "p", "bypass_one")
+    with TestClient(server.app) as client:
+        default = client.get("/api/assets?project=p").json()
+        with_flag = client.get("/api/assets?project=p&include_bypassed=true").json()
+    assert {a["asset_key"] for a in default} == {"manual_one"}
+    assert {a["asset_key"] for a in with_flag} == {"manual_one", "bypass_one"}
+
+
+def test_assets_response_exposes_approval_mode_field(isolated) -> None:  # noqa: ANN001
+    """클라이언트가 한 번의 호출로 'bypass' 여부 식별 가능 — DB 응답 직렬화에서
+    approval_mode 가 빠지지 않게 보장 (마이그레이션 안 돈 구 DB 안전망 포함).
+    """
+    _insert_manual_asset(isolated, "p", "manual_one")
+    _insert_bypass_asset(isolated, "p", "bypass_one")
+    with TestClient(server.app) as client:
+        rows = client.get("/api/projects/p/assets?include_bypassed=true").json()
+    by_key = {a["asset_key"]: a for a in rows}
+    assert by_key["manual_one"]["approval_mode"] == "manual"
+    assert by_key["bypass_one"]["approval_mode"] == "bypass"
+
+
+def test_assets_legacy_endpoint_also_exposes_approval_mode(isolated) -> None:  # noqa: ANN001
+    _insert_manual_asset(isolated, "p", "m")
+    _insert_bypass_asset(isolated, "p", "b")
+    with TestClient(server.app) as client:
+        rows = client.get("/api/assets?project=p&include_bypassed=true").json()
+    by_key = {a["asset_key"]: a for a in rows}
+    assert by_key["m"]["approval_mode"] == "manual"
+    assert by_key["b"]["approval_mode"] == "bypass"
+
+
+def test_export_manifest_includes_excluded_bypassed_field(isolated) -> None:  # noqa: ANN001
+    """/api/export/manifest GET 응답에도 항상 excluded_bypassed 키가 들어감."""
+    _insert_manual_asset(isolated, "p", "m1")
+    _insert_bypass_asset(isolated, "p", "b1")
+    with TestClient(server.app) as client:
+        body = client.get("/api/export/manifest?project=p").json()
+    assert body["count"] == 1
+    assert body["excluded_bypassed"] == 1
+
+
+def test_export_manifest_empty_project_still_has_excluded_bypassed(isolated) -> None:  # noqa: ANN001
+    """asset 없는 프로젝트라도 excluded_bypassed 가 0 (null/누락 아님)."""
+    with TestClient(server.app) as client:
+        body = client.get("/api/export/manifest?project=does_not_exist").json()
+    assert body["excluded_bypassed"] == 0
+    assert body["items"] == []
+
+
+def test_health_reports_bypass_retention_days(isolated, monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setenv("AF_BYPASS_RETENTION_DAYS", "3")
+    with TestClient(server.app) as client:
+        r = client.get("/api/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["service"] == "asset-factory"
+    assert body["bypass_retention_days"] == 3.0
+
+
+def test_health_default_retention_when_env_unset(isolated, monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.delenv("AF_BYPASS_RETENTION_DAYS", raising=False)
+    with TestClient(server.app) as client:
+        body = client.get("/api/health").json()
+    assert body["bypass_retention_days"] == 7.0
+
+
+def test_approve_from_bypass_candidate_preserves_approval_mode(
+    isolated, tmp_path
+) -> None:  # noqa: ANN001
+    """bypass candidate 가 cherry-pick approve 를 거쳐도 새 asset 이 bypass 격리.
+
+    Regression: 이전에 approve_from_candidate 가 candidate.approval_mode 를 무시
+    해 새 asset 이 default 'manual' 로 떨어졌었다 → 일반 list/export 에 leak.
+    """
+    import aiosqlite
+
+    # candidate 파일 + DB 행
+    cand_dir = tmp_path / "candidates" / "tmp_sketch" / "k"
+    cand_dir.mkdir(parents=True)
+    cand_path = cand_dir / "slot_0.png"
+    # 10x10 PNG (validate_asset 가 PIL 로 열어야 하므로 실제 PNG 필요)
+    from PIL import Image
+    Image.new("RGBA", (10, 10), (200, 50, 50, 255)).save(cand_path)
+
+    async def _seed() -> int:
+        async with aiosqlite.connect(isolated.db_path) as conn:
+            cur = await conn.execute(
+                """INSERT INTO asset_candidates (
+                    project, asset_key, slot_index, job_id, image_path,
+                    width, height, color_count, validation_status, validation_message,
+                    generation_seed, generation_model, generation_prompt, metadata_json,
+                    batch_id, is_rejected, approval_mode, created_at
+                ) VALUES (?, ?, 0, 'job-bp', ?, 10, 10, 16, 'pass', NULL,
+                          NULL, NULL, NULL, NULL, NULL, 0, 'bypass',
+                          '2026-01-01T00:00:00')""",
+                ("tmp_sketch", "k", str(cand_path)),
+            )
+            await conn.commit()
+            return int(cur.lastrowid)
+
+    cand_id = asyncio.run(_seed())
+
+    # path allowlist 우회 (export 테스트와 동일)
+    import server as _server
+    orig = _server._ensure_path_allowed
+    _server._ensure_path_allowed = lambda p: p  # type: ignore[assignment]
+    try:
+        with TestClient(server.app) as client:
+            r = client.post(
+                "/api/assets/approve-from-candidate",
+                json={"candidate_id": cand_id, "set_status": "approved"},
+            )
+        assert r.status_code == 200, r.text
+        # 새 asset 의 approval_mode 가 bypass 인지 검증
+        async def _check() -> str | None:
+            async with aiosqlite.connect(isolated.db_path) as conn:
+                cur = await conn.execute(
+                    "SELECT approval_mode FROM assets WHERE project='tmp_sketch'"
+                )
+                row = await cur.fetchone()
+                return row[0] if row else None
+        approval_mode = asyncio.run(_check())
+        assert approval_mode == "bypass", \
+            f"bypass candidate → asset 의 approval_mode 는 'bypass' 여야 함 (실제: {approval_mode})"
+
+        # default list 에서는 안 보임
+        listing = client.get("/api/projects/tmp_sketch/assets").json()
+        assert listing == [], "bypass asset 은 기본 list 에서 제외돼야 함"
+        listing_with = client.get(
+            "/api/projects/tmp_sketch/assets?include_bypassed=true"
+        ).json()
+        assert len(listing_with) == 1
+    finally:
+        _server._ensure_path_allowed = orig  # type: ignore[assignment]
+
+
+def test_export_excludes_bypass_and_reports_count(isolated, tmp_path) -> None:  # noqa: ANN001
+    """export 는 manual 자산만 복사하고 응답의 excluded_bypassed 로 제외 수 알림."""
+    # 실제 이미지 파일까지 만들어야 export 가 copy2 함
+    import shutil
+
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    manual_img = src_dir / "manual.png"
+    bypass_img = src_dir / "bypass.png"
+    manual_img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 32)
+    bypass_img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"y" * 32)
+
+    import aiosqlite
+
+    async def _seed() -> None:
+        async with aiosqlite.connect(isolated.db_path) as conn:
+            await conn.execute(
+                "INSERT INTO assets (id, job_id, project, asset_key, category, status, "
+                "image_path, width, height, color_count, has_alpha, validation_status, "
+                "approval_mode, created_at, updated_at) VALUES "
+                "('m1', NULL, 'p', 'm1', 'sprite', 'approved', ?, 64, 64, 16, 0, 'pass', "
+                "'manual', '2026-01-01T00:00:00', '2026-01-01T00:00:00')",
+                (str(manual_img),),
+            )
+            await conn.execute(
+                "INSERT INTO assets (id, job_id, project, asset_key, category, status, "
+                "image_path, width, height, color_count, has_alpha, validation_status, "
+                "approval_mode, created_at, updated_at) VALUES "
+                "('b1', NULL, 'p', 'b1', 'sprite', 'approved', ?, 64, 64, 16, 0, 'pass', "
+                "'bypass', '2026-01-01T00:00:00', '2026-01-01T00:00:00')",
+                (str(bypass_img),),
+            )
+            await conn.commit()
+
+    asyncio.run(_seed())
+
+    out_dir = tmp_path / "out"
+    # _ensure_path_allowed 가 임의 경로를 거부할 수 있어 server 의 allowlist 우회
+    import server as _server
+    _server.ALLOWED_OUTPUT_ROOTS = (tmp_path,)  # type: ignore[attr-defined]
+    monkey_target = getattr(_server, "_ensure_path_allowed", None)
+    if monkey_target is not None:
+        # 이미 monkeypatch 안 했지만 fixture 가 처리 — 여기선 직접 우회
+        _server._ensure_path_allowed = lambda p: p  # type: ignore[assignment]
+
+    try:
+        with TestClient(server.app) as client:
+            r = client.post("/api/export", json={
+                "project": "p",
+                "category": None,
+                "since": None,
+                "output_dir": str(out_dir),
+                "save_manifest": True,
+            })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["exported_count"] == 1            # manual 만
+        assert body["excluded_bypassed"] == 1
+        # manifest 에도 bypass 빠짐
+        manifest = json.loads(Path(body["manifest_path"]).read_text())
+        keys = {item["asset_key"] for item in manifest["items"]}
+        assert keys == {"m1"}
+    finally:
+        if monkey_target is not None:
+            _server._ensure_path_allowed = monkey_target  # type: ignore[assignment]
