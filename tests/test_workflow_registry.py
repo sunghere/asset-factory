@@ -15,11 +15,13 @@ from pathlib import Path
 import pytest
 
 from workflow_registry import (
+    InputLabelSpec,
     OutputSpec,
     VariantSpec,
     WorkflowRegistry,
     WorkflowRegistryError,
     get_default_registry,
+    infer_input_labels,
 )
 
 
@@ -524,6 +526,186 @@ categories:
     # 위 호출에서 b 는 cached singleton
     assert isinstance(a, WorkflowRegistry)
     assert isinstance(b, WorkflowRegistry)
+
+
+# ----------------------------------------------------------------------------
+# input_labels — 워크플로우 JSON 자동 추론 + YAML override
+# ----------------------------------------------------------------------------
+
+
+def _workflow_with_load_images(*titles_and_defaults: tuple[str, str]) -> dict:
+    """LoadImage 노드들을 가진 워크플로우 JSON 픽스처 생성.
+
+    각 인자는 (title, image_filename). class_type=LoadImage 로 고정.
+    """
+    wf: dict = {}
+    for idx, (title, image) in enumerate(titles_and_defaults, start=1):
+        wf[str(idx)] = {
+            "class_type": "LoadImage",
+            "_meta": {"title": title},
+            "inputs": {"image": image},
+        }
+    # KSampler 한 개도 같이 — LoadImage 만 있는 게 아니라는 사실 확인용
+    wf[str(len(titles_and_defaults) + 1)] = {
+        "class_type": "KSampler",
+        "_meta": {"title": "KSampler"},
+        "inputs": {"seed": 0},
+    }
+    return wf
+
+
+def test_infer_input_labels_from_workflow_json() -> None:
+    wf = _workflow_with_load_images(
+        ("Pose grid (ControlNet input)", "pose_grid.png"),
+        ("Load source image", "source.png"),
+        ("Some unrelated LoadImage", "other.png"),  # 매칭 안 됨 → 무시
+    )
+    labels = infer_input_labels(wf)
+    by_label = {il.label: il for il in labels}
+    assert set(by_label.keys()) == {"pose_image", "source_image"}
+    assert by_label["pose_image"].default == "pose_grid.png"
+    assert by_label["source_image"].default == "source.png"
+    assert by_label["pose_image"].required is False
+    assert by_label["pose_image"].description == ""
+
+
+def test_input_labels_inferred_at_load(tmp_path: Path) -> None:
+    payload = _workflow_with_load_images(
+        ("Pose grid (mini 1280x640)", "pose_grid.png"),
+    )
+    _write_workflow(tmp_path, "sprite/v.json", payload)
+    _write_manifest(
+        tmp_path,
+        """
+version: 1
+categories:
+  sprite:
+    variants:
+      v:
+        file: sprite/v.json
+        outputs:
+          - { node_title: "Save", label: out, primary: true }
+""",
+    )
+    reg = WorkflowRegistry(root=tmp_path)
+    v = reg.variant("sprite", "v")
+    assert len(v.input_labels) == 1
+    il = v.input_labels[0]
+    assert il.label == "pose_image"
+    assert il.default == "pose_grid.png"
+    assert il.description == ""
+
+
+def test_yaml_overrides_inferred_metadata(tmp_path: Path) -> None:
+    payload = _workflow_with_load_images(
+        ("Pose grid (ControlNet input)", "pose_grid.png"),
+    )
+    _write_workflow(tmp_path, "sprite/v.json", payload)
+    _write_manifest(
+        tmp_path,
+        """
+version: 1
+categories:
+  sprite:
+    variants:
+      v:
+        file: sprite/v.json
+        outputs:
+          - { node_title: "Save", label: out, primary: true }
+        input_labels:
+          - label: pose_image
+            description: "Pose grid (ControlNet OpenPose 입력)"
+            required: true
+""",
+    )
+    reg = WorkflowRegistry(root=tmp_path)
+    v = reg.variant("sprite", "v")
+    il = {x.label: x for x in v.input_labels}["pose_image"]
+    assert il.description == "Pose grid (ControlNet OpenPose 입력)"
+    assert il.required is True
+    # default 는 YAML 미지정 → 추론값 유지
+    assert il.default == "pose_grid.png"
+
+
+def test_yaml_label_not_in_workflow_raises(tmp_path: Path) -> None:
+    payload = _workflow_with_load_images(
+        ("Pose grid", "pose_grid.png"),
+    )
+    _write_workflow(tmp_path, "sprite/v.json", payload)
+    _write_manifest(
+        tmp_path,
+        """
+version: 1
+categories:
+  sprite:
+    variants:
+      v:
+        file: sprite/v.json
+        outputs:
+          - { node_title: "Save", label: out, primary: true }
+        input_labels:
+          - label: nonexistent_label
+            description: "should fail"
+""",
+    )
+    with pytest.raises(WorkflowRegistryError, match="unknown label"):
+        WorkflowRegistry(root=tmp_path)
+
+
+def test_catalog_emits_input_labels(tmp_path: Path) -> None:
+    payload = _workflow_with_load_images(
+        ("Pose grid", "default_pose.png"),
+    )
+    _write_workflow(tmp_path, "sprite/v.json", payload)
+    _write_manifest(
+        tmp_path,
+        """
+version: 1
+categories:
+  sprite:
+    variants:
+      v:
+        file: sprite/v.json
+        outputs:
+          - { node_title: "Save", label: out, primary: true }
+""",
+    )
+    reg = WorkflowRegistry(root=tmp_path)
+    cat = reg.to_catalog()
+    v = cat["categories"]["sprite"]["variants"]["v"]
+    assert v["input_labels"] == [
+        {
+            "label": "pose_image",
+            "required": False,
+            "default": "default_pose.png",
+            "description": "",
+        }
+    ]
+
+
+def test_input_labels_empty_when_no_load_image_nodes(tmp_path: Path) -> None:
+    """LoadImage 노드 없는 변형은 빈 input_labels."""
+    _write_workflow(
+        tmp_path,
+        "sprite/v.json",
+        {"3": {"class_type": "KSampler", "inputs": {"seed": 0}}},
+    )
+    _write_manifest(
+        tmp_path,
+        """
+version: 1
+categories:
+  sprite:
+    variants:
+      v:
+        file: sprite/v.json
+        outputs:
+          - { node_title: "Save", label: out, primary: true }
+""",
+    )
+    reg = WorkflowRegistry(root=tmp_path)
+    v = reg.variant("sprite", "v")
+    assert v.input_labels == ()
 
 
 def test_variant_spec_immutable(tmp_path: Path) -> None:
