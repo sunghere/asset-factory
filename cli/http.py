@@ -34,12 +34,23 @@ def _auth_headers() -> dict[str, str]:
 
 
 def _format_error(resp: httpx.Response) -> str:
-    """HTTP 에러 응답을 한 줄 메시지로."""
+    """HTTP 에러 응답을 한 줄 메시지로.
+
+    FastAPI 422 의 detail 은 ``[{"loc": [...], "msg": "...", "type": "..."}]``
+    꼴이라 그대로 출력하면 길고 읽기 힘들다. list 면 첫 항목의 ``msg`` (있으면)
+    + 항목 수만 노출.
+    """
     try:
         body = resp.json()
-        detail = body.get("detail") if isinstance(body, dict) else body
     except ValueError:
-        detail = resp.text[:200]
+        return f"HTTP {resp.status_code}: {resp.text[:200]}"
+
+    detail: Any = body.get("detail") if isinstance(body, dict) else body
+    if isinstance(detail, list) and detail:
+        first = detail[0]
+        if isinstance(first, dict) and "msg" in first:
+            extra = f" (+{len(detail) - 1} more)" if len(detail) > 1 else ""
+            return f"HTTP {resp.status_code}: {first['msg']}{extra}"
     return f"HTTP {resp.status_code}: {detail}"
 
 
@@ -106,4 +117,4 @@ def get_bytes(path: str, *, params: dict[str, Any] | None = None, timeout: float
     return resp.content
 
 
-__all__ = ["request", "get_bytes", "get_api_key", "get_base_url", "DEFAULT_BASE_URL", "sys"]
+__all__ = ["request", "get_bytes", "get_api_key", "get_base_url", "DEFAULT_BASE_URL"]

@@ -504,6 +504,76 @@ def test_health_default_retention_when_env_unset(isolated, monkeypatch) -> None:
     assert body["bypass_retention_days"] == 7.0
 
 
+def test_approve_from_bypass_candidate_preserves_approval_mode(
+    isolated, tmp_path
+) -> None:  # noqa: ANN001
+    """bypass candidate 가 cherry-pick approve 를 거쳐도 새 asset 이 bypass 격리.
+
+    Regression: 이전에 approve_from_candidate 가 candidate.approval_mode 를 무시
+    해 새 asset 이 default 'manual' 로 떨어졌었다 → 일반 list/export 에 leak.
+    """
+    import aiosqlite
+
+    # candidate 파일 + DB 행
+    cand_dir = tmp_path / "candidates" / "tmp_sketch" / "k"
+    cand_dir.mkdir(parents=True)
+    cand_path = cand_dir / "slot_0.png"
+    # 10x10 PNG (validate_asset 가 PIL 로 열어야 하므로 실제 PNG 필요)
+    from PIL import Image
+    Image.new("RGBA", (10, 10), (200, 50, 50, 255)).save(cand_path)
+
+    async def _seed() -> int:
+        async with aiosqlite.connect(isolated.db_path) as conn:
+            cur = await conn.execute(
+                """INSERT INTO asset_candidates (
+                    project, asset_key, slot_index, job_id, image_path,
+                    width, height, color_count, validation_status, validation_message,
+                    generation_seed, generation_model, generation_prompt, metadata_json,
+                    batch_id, is_rejected, approval_mode, created_at
+                ) VALUES (?, ?, 0, 'job-bp', ?, 10, 10, 16, 'pass', NULL,
+                          NULL, NULL, NULL, NULL, NULL, 0, 'bypass',
+                          '2026-01-01T00:00:00')""",
+                ("tmp_sketch", "k", str(cand_path)),
+            )
+            await conn.commit()
+            return int(cur.lastrowid)
+
+    cand_id = asyncio.run(_seed())
+
+    # path allowlist 우회 (export 테스트와 동일)
+    import server as _server
+    orig = _server._ensure_path_allowed
+    _server._ensure_path_allowed = lambda p: p  # type: ignore[assignment]
+    try:
+        with TestClient(server.app) as client:
+            r = client.post(
+                "/api/assets/approve-from-candidate",
+                json={"candidate_id": cand_id, "set_status": "approved"},
+            )
+        assert r.status_code == 200, r.text
+        # 새 asset 의 approval_mode 가 bypass 인지 검증
+        async def _check() -> str | None:
+            async with aiosqlite.connect(isolated.db_path) as conn:
+                cur = await conn.execute(
+                    "SELECT approval_mode FROM assets WHERE project='tmp_sketch'"
+                )
+                row = await cur.fetchone()
+                return row[0] if row else None
+        approval_mode = asyncio.run(_check())
+        assert approval_mode == "bypass", \
+            f"bypass candidate → asset 의 approval_mode 는 'bypass' 여야 함 (실제: {approval_mode})"
+
+        # default list 에서는 안 보임
+        listing = client.get("/api/projects/tmp_sketch/assets").json()
+        assert listing == [], "bypass asset 은 기본 list 에서 제외돼야 함"
+        listing_with = client.get(
+            "/api/projects/tmp_sketch/assets?include_bypassed=true"
+        ).json()
+        assert len(listing_with) == 1
+    finally:
+        _server._ensure_path_allowed = orig  # type: ignore[assignment]
+
+
 def test_export_excludes_bypass_and_reports_count(isolated, tmp_path) -> None:  # noqa: ANN001
     """export 는 manual 자산만 복사하고 응답의 excluded_bypassed 로 제외 수 알림."""
     # 실제 이미지 파일까지 만들어야 export 가 copy2 함

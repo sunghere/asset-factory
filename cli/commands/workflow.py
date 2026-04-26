@@ -244,7 +244,6 @@ def _resolve_input_value(value: str) -> str:
     return value  # plain — ComfyUI 가 이미 알고 있는 입력 이름.
 
 
-_HEX_RE = re.compile(r"^[0-9a-f]{32,}$", re.IGNORECASE)
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
     re.IGNORECASE,
@@ -252,7 +251,12 @@ _UUID_RE = re.compile(
 
 
 def _looks_like_asset_id(value: str) -> bool:
-    return bool(_UUID_RE.match(value) or _HEX_RE.match(value))
+    """UUID 만 자동으로 from-asset 으로 라우팅. 비-UUID asset id 는 명시적
+    ``asset:<id>`` prefix 를 강제 — 32자 이상의 hex 파일명 (예: sha256 해시
+    네이밍된 ComfyUI 입력) 이 false positive 로 from-asset 호출 → 404 가
+    되는 걸 막는다.
+    """
+    return bool(_UUID_RE.match(value))
 
 
 _CONTENT_TYPES = {
@@ -268,14 +272,24 @@ def _guess_content_type(path: Path) -> str:
     return _CONTENT_TYPES.get(path.suffix.lower(), "application/octet-stream")
 
 
+_TERMINAL_JOB_STATUSES = frozenset({"completed", "completed_with_errors"})
+
+
 def _poll_job(job_id: str, *, timeout_seconds: float, interval: float = 1.5) -> dict[str, Any]:
-    """``GET /api/jobs/{id}`` 폴링. 완료/실패 시 응답 그대로 반환, 타임아웃이면 raise."""
+    """``GET /api/jobs/{id}`` 폴링. 완료 시 응답 그대로 반환, 타임아웃이면 raise.
+
+    서버가 emit 하는 job-level status (``models.refresh_job_status``):
+    - ``queued``                 — 모든 task 가 미시작.
+    - ``running``                — 일부 task active.
+    - ``completed``              — 모든 task done, failed_count == 0.
+    - ``completed_with_errors``  — 모든 task 종료, 일부 failed.
+    """
     deadline = time.time() + timeout_seconds
     last: dict[str, Any] = {}
     while time.time() < deadline:
         last = request("GET", f"/api/jobs/{job_id}")
         status = last.get("status")
-        if status in ("done", "completed", "failed", "error"):
+        if status in _TERMINAL_JOB_STATUSES:
             return last
         time.sleep(interval)
     typer.echo(

@@ -322,6 +322,157 @@ def test_gen_target_must_be_category_slash_variant(
 # ----------------------------------------------------------------------------
 
 
+# ----------------------------------------------------------------------------
+# 32자 hex 파일명은 asset 이 아니라 plain 입력으로 처리 (리뷰 fix M1)
+# ----------------------------------------------------------------------------
+
+
+def test_gen_input_long_hex_filename_is_plain_string(
+    runner: CliRunner, base_url: str
+) -> None:
+    """sha256-style 64-char hex 파일명을 ComfyUI input 이름으로 plain 사용.
+
+    이전에는 32자 이상 hex 가 _looks_like_asset_id true → from-asset 호출 →
+    404 로 깨졌다. UUID-only 로 좁힌 fix 가 회귀하지 않게 방어.
+    """
+    plain_name = "a" * 64  # extension-less hex blob (해시 네이밍)
+    with respx.mock(base_url=base_url, assert_all_called=False) as mock:
+        mock.get("/api/workflows/catalog").mock(
+            return_value=httpx.Response(200, json=_catalog_body())
+        )
+        from_asset = mock.post("/api/workflows/inputs/from-asset").mock(
+            return_value=httpx.Response(404, json={"detail": "should not be called"})
+        )
+        gen_route = mock.post("/api/workflows/generate").mock(
+            return_value=httpx.Response(200, json={"job_id": "job-3"})
+        )
+        result = runner.invoke(
+            app,
+            [
+                "workflow", "gen", "sprite/v", "p", "k", "x",
+                "--input", f"pose_image={plain_name}",
+            ],
+        )
+    assert result.exit_code == 0, _err_text(result)
+    assert not from_asset.called, "64자 hex 파일명은 from-asset 호출되면 안 됨"
+    body = json.loads(gen_route.calls.last.request.content)
+    assert body["workflow_params"]["load_images"]["pose_image"] == plain_name
+
+
+def test_gen_input_explicit_asset_prefix_for_non_uuid(
+    runner: CliRunner, base_url: str
+) -> None:
+    """비-UUID asset id 는 'asset:<id>' prefix 로 명시적 라우팅."""
+    short_id = "asset123"
+    with respx.mock(base_url=base_url) as mock:
+        mock.get("/api/workflows/catalog").mock(
+            return_value=httpx.Response(200, json=_catalog_body())
+        )
+        from_asset = mock.post("/api/workflows/inputs/from-asset").mock(
+            return_value=httpx.Response(200, json={"name": "uploaded.png"})
+        )
+        mock.post("/api/workflows/generate").mock(
+            return_value=httpx.Response(200, json={"job_id": "job-4"})
+        )
+        result = runner.invoke(
+            app,
+            [
+                "workflow", "gen", "sprite/v", "p", "k", "x",
+                "--input", f"pose_image=asset:{short_id}",
+            ],
+        )
+    assert result.exit_code == 0, _err_text(result)
+    body = json.loads(from_asset.calls.last.request.content)
+    assert body["asset_id"] == short_id
+
+
+# ----------------------------------------------------------------------------
+# --wait 폴링 (리뷰 fix C1)
+# ----------------------------------------------------------------------------
+
+
+def test_wait_recognizes_completed_status(runner: CliRunner, base_url: str) -> None:
+    with respx.mock(base_url=base_url) as mock:
+        mock.get("/api/workflows/catalog").mock(
+            return_value=httpx.Response(200, json=_catalog_body())
+        )
+        mock.post("/api/workflows/generate").mock(
+            return_value=httpx.Response(200, json={"job_id": "job-w1"})
+        )
+        # 첫 폴링은 running, 둘째는 completed
+        mock.get("/api/jobs/job-w1").mock(
+            side_effect=[
+                httpx.Response(200, json={"status": "running"}),
+                httpx.Response(200, json={"status": "completed", "completed_count": 1}),
+            ]
+        )
+        # interval 짧게 (테스트 빠르게)
+        import cli.commands.workflow as wf_mod
+        result = runner.invoke(
+            app,
+            ["workflow", "gen", "sprite/v", "p", "k", "x", "--wait",
+             "--wait-timeout", "5"],
+            obj=None,
+        )
+    # interval 의 sleep 때문에 살짝 지연 — exit 코드만 검증
+    assert result.exit_code == 0, _err_text(result)
+
+
+def test_wait_recognizes_completed_with_errors_status(
+    runner: CliRunner, base_url: str
+) -> None:
+    """job 이 일부 task 실패해 'completed_with_errors' 로 끝나도 CLI 는 정상 종료."""
+    with respx.mock(base_url=base_url) as mock:
+        mock.get("/api/workflows/catalog").mock(
+            return_value=httpx.Response(200, json=_catalog_body())
+        )
+        mock.post("/api/workflows/generate").mock(
+            return_value=httpx.Response(200, json={"job_id": "job-w2"})
+        )
+        mock.get("/api/jobs/job-w2").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "status": "completed_with_errors",
+                    "completed_count": 1,
+                    "failed_count": 1,
+                },
+            )
+        )
+        result = runner.invoke(
+            app,
+            ["workflow", "gen", "sprite/v", "p", "k", "x", "--wait",
+             "--wait-timeout", "5"],
+        )
+    assert result.exit_code == 0, _err_text(result)
+    out = json.loads(result.stdout)
+    assert out["status"] == "completed_with_errors"
+
+
+# ----------------------------------------------------------------------------
+# 422 detail 친절 렌더링 (리뷰 NIT)
+# ----------------------------------------------------------------------------
+
+
+def test_422_detail_list_renders_first_msg(runner: CliRunner, base_url: str) -> None:
+    """FastAPI validation 에러는 list-of-dict — 첫 msg 만 깔끔하게 보이게."""
+    with respx.mock(base_url=base_url) as mock:
+        mock.get("/api/workflows/catalog").mock(
+            return_value=httpx.Response(
+                422,
+                json={"detail": [
+                    {"loc": ["body", "x"], "msg": "field required", "type": "missing"},
+                    {"loc": ["body", "y"], "msg": "value error", "type": "value"},
+                ]},
+            )
+        )
+        result = runner.invoke(app, ["workflow", "catalog"])
+    assert result.exit_code == 1
+    err = _err_text(result)
+    assert "field required" in err
+    assert "+1 more" in err  # 추가 항목 수 노출
+
+
 def test_http_error_surfaces_detail(runner: CliRunner, base_url: str) -> None:
     with respx.mock(base_url=base_url) as mock:
         mock.get("/api/workflows/catalog").mock(

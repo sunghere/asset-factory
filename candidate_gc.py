@@ -51,6 +51,34 @@ def _load_bypass_candidate_paths(data_root: Path) -> set[str]:
         return set()
 
 
+def _delete_candidate_rows(data_root: Path, image_paths: list[str]) -> int:
+    """``asset_candidates.image_path IN (...)`` 행을 삭제. 삭제된 행 수 반환.
+
+    bypass GC 가 파일을 unlink 한 직후 호출 — DB 의 dangling 행 (file 없는데
+    asset_candidates 에 남아 image fetch 가 FS 에러내는 케이스) 을 막는다.
+    DB/컬럼 누락 환경은 silent skip (GC 자체는 계속 동작).
+    """
+    if not image_paths:
+        return 0
+    db_path = data_root / "asset-factory.db"
+    if not db_path.exists():
+        return 0
+    try:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            placeholders = ",".join("?" * len(image_paths))
+            cursor = conn.execute(
+                f"DELETE FROM asset_candidates WHERE image_path IN ({placeholders})",
+                image_paths,
+            )
+            conn.commit()
+            return cursor.rowcount or 0
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return 0
+
+
 def get_bypass_retention_days() -> float:
     """Bypass candidate 보관 일수. ``AF_BYPASS_RETENTION_DAYS`` env (기본 7)."""
     return float(os.getenv("AF_BYPASS_RETENTION_DAYS", "7"))
@@ -125,28 +153,38 @@ def run_gc_candidates(
             continue
         files.append((path, st.st_mtime, st.st_size))
 
-    # 2) bypass 후보 — bypass 전용 보관일로 별도 처리
-    bypass_resolved: set[str] = set()
+    # 2) bypass 후보 — bypass 전용 보관일로 별도 처리.
+    # 파일을 unlink 한 직후 같은 image_path 의 asset_candidates 행을 삭제해
+    # dangling DB 참조 (file 없는데 row 남아 이미지 fetch 가 FS 에러내는 케이스)
+    # 를 차단한다.
+    bypass_resolved_to_raw: dict[str, str] = {}
     for raw in bypass_paths:
         try:
-            bypass_resolved.add(str(Path(raw).resolve()))
+            bypass_resolved_to_raw[str(Path(raw).resolve())] = raw
         except OSError:
             continue
+    deleted_bypass_paths: list[str] = []
     if bypass_max_age_seconds > 0:
         for path, mtime, size in files:
             try:
                 resolved_str = str(path.resolve())
             except OSError:
                 continue
-            if resolved_str not in bypass_resolved:
+            if resolved_str not in bypass_resolved_to_raw:
                 continue
             if now - mtime > bypass_max_age_seconds:
                 try:
                     path.unlink()
                     deleted_files += 1
                     freed_bytes += size
+                    deleted_bypass_paths.append(bypass_resolved_to_raw[resolved_str])
                 except OSError:
                     pass
+    if deleted_bypass_paths:
+        _delete_candidate_rows(data_root, deleted_bypass_paths)
+    # bypass_resolved 별칭 — 이후 단계 ((3) 일반 retention) 에서도 bypass 패스
+    # 는 건너뛰게 유지.
+    bypass_resolved = set(bypass_resolved_to_raw.keys())
 
     # 3) 일반 (non-bypass) 후보 — CANDIDATE_GC_MAX_AGE_DAYS 적용
     if max_age_seconds > 0:

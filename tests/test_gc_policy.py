@@ -180,6 +180,54 @@ def test_gc_bypass_uses_short_retention(tmp_path: Path) -> None:
     assert manual_old.exists() is True, "manual 은 manual cutoff 적용 → 보존"
 
 
+def test_gc_bypass_also_deletes_dangling_db_rows(tmp_path: Path) -> None:
+    """bypass GC 가 파일 unlink 후 asset_candidates 행도 삭제 (dangling 방지)."""
+    root = tmp_path / "data"
+    cand = root / "candidates"
+    cand.mkdir(parents=True)
+    bypass_old = cand / "bypass_old.png"
+    bypass_old.write_bytes(b"a")
+    now = time.time()
+    os.utime(bypass_old, (now - 5 * 86400, now - 5 * 86400))
+
+    _seed_candidates_table(
+        root / "asset-factory.db",
+        [(str(bypass_old), "bypass")],
+    )
+
+    run_gc_candidates(
+        root,
+        max_age_seconds=30 * 86400,
+        bypass_max_age_seconds=86400,
+        max_total_bytes=0,
+    )
+
+    assert bypass_old.exists() is False
+    # DB 행도 삭제됐는지 확인
+    conn = sqlite3.connect(root / "asset-factory.db")
+    try:
+        cur = conn.execute("SELECT COUNT(*) FROM asset_candidates")
+        count = cur.fetchone()[0]
+    finally:
+        conn.close()
+    assert count == 0, "bypass GC 후 asset_candidates 행도 삭제돼야 함"
+
+
+def test_gc_bypass_db_cleanup_handles_missing_db_gracefully(tmp_path: Path) -> None:
+    """DB 없는 환경 (data_root 만 존재) — silent skip, GC 자체는 동작."""
+    root = tmp_path / "data"
+    cand = root / "candidates"
+    cand.mkdir(parents=True)
+    f = cand / "x.png"
+    f.write_bytes(b"x")
+    now = time.time()
+    os.utime(f, (now - 100 * 86400, now - 100 * 86400))
+
+    # DB 미존재
+    result = run_gc_candidates(root, max_age_seconds=86400, max_total_bytes=0)
+    assert result["deleted_files"] == 1
+
+
 def test_get_bypass_retention_days_default(monkeypatch) -> None:  # noqa: ANN001
     monkeypatch.delenv("AF_BYPASS_RETENTION_DAYS", raising=False)
     assert get_bypass_retention_days() == 7.0

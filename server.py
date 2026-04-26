@@ -894,6 +894,7 @@ async def handle_task(task: dict[str, Any]) -> None:
                         "generation_model": outcome.model,
                         "generation_prompt": task["prompt"],
                         "metadata_json": metadata_json,
+                        "approval_mode": task.get("approval_mode") or "manual",
                     },
                 )
             else:
@@ -2030,6 +2031,9 @@ async def approve_from_candidate(body: ApproveFromCandidateRequest) -> dict[str,
     )
 
     metadata_out = candidate.get("metadata_json") or json.dumps(meta, ensure_ascii=False)
+    # candidate 의 approval_mode 를 새 asset 으로 전파 — bypass candidate 가
+    # 사람 cherry-pick 으로 promote 돼도 자산은 여전히 bypass 격리 유지.
+    candidate_approval_mode = candidate.get("approval_mode") or "manual"
 
     existing = await db.get_asset_by_key(project, asset_key)
     if existing:
@@ -2047,6 +2051,7 @@ async def approve_from_candidate(body: ApproveFromCandidateRequest) -> dict[str,
             generation_model=candidate.get("generation_model"),
             generation_prompt=candidate.get("generation_prompt"),
             metadata_json=metadata_out,
+            approval_mode=candidate_approval_mode,
         )
         if not ok:
             raise HTTPException(status_code=500, detail="에셋 갱신에 실패했습니다.")
@@ -2076,6 +2081,7 @@ async def approve_from_candidate(body: ApproveFromCandidateRequest) -> dict[str,
             generation_model=candidate.get("generation_model"),
             generation_prompt=candidate.get("generation_prompt"),
             metadata_json=metadata_out,
+            approval_mode=candidate_approval_mode,
         )
     if body.set_status != "pending":
         await db.update_asset_status(asset_id=asset_id, status=body.set_status)

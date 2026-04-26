@@ -1794,6 +1794,7 @@ class Database:
         generation_model: str | None,
         generation_prompt: str | None,
         metadata_json: str | None,
+        approval_mode: str | None = None,
     ) -> bool:
         """첫 승인 시 ``upsert_scanned_asset`` 이 비워둔 generation_* 필드를 채운다.
 
@@ -1801,6 +1802,10 @@ class Database:
         (이전 primary가 없는 신규 asset 이라 history에 남길 게 없음).
         ``POST /api/assets/{id}/regenerate`` 같은 후속 기능이 이 정보를 그대로
         쓰기 위해 필요.
+
+        ``approval_mode`` 는 None 이면 기존 값 유지, 주어지면 덮어씀
+        (cherry-pick 으로 bypass candidate 가 promote 된 케이스에서 'bypass'
+        flag 가 새 asset 에 따라가게 한다).
         """
         now = utc_now()
         async with aiosqlite.connect(self.db_path) as conn:
@@ -1811,6 +1816,7 @@ class Database:
                     generation_model=?,
                     generation_prompt=?,
                     metadata_json=?,
+                    approval_mode=COALESCE(?, approval_mode),
                     updated_at=?
                 WHERE id=?
                 """,
@@ -1819,6 +1825,7 @@ class Database:
                     generation_model,
                     generation_prompt,
                     metadata_json,
+                    approval_mode,
                     now,
                     asset_id,
                 ),
@@ -1841,6 +1848,7 @@ class Database:
         generation_model: str | None,
         generation_prompt: str | None,
         metadata_json: str | None,
+        approval_mode: str | None = None,
     ) -> bool:
         """후보 선택 등으로 메인 에셋 파일을 교체한다(이전 내용은 asset_history에 남김)."""
         now = utc_now()
@@ -1885,6 +1893,7 @@ class Database:
                     now,
                 ),
             )
+            # approval_mode 가 None 이면 기존 값 유지 (CASE WHEN), 주어지면 덮어씀.
             await conn.execute(
                 """
                 UPDATE assets SET
@@ -1899,6 +1908,7 @@ class Database:
                     generation_model=?,
                     generation_prompt=?,
                     metadata_json=?,
+                    approval_mode=COALESCE(?, approval_mode),
                     updated_at=?
                 WHERE id=?
                 """,
@@ -1914,6 +1924,7 @@ class Database:
                     generation_model,
                     generation_prompt,
                     metadata_json,
+                    approval_mode,
                     now,
                     asset_id,
                 ),
