@@ -265,6 +265,95 @@ def test_pose_extract_load_image_not_patched() -> None:
 
 
 # ----------------------------------------------------------------------------
+# load_images dispatch (generic LoadImage 채널)
+# ----------------------------------------------------------------------------
+
+
+def test_load_images_source_image_applies_to_pose_extract() -> None:
+    """load_images={'source_image': 'x.png'} → PoseExtract 의 'Load source image' LoadImage 매칭."""
+    wf = _pose_extract_like()
+    patched, report = patch_workflow(wf, load_images={"source_image": "user_char.png"})
+    assert patched["2"]["inputs"]["image"] == "user_char.png"
+    assert "source_image" in report.applied
+    assert report.applied["source_image"] == ["2"]
+
+
+def test_load_images_pose_image_via_dict_works_same_as_kwarg() -> None:
+    """``load_images={'pose_image': 'x.png'}`` → 기존 ``pose_image='x.png'`` 와 동등."""
+    wf = _v38_like()
+    patched, report = patch_workflow(wf, load_images={"pose_image": "via_dict.png"})
+    assert patched["7"]["inputs"]["image"] == "via_dict.png"
+    assert "pose_image" in report.applied
+
+
+def test_load_images_unknown_label_recorded_in_skipped() -> None:
+    """미등록 라벨 (mask/reference 등) → silent skip + report.skipped."""
+    wf = _v38_like()
+    patched, report = patch_workflow(
+        wf, load_images={"mask_image": "m.png", "unknown": "u.png"}
+    )
+    # 미등록 라벨 둘 다 skipped
+    assert "mask_image" in report.skipped
+    assert "unknown" in report.skipped
+    # 적용된 게 없음
+    assert "mask_image" not in report.applied
+    assert "unknown" not in report.applied
+    # 워크플로우는 변경 없어야
+    assert patched["7"]["inputs"]["image"] == wf["7"]["inputs"]["image"]
+
+
+def test_load_images_dict_wins_over_pose_image_kwarg_alias() -> None:
+    """둘 다 주면 dict 우선 (PLAN §5 결정 사항). backward-compat 의 함정 방지."""
+    wf = _v38_like()
+    patched, _ = patch_workflow(
+        wf,
+        pose_image="OLD_VALUE.png",
+        load_images={"pose_image": "NEW_VALUE.png"},
+    )
+    assert patched["7"]["inputs"]["image"] == "NEW_VALUE.png"
+
+
+def test_load_images_two_labels_apply_to_separate_nodes() -> None:
+    """pose_image (V38 LoadImage) + source_image (PoseExtract LoadImage) 동시 — 둘 다 매칭."""
+    wf = {
+        # V38 의 pose grid LoadImage
+        "7": {
+            "class_type": "LoadImage",
+            "inputs": {"image": "default_grid.png"},
+            "_meta": {"title": "Pose grid (ControlNet input)"},
+        },
+        # PoseExtract 의 source LoadImage
+        "20": {
+            "class_type": "LoadImage",
+            "inputs": {"image": "your_image.png"},
+            "_meta": {"title": "Load source image"},
+        },
+    }
+    patched, report = patch_workflow(
+        wf,
+        load_images={
+            "pose_image": "grid_v2.png",
+            "source_image": "user_char.png",
+        },
+    )
+    assert patched["7"]["inputs"]["image"] == "grid_v2.png"
+    assert patched["20"]["inputs"]["image"] == "user_char.png"
+    assert report.applied["pose_image"] == ["7"]
+    assert report.applied["source_image"] == ["20"]
+    assert report.skipped == []
+
+
+def test_load_images_skip_when_no_matching_loadimage_node() -> None:
+    """V36 Pro (LoadImage 없음) 에 source_image dispatch → silent skip."""
+    wf = _v36_pro_like()
+    patched, report = patch_workflow(wf, load_images={"source_image": "x.png"})
+    # 아무 노드도 안 변경
+    for node in patched.values():
+        assert node.get("class_type") != "LoadImage"  # sanity
+    assert "source_image" in report.skipped
+
+
+# ----------------------------------------------------------------------------
 # 원본 보존 (deep copy)
 # ----------------------------------------------------------------------------
 

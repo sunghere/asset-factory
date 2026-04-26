@@ -288,6 +288,81 @@ class ComfyUIClient:
         # unreachable
         raise SDError("fetch_image 실패 (논리 오류)", code="unreachable") from last_err
 
+    # ---- input upload ----------------------------------------------------
+
+    async def upload_input_image(
+        self,
+        image_bytes: bytes,
+        filename: str,
+        subfolder: str = "asset-factory",
+        overwrite: bool = True,
+    ) -> dict[str, str]:
+        """multipart/form-data 로 ComfyUI ``/upload/image`` POST.
+
+        ComfyUI 가 존재하지 않는 ``subfolder`` 는 자동 mkdir 한다 (실측 확인됨,
+        2026-04-26). LoadImage 노드는 응답의 ``subfolder/name`` 으로 참조한다.
+
+        Args:
+            image_bytes: PNG/JPEG/WEBP raw bytes (호출자가 검증 후 전달)
+            filename: ``input/<subfolder>/`` 안에 저장될 이름. 호출자가
+                ``server._safe_input_filename`` 등으로 안전화 후 전달
+            subfolder: ``input/`` 아래 서브디렉토리. 호출자가
+                ``server._safe_subfolder`` 로 검증 후 전달
+            overwrite: 동일 이름 충돌 시 덮어쓰기 (false 면 ComfyUI 가
+                ``(1).png`` suffix 자동 부여)
+
+        Returns:
+            ``{"name": "...", "subfolder": "...", "type": "input"}`` —
+            응답의 ``name`` 을 ``patch_workflow`` 의 ``load_images`` 에 사용.
+
+        Raises:
+            SDError: HTTP 4xx/5xx → ``sd_client_error``/``sd_server_error``,
+                ``asyncio.TimeoutError`` → ``timeout``,
+                ``aiohttp.ClientError`` → ``unreachable``.
+        """
+        url = f"{self.base_url}/upload/image"
+        last_err: BaseException | None = None
+        backoff = 1.0
+        for attempt in range(1, self.retries + 1):
+            try:
+                # FormData 는 단일 use 이라 매 시도마다 새로 만들어야 한다 —
+                # 재시도 시 첫 번째 요청에서 stream 이 소진되면 두 번째가 빈 body
+                # 로 나가는 회귀를 막는다.
+                form = aiohttp.FormData()
+                form.add_field(
+                    "image",
+                    image_bytes,
+                    filename=filename,
+                    content_type="application/octet-stream",
+                )
+                form.add_field("subfolder", subfolder)
+                form.add_field("type", "input")
+                form.add_field("overwrite", "true" if overwrite else "false")
+
+                session = await self._get_session()
+                async with session.post(url, data=form) as resp:
+                    if resp.status >= 400:
+                        body = await resp.text()
+                        raise SDError(
+                            body[:1500] or f"HTTP {resp.status}",
+                            code=_classify_comfy_failure(resp.status, body),
+                            http_status=resp.status,
+                        )
+                    return await resp.json()
+            except SDError:
+                raise
+            except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+                last_err = exc
+                if attempt == self.retries:
+                    code = "timeout" if isinstance(exc, asyncio.TimeoutError) else "unreachable"
+                    raise SDError(
+                        str(exc) or "upload_image failed",
+                        code=code,
+                    ) from exc
+                await asyncio.sleep(backoff)
+                backoff *= 2
+        raise SDError("upload_input_image 실패 (논리 오류)", code="unreachable") from last_err
+
     async def submit_and_wait(
         self,
         api_json: dict[str, Any],

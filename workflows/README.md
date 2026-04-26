@@ -3,6 +3,34 @@
 asset-factory 가 ComfyUI 백엔드로 호출하는 워크플로우 모음. `registry.yml` 이
 카테고리·변형·파일 경로·기본값·출력 라벨을 매핑한다.
 
+> ⚠️ **CLI 미구현 — `af workflow ...` 명령은 아직 없음**
+>
+> 본 문서가 가독성을 위해 사용한 `af workflow catalog` / `af workflow gen` 같은
+> 형태는 **계획된 CLI** 의 의도된 모양이며, 실제 레포에는 아직 구현되어 있지
+> 않다 (`af.mjs` 부재 — 후속 작업,
+> [docs/TODOS.md](../docs/TODOS.md) `cli` 섹션 참조).
+>
+> **현재 사용법: HTTP API 직접 호출.**
+>
+> ```bash
+> # 카탈로그 조회 (인증 불필요)
+> curl http://localhost:8000/api/workflows/catalog | jq
+>
+> # 생성 호출 (X-API-Key 필요)
+> curl -X POST http://localhost:8000/api/workflows/generate \
+>      -H "X-API-Key: $AF_API_KEY" \
+>      -H "Content-Type: application/json" \
+>      -d '{
+>        "workflow_category": "sprite",
+>        "workflow_variant": "pixel_alpha",
+>        "project": "myproj",
+>        "asset_key": "ksh_baby_idle",
+>        "category": "character",
+>        "prompt": "warrior cat",
+>        "candidates_total": 1
+>      }'
+> ```
+
 ## 디렉토리 구조
 
 ```
@@ -115,22 +143,50 @@ cd D:\DEV\asset-factory
 .venv\Scripts\python -m pytest tests\test_workflow_registry.py -q
 # 22 passed (+ 새 변형 sanity 도 검증)
 
-# 서버 재시작 후
-af workflow catalog | jq '.categories.pixel_bg.variants | keys'
+# 서버 재시작 후 (CLI 미구현이라 curl 직접 호출)
+curl http://localhost:8000/api/workflows/catalog \
+  | jq '.categories.pixel_bg.variants | keys'
 # ["sdxl_stage1", "sdxl_hires", "pony_stage1", "pony_hires"]
-af workflow catalog | jq '.categories.icon.variants.flat.outputs'
+
+curl http://localhost:8000/api/workflows/catalog \
+  | jq '.categories.icon.variants.flat.outputs'
 # [{"label": "stage1", ...}, {"label": "alpha", "primary": true}]
 ```
 
 ### 4. smoke 호출
 
 ```bash
-af workflow gen pixel_bg/sdxl_hires myproj cave_bg \
-   "pixel art, dark cave background, torch lighting" --seed 100 --wait
+# pixel_bg/sdxl_hires 한 슬롯
+curl -X POST http://localhost:8000/api/workflows/generate \
+     -H "X-API-Key: $AF_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "workflow_category": "pixel_bg",
+       "workflow_variant": "sdxl_hires",
+       "project": "myproj",
+       "asset_key": "cave_bg",
+       "category": "background",
+       "prompt": "pixel art, dark cave background, torch lighting",
+       "seed": 100,
+       "candidates_total": 1
+     }'
+# → {"job_id": "...", "candidates_total": 1, "primary_output": "hires", ...}
+# 진행/결과는 GET /api/jobs/{job_id} 폴링 또는 SSE /api/events 구독.
 
-af workflow gen icon/flat myproj btn_settings \
-   "settings icon, gear icon, " --seed 200 --wait
-# → 2장 (stage1 + alpha) 한 슬롯에 저장됨
+# icon/flat → 2장 (stage1 + alpha) 한 슬롯
+curl -X POST http://localhost:8000/api/workflows/generate \
+     -H "X-API-Key: $AF_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "workflow_category": "icon",
+       "workflow_variant": "flat",
+       "project": "myproj",
+       "asset_key": "btn_settings",
+       "category": "ui",
+       "prompt": "settings icon, gear icon",
+       "seed": 200,
+       "candidates_total": 1
+     }'
 ```
 
 ### 5. spec 추가/변경하고 싶을 때
@@ -153,8 +209,103 @@ af workflow gen icon/flat myproj btn_settings \
 ## 새 카테고리/변형 추가하기
 
 같은 절차. `workflows/<new_category>/` 디렉토리 만들고 API JSON 복사, `registry.yml` 에
-새 카테고리 블록 추가. 자동으로 `af workflow catalog` 와 `/api/workflows/catalog`
-응답에 노출.
+새 카테고리 블록 추가. 자동으로 `GET /api/workflows/catalog` 응답에 노출
+(추후 `af workflow catalog` CLI 도 동일 응답을 wrap 할 예정).
+
+## 동적 입력 이미지 업로드 (PoseExtract / i2i 시나리오)
+
+LoadImage 노드가 참조할 임의 이미지를 ComfyUI `input/<subfolder>/` 에 올리는
+2-step 흐름. 사용자 캐릭터 이미지 → PoseExtract → 다른 변형의 ControlNet 입력
+chain 의 시작점.
+
+### Step 1 — 이미지 업로드
+
+```bash
+# 사용자 PC 의 PNG 를 ComfyUI input/asset-factory/ 에 직업로드
+curl -X POST http://localhost:8000/api/workflows/inputs \
+     -H "X-API-Key: $AF_API_KEY" \
+     -F file=@my_character.png \
+     -F subfolder=asset-factory
+# → {"name": "abc123def456_my_character.png",
+#    "subfolder": "asset-factory",
+#    "type": "input"}
+```
+
+응답의 `name` 이 다음 단계에서 LoadImage 입력으로 사용된다. 멱등 — 같은 bytes
+재업로드 시 동일 `name` 반환 (sha256[:12] prefix).
+
+방어:
+- content-type whitelist: `image/png`, `image/jpeg`, `image/webp`
+- 크기 상한: 20MB → 413
+- PIL `Image.verify()` 디코딩 검증 (polyglot 차단) → 400
+- `subfolder` 가 `[a-zA-Z0-9._-]{1,64}` 위반 시 `asset-factory` 로 정규화
+- 파일명도 sanitize 후 `<sha256[:12]>_<safe_original>.<ext>` 형태로 저장
+
+### Step 2 — 업로드 결과를 generate 호출에 박기
+
+`workflow_params.load_images` 의 라벨 (`pose_image` / `source_image`) 로 dispatch:
+
+```bash
+# PoseExtract 변형 — source_image 라벨로 사용자 이미지 박음
+curl -X POST http://localhost:8000/api/workflows/generate \
+     -H "X-API-Key: $AF_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "workflow_category": "sprite",
+       "workflow_variant": "pose_extract",
+       "project": "myproj",
+       "asset_key": "char_pose_v1",
+       "category": "character",
+       "prompt": "openpose extraction",
+       "candidates_total": 1,
+       "workflow_params": {
+         "load_images": {"source_image": "abc123def456_my_character.png"}
+       }
+     }'
+```
+
+```bash
+# ControlNet 변형 (pose_guided) — 사용자 정의 grid 박음
+curl -X POST http://localhost:8000/api/workflows/generate \
+     -H "X-API-Key: $AF_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "workflow_category": "sprite",
+       "workflow_variant": "pixel_alpha",
+       "project": "myproj",
+       "asset_key": "warrior_idle",
+       "category": "character",
+       "prompt": "warrior cat, pixel art",
+       "candidates_total": 1,
+       "workflow_params": {
+         "load_images": {"pose_image": "<업로드_응답의_name>.png"}
+       }
+     }'
+```
+
+지원 라벨: `pose_image` / `source_image`. 미등록 라벨은 silent skip
+(`PatchReport.skipped`). 새 라벨 추가 시 `workflow_patcher._LOAD_IMAGE_RULES`
+한 줄.
+
+### Step 3 — 이전 generate 결과를 다음 입력으로 chain (수동)
+
+```bash
+# PoseExtract 가 만든 asset 을 다시 ComfyUI input/ 으로 업로드해 다음 변형의 입력으로
+curl -X POST http://localhost:8000/api/workflows/inputs/from-asset \
+     -H "X-API-Key: $AF_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"asset_id": "myproj:char_pose_v1", "subfolder": "asset-factory"}'
+# → 응답 name 을 다음 generate 의 load_images.pose_image 에 사용
+```
+
+1차에선 chain 자동화 안 함 (사용자가 명시적으로 asset_id 전달). 자동화는
+[docs/TODOS.md](../docs/TODOS.md) 의 후속 항목.
+
+### GC
+
+1차 PR 에 미구현 — `input/<subfolder>/` 의 옛 업로드 파일 누적은 사용자가
+ComfyUI 호스트에서 수동 청소. 후속에 `task.workflow_params_json` 참조 추적
+cron 추가 예정 ([docs/TODOS.md](../docs/TODOS.md) `comfyui-inputs-gc`).
 
 ## patcher 가 인지하는 키
 
@@ -176,11 +327,24 @@ af workflow gen icon/flat myproj btn_settings \
 | `width` | EmptyLatentImage | — | `width` |
 | `height` | EmptyLatentImage | — | `height` |
 | `lora_strengths` | LoraLoader (lora_name 매칭) | — | `strength_model`/`strength_clip` 동시 |
+| `load_images` (dict) | LoadImage (라벨별) | — | `image` |
+
+`load_images` 는 LoadImage 노드 dispatch 채널 — `{<label>: <filename>}`. 라벨은
+`workflow_patcher._LOAD_IMAGE_RULES` 의 키:
+
+| 라벨 | 매칭 title | 용도 |
+|---|---|---|
+| `pose_image` | `Pose grid` (loose, ci) | ControlNet 변형의 pose grid (V37/V38 sprite) |
+| `source_image` | `^Load source image$` (anchored) | PoseExtract 의 사용자 입력 이미지 |
+
+기존 `pose_image` 스칼라 kwarg 는 backward-compat 별칭 — `load_images` 가 같은
+라벨 가지면 `load_images` 가 우선.
 
 매칭 노드가 없으면 **조용히 스킵** (`PatchReport.skipped`). V36 Pro 처럼
 ControlNet 없는 변형에 `controlnet_strength` 가 와도 에러 안 남.
 
-새 노드 타입을 patch 대상에 추가하려면 `workflow_patcher._RULES` 에 한 줄 추가.
+새 노드 타입을 patch 대상에 추가하려면 `workflow_patcher._RULES` (스칼라) 또는
+`_LOAD_IMAGE_RULES` (LoadImage 라벨) 에 한 줄 추가.
 
 ## 트러블슈팅
 

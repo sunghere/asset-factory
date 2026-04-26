@@ -14,10 +14,12 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator
+from io import BytesIO
 from urllib.parse import quote
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from PIL import Image, UnidentifiedImageError
+from fastapi import Depends, FastAPI, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -123,6 +125,42 @@ def _ensure_path_allowed(target: Path) -> Path:
 def _safe_segment(value: str) -> str:
     """파일 경로 세그먼트 안전화 (경로 구분자/상위 디렉토리 표기 제거)."""
     return value.replace("/", "_").replace("\\", "_").replace("..", "_")
+
+
+_SAFE_SUBFOLDER_RE = re.compile(r"^[a-zA-Z0-9._-]{1,64}$")
+_SAFE_FILENAME_CHARS = re.compile(r"[^a-zA-Z0-9._-]")
+_DEFAULT_INPUT_SUBFOLDER = "asset-factory"
+
+
+def _safe_subfolder(value: str | None) -> str:
+    """ComfyUI ``input/<subfolder>`` 검증.
+
+    - 빈 문자열 / None → 디폴트 ``asset-factory``
+    - ``..`` 포함, 절대경로, NUL byte, 64자 초과 → 디폴트로 정규화
+    - 허용: ``[a-zA-Z0-9._-]{1,64}``
+    """
+    if not value:
+        return _DEFAULT_INPUT_SUBFOLDER
+    cleaned = value.strip().lstrip("/\\")
+    if ".." in cleaned or not _SAFE_SUBFOLDER_RE.fullmatch(cleaned):
+        return _DEFAULT_INPUT_SUBFOLDER
+    return cleaned
+
+
+def _safe_input_filename(original: str | None, content_bytes: bytes) -> str:
+    """업로드 파일명 안정화 — ``<sha256[:12]>_<safe_original>.<ext>``.
+
+    같은 bytes 재업로드 시 동일 이름이 나오도록 sha256 prefix 사용 (멱등 + 캐시 hit
+    검출). 디스플레이 부분은 ``[a-zA-Z0-9._-]`` whitelist, 그 외 ``_`` 치환.
+    """
+    digest = hashlib.sha256(content_bytes).hexdigest()[:12]
+    base = original or "input.png"
+    stem, dot, ext = base.rpartition(".")
+    if not dot:
+        stem, ext = base or "input", "png"
+    safe_stem = _SAFE_FILENAME_CHARS.sub("_", stem) or "input"
+    safe_ext = _SAFE_FILENAME_CHARS.sub("_", ext) or "png"
+    return f"{digest}_{safe_stem[:64]}.{safe_ext[:8]}"
 
 
 def _approved_dir(project: str) -> Path:
@@ -1135,6 +1173,129 @@ async def workflows_catalog() -> dict[str, Any]:
     항상 200 (레지스트리는 로컬 파일이므로).
     """
     return workflow_registry.to_catalog()
+
+
+# ── ComfyUI 동적 입력 업로드 ──────────────────────────────────────────────
+# LoadImage 노드가 참조할 임의 이미지를 ComfyUI ``input/<subfolder>/`` 에 올린다.
+# 이후 /api/workflows/generate 의 ``workflow_params.load_images`` 에 응답의 ``name`` 을
+# 박아 사용. 자세한 흐름은 [workflows/README.md](../workflows/README.md) 참조.
+
+MAX_INPUT_BYTES = 20 * 1024 * 1024  # 20MB — 워크플로우 입력 이미지 상한
+_ALLOWED_INPUT_FORMATS = {"PNG", "JPEG", "WEBP"}
+_ALLOWED_INPUT_CONTENT_TYPES = {"image/png", "image/jpeg", "image/webp"}
+
+
+@app.post("/api/workflows/inputs", dependencies=[Depends(require_api_key)])
+async def upload_workflow_input(
+    file: UploadFile,
+    subfolder: str = Form(default=""),
+) -> dict[str, str]:
+    """multipart 로 받은 이미지를 ComfyUI ``input/<subfolder>/`` 에 업로드.
+
+    응답의 ``name`` 을 후속 ``POST /api/workflows/generate`` 의
+    ``workflow_params.load_images.<label>`` 에 사용한다.
+
+    방어:
+    - ``content-type`` whitelist (PNG/JPEG/WEBP)
+    - ``MAX_INPUT_BYTES`` 상한 (20MB)
+    - PIL ``Image.verify()`` 로 실제 디코딩 검증 — content-type 위장 polyglot 차단
+    - ``_safe_subfolder`` / ``_safe_input_filename`` 으로 path traversal /
+      비-whitelist 문자 정규화
+
+    참고: ``subfolder`` 가 비었거나 위반이면 ``asset-factory`` 로 정규화.
+    """
+    if file.content_type not in _ALLOWED_INPUT_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail=f"지원 안 되는 content-type: {file.content_type}",
+        )
+    bytes_ = await file.read()
+    if len(bytes_) == 0:
+        raise HTTPException(status_code=400, detail="빈 파일")
+    if len(bytes_) > MAX_INPUT_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"이미지 너무 큼: {len(bytes_)} > {MAX_INPUT_BYTES}",
+        )
+
+    # PIL 디코딩 검증 — content-type 위장 polyglot 차단. Image.verify() 는 헤더
+    # 레벨 검증만 하므로 빠르다. PIL 이 던지는 예외 surface 가 넓어서
+    # (UnidentifiedImageError / OSError / SyntaxError 등) 한 번에 잡고 400 처리.
+    try:
+        with Image.open(BytesIO(bytes_)) as img:
+            img.verify()
+            actual_format = img.format
+    except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"이미지 디코딩 실패: {exc}") from exc
+    if actual_format not in _ALLOWED_INPUT_FORMATS:
+        raise HTTPException(
+            status_code=415,
+            detail=f"지원 안 되는 포맷: {actual_format}",
+        )
+
+    try:
+        return await comfyui_client.upload_input_image(
+            image_bytes=bytes_,
+            filename=_safe_input_filename(file.filename, bytes_),
+            subfolder=_safe_subfolder(subfolder),
+        )
+    except SDError as exc:
+        # ComfyUI 도달 실패 / 서버 에러 — 외부 의존성이라 5xx 으로 매핑
+        status = 502 if exc.code in {"unreachable", "timeout"} else 500
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+
+class WorkflowInputFromAssetRequest(BaseModel):
+    """기존 asset 의 image_path 를 ComfyUI input/ 으로 복사 업로드."""
+
+    asset_id: str = Field(..., examples=["asset-uuid-123"])
+    subfolder: str = Field(default="")
+
+
+@app.post("/api/workflows/inputs/from-asset", dependencies=[Depends(require_api_key)])
+async def upload_workflow_input_from_asset(
+    request: WorkflowInputFromAssetRequest,
+) -> dict[str, str]:
+    """이전에 생성된 asset 의 이미지를 ComfyUI ``input/`` 에 다시 업로드.
+
+    PoseExtract 결과 → 다른 워크플로우의 ControlNet 입력 등 task chain 시나리오.
+    1차에선 chain 자동화 안 함 — 사용자가 명시적으로 asset_id 전달.
+
+    방어:
+    - ``_ensure_path_allowed`` 로 ``image_path`` traversal 방어 (allowlist 외부면 403)
+    - 디스크 파일 직접 read 후 ComfyUIClient 통과 — PIL 검증 생략 (자체 생성한 이미지라 신뢰)
+    - ``_safe_subfolder`` / ``_safe_input_filename`` 재사용
+    """
+    asset = await db.get_asset(request.asset_id)
+    if not asset:
+        raise HTTPException(status_code=404, detail=f"asset not found: {request.asset_id}")
+
+    image_path = asset.get("image_path")
+    if not image_path:
+        raise HTTPException(
+            status_code=500, detail=f"asset {request.asset_id} 의 image_path 가 비었음"
+        )
+
+    resolved = _ensure_path_allowed(Path(image_path))
+    try:
+        bytes_ = resolved.read_bytes()
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"asset 파일 없음 (image_path={image_path})",
+        ) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"파일 읽기 실패: {exc}") from exc
+
+    try:
+        return await comfyui_client.upload_input_image(
+            image_bytes=bytes_,
+            filename=_safe_input_filename(resolved.name, bytes_),
+            subfolder=_safe_subfolder(request.subfolder),
+        )
+    except SDError as exc:
+        status = 502 if exc.code in {"unreachable", "timeout"} else 500
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
 
 
 @app.post("/api/workflows/generate", dependencies=[Depends(require_api_key)])
