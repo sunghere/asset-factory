@@ -9,3 +9,13 @@ __pycache__/
 .env
 .DS_Store
 .gstack/
+
+# Claude Code 세션/워크트리 상태
+.claude/
+
+# pytest 캐시 산출물 (CI/로컬에서 생성)
+.pytest_cache/
+pytest-cache-files-*/
+
+# 워크플로우 smoke 테스트 출력 PNG 등
+scripts/_out_smoke/

@@ -1,0 +1,565 @@
+{
+  "id": "v35-c2_rdxlpixelart_v35",
+  "revision": 0,
+  "last_node_id": 9,
+  "last_link_id": 11,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "Note",
+      "pos": [
+        40,
+        40
+      ],
+      "size": [
+        620,
+        280
+      ],
+      "flags": {
+        "pinned": true
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "C2_RDXLPixelArt_V35 — 사용 가이드",
+      "properties": {},
+      "widgets_values": [
+        "[C2_RDXLPixelArt_V35]\n용도: C - 픽셀아트 배경/아이템 (RDXL Pixel Art / Pony)\n\nCheckpoint  : rdxlPixelArt_pony2.safetensors\nLoRA 1      : Fnaf_into_the_Pit__Style.safetensors (strength 0.8)\nSampler     : dpmpp_2m / karras\nCFG / Steps : 5.5 / 30\nResolution  : 1024x1024\nSeed        : 49 (fixed)\n\n[메모]\nPony 베이스라 score_9 트리거 필요. Fnaf LoRA는 게임 에셋 + overworld 트리거 강력."
+      ],
+      "color": "#432",
+      "bgcolor": "#653",
+      "shape": "default"
+    },
+    {
+      "id": 2,
+      "type": "CheckpointLoaderSimple",
+      "pos": [
+        40,
+        360
+      ],
+      "size": [
+        340,
+        100
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            1
+          ]
+        },
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            2
+          ]
+        },
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            10
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CheckpointLoaderSimple",
+        "cnr_id": "comfy-core",
+        "ver": "0.3.46"
+      },
+      "widgets_values": [
+        "rdxlPixelArt_pony2.safetensors"
+      ],
+      "color": "#323",
+      "bgcolor": "#535",
+      "shape": "default"
+    },
+    {
+      "id": 3,
+      "type": "LoraLoader",
+      "pos": [
+        420,
+        360
+      ],
+      "size": [
+        340,
+        130
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 1
+        },
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            5
+          ]
+        },
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            3,
+            4
+          ]
+        }
+      ],
+      "title": "LoRA: Fnaf_into_the_Pit__Style",
+      "properties": {
+        "Node name for S&R": "LoraLoader",
+        "cnr_id": "comfy-core",
+        "ver": "0.3.46"
+      },
+      "widgets_values": [
+        "Fnaf_into_the_Pit__Style.safetensors",
+        0.8,
+        0.8
+      ],
+      "color": "#223",
+      "bgcolor": "#335",
+      "shape": "default"
+    },
+    {
+      "id": 4,
+      "type": "CLIPTextEncode",
+      "pos": [
+        40,
+        540
+      ],
+      "size": [
+        600,
+        240
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 3
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "links": [
+            6
+          ]
+        }
+      ],
+      "title": "Positive Prompt",
+      "properties": {
+        "Node name for S&R": "CLIPTextEncode",
+        "cnr_id": "comfy-core",
+        "ver": "0.3.46"
+      },
+      "widgets_values": [
+        "score_9, score_8_up, pixel art, game assets, overworld, 16-bit retro game, fantasy environment, dungeon, vibrant colors, pixelated, top-down view, masterpiece, best quality"
+      ],
+      "color": "#232",
+      "bgcolor": "#353",
+      "shape": "default"
+    },
+    {
+      "id": 5,
+      "type": "CLIPTextEncode",
+      "pos": [
+        40,
+        800
+      ],
+      "size": [
+        600,
+        200
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 4
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "links": [
+            7
+          ]
+        }
+      ],
+      "title": "Negative Prompt",
+      "properties": {
+        "Node name for S&R": "CLIPTextEncode",
+        "cnr_id": "comfy-core",
+        "ver": "0.3.46"
+      },
+      "widgets_values": [
+        "(worst quality, low quality:1.4), blurry, jpeg artifacts, deformed, watermark, text, signature, photorealistic, 3d, realistic, photo, smooth shading, anti-aliasing, smooth lines, blurred edges, gradient, score_4, score_5, score_6"
+      ],
+      "color": "#322",
+      "bgcolor": "#533",
+      "shape": "default"
+    },
+    {
+      "id": 6,
+      "type": "EmptyLatentImage",
+      "pos": [
+        680,
+        540
+      ],
+      "size": [
+        280,
+        110
+      ],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            8
+          ]
+        }
+      ],
+      "title": "Latent (1024x1024)",
+      "properties": {
+        "Node name for S&R": "EmptyLatentImage",
+        "cnr_id": "comfy-core",
+        "ver": "0.3.46"
+      },
+      "widgets_values": [
+        1024,
+        1024,
+        1
+      ],
+      "color": "#322",
+      "bgcolor": "#533",
+      "shape": "default"
+    },
+    {
+      "id": 7,
+      "type": "KSampler",
+      "pos": [
+        1000,
+        540
+      ],
+      "size": [
+        320,
+        320
+      ],
+      "flags": {},
+      "order": 13,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 5
+        },
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 6
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "link": 7
+        },
+        {
+          "name": "latent_image",
+          "type": "LATENT",
+          "link": 8
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            9
+          ]
+        }
+      ],
+      "title": "KSampler (dpmpp_2m/karras)",
+      "properties": {
+        "Node name for S&R": "KSampler",
+        "cnr_id": "comfy-core",
+        "ver": "0.3.46"
+      },
+      "widgets_values": [
+        49,
+        "fixed",
+        30,
+        5.5,
+        "dpmpp_2m",
+        "karras",
+        1
+      ],
+      "color": "#223",
+      "bgcolor": "#335",
+      "shape": "default"
+    },
+    {
+      "id": 8,
+      "type": "VAEDecode",
+      "pos": [
+        1360,
+        540
+      ],
+      "size": [
+        220,
+        50
+      ],
+      "flags": {},
+      "order": 14,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 9
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 10
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            11
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAEDecode",
+        "cnr_id": "comfy-core",
+        "ver": "0.3.46"
+      },
+      "widgets_values": [],
+      "color": "#322",
+      "bgcolor": "#533",
+      "shape": "default"
+    },
+    {
+      "id": 9,
+      "type": "SaveImage",
+      "pos": [
+        1360,
+        640
+      ],
+      "size": [
+        400,
+        460
+      ],
+      "flags": {},
+      "order": 15,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 11
+        }
+      ],
+      "outputs": [],
+      "title": "Save Image",
+      "properties": {
+        "Node name for S&R": "SaveImage",
+        "cnr_id": "comfy-core",
+        "ver": "0.3.46"
+      },
+      "widgets_values": [
+        "C2_RDXLPixelArt_V35"
+      ],
+      "shape": "default"
+    }
+  ],
+  "links": [
+    [
+      1,
+      2,
+      0,
+      3,
+      0,
+      "MODEL"
+    ],
+    [
+      2,
+      2,
+      1,
+      3,
+      1,
+      "CLIP"
+    ],
+    [
+      3,
+      3,
+      1,
+      4,
+      0,
+      "CLIP"
+    ],
+    [
+      4,
+      3,
+      1,
+      5,
+      0,
+      "CLIP"
+    ],
+    [
+      5,
+      3,
+      0,
+      7,
+      0,
+      "MODEL"
+    ],
+    [
+      6,
+      4,
+      0,
+      7,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      7,
+      5,
+      0,
+      7,
+      2,
+      "CONDITIONING"
+    ],
+    [
+      8,
+      6,
+      0,
+      7,
+      3,
+      "LATENT"
+    ],
+    [
+      9,
+      7,
+      0,
+      8,
+      0,
+      "LATENT"
+    ],
+    [
+      10,
+      2,
+      2,
+      8,
+      1,
+      "VAE"
+    ],
+    [
+      11,
+      8,
+      0,
+      9,
+      0,
+      "IMAGE"
+    ]
+  ],
+  "groups": [
+    {
+      "id": 1,
+      "title": "Models & LoRA",
+      "bounding": [
+        20,
+        340,
+        760,
+        170
+      ],
+      "color": "#3f789e",
+      "font_size": 18,
+      "flags": {}
+    },
+    {
+      "id": 2,
+      "title": "Prompts",
+      "bounding": [
+        20,
+        510,
+        640,
+        510
+      ],
+      "color": "#a1309b",
+      "font_size": 18,
+      "flags": {}
+    },
+    {
+      "id": 3,
+      "title": "Generation",
+      "bounding": [
+        670,
+        510,
+        700,
+        360
+      ],
+      "color": "#629b30",
+      "font_size": 18,
+      "flags": {}
+    },
+    {
+      "id": 4,
+      "title": "Output",
+      "bounding": [
+        1340,
+        510,
+        460,
+        600
+      ],
+      "color": "#b58b2a",
+      "font_size": 18,
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.7,
+      "offset": [
+        0,
+        0
+      ]
+    }
+  },
+  "version": 0.4
+}

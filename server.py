@@ -24,11 +24,24 @@ from pydantic import BaseModel, Field
 
 from candidate_gc import run_gc_candidates
 from catalog import load_catalog_yaml, merge_loras, merge_models
-from generator import SDClient, SDError, save_candidate_slot_image, save_generated_image
+from generator import (
+    SDClient,
+    SDError,
+    save_candidate_slot_outputs,
+    save_generated_outputs,
+)
+from generator_comfyui import ComfyUIClient
 from lib import events as ev
 from models import Database
 from scanner import scan_directory
+from sd_backend import (
+    A1111Backend,
+    BackendRegistry,
+    ComfyUIBackend,
+    GenerationOutcome,
+)
 from validator import validate_asset
+from workflow_registry import WorkflowRegistry, WorkflowRegistryError
 
 load_dotenv()
 
@@ -46,14 +59,17 @@ CATALOG_YAML_PATH = Path(
 def _allowed_roots() -> list[Path]:
     """파일 시스템 접근을 허용할 루트 디렉토리 목록.
 
-    `ASSET_FACTORY_ALLOWED_ROOTS` 환경변수(콜론 구분, ``:``)가 있으면 그 값을 사용한다.
+    `ASSET_FACTORY_ALLOWED_ROOTS` 환경변수(``os.pathsep`` 구분 — POSIX 는 ``:``,
+    Windows 는 ``;``)가 있으면 그 값을 사용한다. Windows 경로는 ``C:\\...`` 처럼
+    드라이브 문자에 콜론이 들어가므로 POSIX 와 동일하게 ``:`` 로 split 하면
+    경로가 깨진다.
     기본값은 현재 ``DATA_DIR``과 사용자 워크스페이스 자산 디렉토리이다.
     호출 시점에 동적으로 계산하므로 테스트에서 ``server.DATA_DIR`` 등을
     monkeypatch 할 수 있다."""
     extra = os.getenv("ASSET_FACTORY_ALLOWED_ROOTS", "")
     roots: list[Path] = [DATA_DIR.resolve(), EXPORT_ROOT.resolve()]
     if extra:
-        for chunk in extra.split(":"):
+        for chunk in extra.split(os.pathsep):
             cleaned = chunk.strip()
             if cleaned:
                 roots.append(Path(cleaned).expanduser().resolve())
@@ -233,6 +249,37 @@ class ApproveFromCandidateRequest(BaseModel):
     set_status: str = Field(default="approved", pattern="^(approved|pending)$")
 
 
+class WorkflowGenerateRequest(BaseModel):
+    """ComfyUI 워크플로우 호출 요청.
+
+    `workflow_category`/`workflow_variant` 는 `workflow_registry.WorkflowRegistry`
+    에 등록된 변형. 추가 패치 인자는 `workflow_params` 딕트에 담는다 — 키는
+    `workflow_patcher.patch_workflow` 가 인지하는 것 (`pose_image`,
+    `controlnet_strength`, `lora_strengths`, `width`, `height` 등).
+
+    `candidates_total > 1` 이면 같은 변형을 N번 실행 (시드만 다르게) — cherry-pick
+    UI 흐름을 그대로 재사용한다. 변형이 multi-output (V38 full = 5장) 이면 각
+    슬롯당 N장 저장됨.
+    """
+
+    project: str = Field(..., examples=["wooridul-factory"])
+    asset_key: str = Field(..., examples=["warrior_idle"])
+    category: str = Field(default="sprite")  # asset 카테고리 (DB의 category 컬럼)
+    workflow_category: str = Field(..., examples=["sprite"])
+    workflow_variant: str = Field(..., examples=["pixel_alpha"])
+    prompt: str
+    negative_prompt: str | None = None
+    seed: int | None = None
+    steps: int | None = Field(default=None, ge=1, le=200)
+    cfg: float | None = Field(default=None, ge=0.0, le=30.0)
+    sampler: str | None = None
+    candidates_total: int = Field(default=1, ge=1, le=16)
+    workflow_params: dict[str, Any] = Field(default_factory=dict)
+    expected_size: int | None = None
+    max_colors: int = Field(default=32, ge=1, le=256)
+    max_retries: int = Field(default=3, ge=0, le=10)
+
+
 class EventBroker:
     """SSE 구독자에게 이벤트를 전달한다."""
 
@@ -262,7 +309,20 @@ class EventBroker:
 
 db = Database(DB_PATH)
 event_broker = EventBroker()
-sd_client = SDClient(host=os.getenv("SD_HOST", "192.168.50.225:7860"))
+
+# SD 백엔드 — A1111 (legacy) + ComfyUI (Phase 2 도입)
+# 환경변수 호환: 기존 SD_HOST 가 있으면 A1111 호스트로 본다.
+sd_client = SDClient(
+    host=os.getenv("SD_A1111_HOST", os.getenv("SD_HOST", "192.168.50.225:7860"))
+)
+comfyui_client = ComfyUIClient(host=os.getenv("SD_COMFYUI_HOST", "localhost:8188"))
+workflow_registry = WorkflowRegistry(root=BASE_DIR / "workflows")
+backends = BackendRegistry(
+    {
+        "a1111": A1111Backend(sd_client),
+        "comfyui": ComfyUIBackend(comfyui_client, workflow_registry),
+    }
+)
 api_key = os.getenv("API_KEY")
 worker_task: asyncio.Task[Any] | None = None
 gc_worker_task: asyncio.Task[Any] | None = None
@@ -475,9 +535,13 @@ def expand_design_batch(spec: DesignBatchRequest) -> list[dict[str, Any]]:
     return tasks
 
 
-def _check_disk_space(path: Path) -> None:
-    """생성 전 디스크 여유 공간을 검사한다."""
-    min_mb = int(os.getenv("MIN_FREE_DISK_MB", "50"))
+def _check_disk_space(path: Path, required_mb: int | None = None) -> None:
+    """생성 전 디스크 여유 공간을 검사한다.
+
+    ``required_mb`` 명시되면 그 값을 최소 요구로 사용 (override). 미명시 시
+    환경변수 ``MIN_FREE_DISK_MB`` (기본 50MB).
+    """
+    min_mb = required_mb if required_mb is not None else int(os.getenv("MIN_FREE_DISK_MB", "50"))
     min_free = min_mb * 1024 * 1024
     usage = shutil.disk_usage(path)
     if usage.free < min_free:
@@ -486,10 +550,18 @@ def _check_disk_space(path: Path) -> None:
         )
 
 
-def _ensure_disk_space_for_enqueue() -> None:
-    """enqueue API에서 즉시 507 응답으로 변환되는 디스크 가드."""
+def _ensure_disk_space_for_enqueue(expected_files: int = 1) -> None:
+    """enqueue API에서 즉시 507 응답으로 변환되는 디스크 가드.
+
+    P2.3 — ComfyUI 변형은 한 task 가 N장 출력 (V38 full = 5장) → candidates_total 곱
+    하면 디스크 요구가 N배. ``expected_files`` 로 baseline + 파일당 추가 MB 를 더해
+    상향. 기본 1 (단일 출력 = 기존 동작 호환).
+    """
+    base_mb = int(os.getenv("MIN_FREE_DISK_MB", "50"))
+    per_file_mb = int(os.getenv("MIN_FREE_DISK_PER_FILE_MB", "5"))
+    required_mb = base_mb + per_file_mb * max(0, expected_files - 1)
     try:
-        _check_disk_space(DATA_DIR)
+        _check_disk_space(DATA_DIR, required_mb=required_mb)
     except RuntimeError as exc:
         raise HTTPException(status_code=507, detail=str(exc)) from exc
 
@@ -555,25 +627,15 @@ async def generation_worker() -> None:
 
 
 async def handle_task(task: dict[str, Any]) -> None:
-    """생성 태스크 처리."""
+    """생성 태스크 처리.
+
+    task['backend'] 에 따라 A1111 (단일 이미지) 또는 ComfyUI (N개 이미지) 백엔드로
+    디스패치한다. 결과는 GenerationOutcome 으로 통일되어 이하 흐름이 동일하다.
+    """
     try:
         _check_disk_space(DATA_DIR)
-        width, height = sd_client.choose_native_resolution(
-            model_name=task.get("model_name"),
-            width=task.get("width"),
-            height=task.get("height"),
-        )
-        generation = await sd_client.txt2img(
-            prompt=task["prompt"],
-            negative_prompt=task.get("negative_prompt"),
-            model_name=task.get("model_name"),
-            width=width,
-            height=height,
-            steps=int(task.get("steps", 20)),
-            cfg_scale=float(task.get("cfg", 7.0)),
-            sampler_name=task.get("sampler") or "DPM++ 2M",
-            seed=task.get("seed"),
-        )
+        backend = backends.get(task.get("backend"))
+        outcome: GenerationOutcome = await backend.generate(task)
         candidates_total = int(task.get("candidates_total") or 1)
         candidate_slot = task.get("candidate_slot")
         batch_id = task.get("batch_id")
@@ -584,9 +646,13 @@ async def handle_task(task: dict[str, Any]) -> None:
             candidate_slot = int(task["id"])
             candidates_total = max(candidates_total, 2)
 
+        # primary + extras 를 한 번에 저장. A1111 (1개) / ComfyUI (N개) 모두 같은 함수.
+        outputs_to_save: list[tuple[str, bytes]] = [
+            (o.label, o.image_bytes) for o in outcome.outputs
+        ]
         if candidates_total > 1 and candidate_slot is not None:
-            output_path = save_candidate_slot_image(
-                image_bytes=generation.image_bytes,
+            saved_paths = save_candidate_slot_outputs(
+                outputs=outputs_to_save,
                 output_root=DATA_DIR,
                 project=task["project"],
                 asset_key=task["asset_key"],
@@ -596,13 +662,20 @@ async def handle_task(task: dict[str, Any]) -> None:
         else:
             # Unique 경로에 저장 → 재생성 시 이전 파일이 덮어쓰여지지 않아
             # asset_history의 image_path가 디스크에 그대로 유지된다.
-            output_path = save_generated_image(
-                image_bytes=generation.image_bytes,
+            saved_paths = save_generated_outputs(
+                outputs=outputs_to_save,
                 output_root=DATA_DIR,
                 project=task["project"],
                 asset_key=task["asset_key"],
                 job_id=task["job_id"],
             )
+        primary_label = outcome.primary.label
+        output_path = saved_paths[primary_label]
+        extra_paths = {
+            label: str(p)
+            for label, p in saved_paths.items()
+            if label != primary_label
+        }
         validation = validate_asset(
             image_path=output_path,
             expected_size=task.get("expected_size"),
@@ -611,8 +684,8 @@ async def handle_task(task: dict[str, Any]) -> None:
         metadata_json = json.dumps(
             {
                 "image_format": validation.image_format,
-                "model": generation.model,
-                "seed": generation.seed,
+                "model": outcome.model,
+                "seed": outcome.seed,
                 "steps": int(task.get("steps", 20)),
                 "cfg": float(task.get("cfg", 7.0)),
                 "sampler": task.get("sampler") or "DPM++ 2M",
@@ -620,6 +693,11 @@ async def handle_task(task: dict[str, Any]) -> None:
                 "max_colors": int(task.get("max_colors", 32)),
                 "max_retries": int(task.get("max_retries", 3)),
                 "expected_size": task.get("expected_size"),
+                "backend": outcome.backend,
+                # ComfyUI 변형의 경우 stage1/hires/rembg_alpha 등 부가 출력 파일 경로
+                "extra_outputs": extra_paths,
+                # ComfyUI prompt_id, patch_report — 디버깅/추적용
+                "raw": outcome.raw,
             },
             ensure_ascii=False,
         )
@@ -636,9 +714,9 @@ async def handle_task(task: dict[str, Any]) -> None:
                 color_count=validation.color_count,
                 validation_status="pass" if validation.passed else "fail",
                 validation_message=validation.message,
-                generation_seed=generation.seed,
-                generation_model=generation.model,
-                generation_prompt=generation.prompt,
+                generation_seed=outcome.seed,
+                generation_model=outcome.model,
+                generation_prompt=task["prompt"],
                 metadata_json=metadata_json,
                 batch_id=batch_id,
             )
@@ -675,9 +753,9 @@ async def handle_task(task: dict[str, Any]) -> None:
                         "has_alpha": validation.has_alpha,
                         "validation_status": "pass" if validation.passed else "fail",
                         "validation_message": validation.message,
-                        "generation_seed": generation.seed,
-                        "generation_model": generation.model,
-                        "generation_prompt": generation.prompt,
+                        "generation_seed": outcome.seed,
+                        "generation_model": outcome.model,
+                        "generation_prompt": task["prompt"],
                         "metadata_json": metadata_json,
                     },
                 )
@@ -702,9 +780,9 @@ async def handle_task(task: dict[str, Any]) -> None:
                     "has_alpha": validation.has_alpha,
                     "validation_status": "pass" if validation.passed else "fail",
                     "validation_message": validation.message,
-                    "generation_seed": generation.seed,
-                    "generation_model": generation.model,
-                    "generation_prompt": generation.prompt,
+                    "generation_seed": outcome.seed,
+                    "generation_model": outcome.model,
+                    "generation_prompt": task["prompt"],
                     "metadata_json": metadata_json,
                 },
             )
@@ -892,11 +970,23 @@ async def health() -> dict[str, Any]:
 
 @app.get("/api/health/sd")
 async def health_sd() -> dict[str, Any]:
-    """SD 서버 연결 헬스체크."""
-    try:
-        return await sd_client.health_check()
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=503, detail=f"SD 서버 연결 실패: {exc}") from exc
+    """SD 서버 연결 헬스체크.
+
+    A1111 + ComfyUI 양 백엔드를 동시에 점검한다. 한쪽만 살아있어도 200 으로
+    응답하고, 두 쪽 모두 죽었을 때만 503. 응답 본문에 backend 별 ok/에러를
+    모두 담아 운영자가 어느 쪽이 죽었는지 식별 가능하게 한다.
+    """
+    results: dict[str, Any] = {}
+    any_ok = False
+    for name in backends.names:
+        try:
+            results[name] = await backends.get(name).health_check()
+            any_ok = True
+        except Exception as exc:  # noqa: BLE001
+            results[name] = {"ok": False, "error": f"{exc.__class__.__name__}: {exc}"}
+    if not any_ok:
+        raise HTTPException(status_code=503, detail={"sd_backends": results})
+    return {"backends": results}
 
 
 @app.get("/api/system/gc/status")
@@ -1033,6 +1123,114 @@ async def sd_catalog_loras() -> dict[str, Any]:
         "items": merged,
         "catalog_path": str(CATALOG_YAML_PATH),
         "catalog_present": CATALOG_YAML_PATH.exists(),
+    }
+
+
+@app.get("/api/workflows/catalog")
+async def workflows_catalog() -> dict[str, Any]:
+    """ComfyUI 워크플로우 레지스트리 카탈로그.
+
+    `workflows/registry.yml` 의 카테고리·변형·출력·기본값을 그대로 노출.
+    클라이언트가 변형 선택 UI 를 그릴 때 사용한다. SD 서버 미연결과 무관하게
+    항상 200 (레지스트리는 로컬 파일이므로).
+    """
+    return workflow_registry.to_catalog()
+
+
+@app.post("/api/workflows/generate", dependencies=[Depends(require_api_key)])
+async def workflows_generate(request: WorkflowGenerateRequest) -> dict[str, Any]:
+    """ComfyUI 백엔드로 워크플로우 변형 1회 또는 N회 (cherry-pick) 호출.
+
+    body 가 가리키는 변형이 ``status=needs_api_conversion`` 또는 미존재이면 4xx.
+    그 외는 task 를 큐에 넣고 ``job_id`` 반환 — 진행은 ``GET /api/jobs/{id}`` 로
+    polling, 완료된 candidate 는 cherry-pick UI (``/cherry-pick?batch=...``) 또는
+    기존 ``/api/assets`` 흐름으로 본다.
+    """
+    try:
+        variant = workflow_registry.variant(
+            request.workflow_category, request.workflow_variant
+        )
+    except WorkflowRegistryError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if not variant.available:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"variant {request.workflow_category}/{request.workflow_variant} 는 "
+                f"호출 불가 (status={variant.status})"
+            ),
+        )
+
+    # P2.3 — 변형의 출력 수 × candidates_total 만큼 디스크 가드 상향
+    outputs_per_task = max(1, len(variant.outputs))
+    _ensure_disk_space_for_enqueue(
+        expected_files=outputs_per_task * max(1, int(request.candidates_total))
+    )
+
+    job_id = str(uuid.uuid4())
+    job_type = "workflow_single" if request.candidates_total == 1 else "workflow_design"
+    await db.create_job(job_id=job_id, job_type=job_type, payload=request.model_dump())
+
+    workflow_params_json = (
+        json.dumps(request.workflow_params, ensure_ascii=False)
+        if request.workflow_params
+        else None
+    )
+    candidates_total = int(request.candidates_total)
+    base_seed = request.seed
+
+    # generation_tasks 의 steps/cfg/sampler 컬럼은 NOT NULL — variant 기본값으로 채움.
+    steps_value = int(
+        request.steps if request.steps is not None
+        else variant.defaults.get("steps", 20)
+    )
+    cfg_value = float(
+        request.cfg if request.cfg is not None
+        else variant.defaults.get("cfg", 7.0)
+    )
+    sampler_value = str(
+        request.sampler if request.sampler is not None
+        else variant.defaults.get("sampler", "DPM++ 2M")
+    )
+
+    for slot_index in range(candidates_total):
+        slot_seed = (base_seed + slot_index) if base_seed is not None else None
+        await db.enqueue_generation_task(
+            {
+                "job_id": job_id,
+                "project": request.project,
+                "asset_key": request.asset_key,
+                "category": request.category,
+                "prompt": request.prompt,
+                "negative_prompt": request.negative_prompt,
+                "model_name": None,
+                "width": None,
+                "height": None,
+                "steps": steps_value,
+                "cfg": cfg_value,
+                "sampler": sampler_value,
+                "expected_size": request.expected_size,
+                "max_colors": request.max_colors,
+                "max_retries": request.max_retries,
+                "candidate_slot": slot_index if candidates_total > 1 else None,
+                "candidates_total": candidates_total,
+                "seed": slot_seed,
+                "backend": "comfyui",
+                "workflow_category": request.workflow_category,
+                "workflow_variant": request.workflow_variant,
+                "workflow_params_json": workflow_params_json,
+            }
+        )
+    await db.mark_job_running(job_id)
+    await event_broker.publish({"type": ev.EVT_JOB_CREATED, "job_id": job_id})
+    return {
+        "job_id": job_id,
+        "workflow_category": request.workflow_category,
+        "workflow_variant": request.workflow_variant,
+        "candidates_total": candidates_total,
+        "primary_output": (
+            variant.primary_output.label if variant.primary_output else None
+        ),
     }
 
 
