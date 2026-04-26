@@ -487,6 +487,47 @@ def test_legacy_assets_endpoint_also_filters_bypass(isolated) -> None:  # noqa: 
     assert {a["asset_key"] for a in with_flag} == {"manual_one", "bypass_one"}
 
 
+def test_assets_response_exposes_approval_mode_field(isolated) -> None:  # noqa: ANN001
+    """클라이언트가 한 번의 호출로 'bypass' 여부 식별 가능 — DB 응답 직렬화에서
+    approval_mode 가 빠지지 않게 보장 (마이그레이션 안 돈 구 DB 안전망 포함).
+    """
+    _insert_manual_asset(isolated, "p", "manual_one")
+    _insert_bypass_asset(isolated, "p", "bypass_one")
+    with TestClient(server.app) as client:
+        rows = client.get("/api/projects/p/assets?include_bypassed=true").json()
+    by_key = {a["asset_key"]: a for a in rows}
+    assert by_key["manual_one"]["approval_mode"] == "manual"
+    assert by_key["bypass_one"]["approval_mode"] == "bypass"
+
+
+def test_assets_legacy_endpoint_also_exposes_approval_mode(isolated) -> None:  # noqa: ANN001
+    _insert_manual_asset(isolated, "p", "m")
+    _insert_bypass_asset(isolated, "p", "b")
+    with TestClient(server.app) as client:
+        rows = client.get("/api/assets?project=p&include_bypassed=true").json()
+    by_key = {a["asset_key"]: a for a in rows}
+    assert by_key["m"]["approval_mode"] == "manual"
+    assert by_key["b"]["approval_mode"] == "bypass"
+
+
+def test_export_manifest_includes_excluded_bypassed_field(isolated) -> None:  # noqa: ANN001
+    """/api/export/manifest GET 응답에도 항상 excluded_bypassed 키가 들어감."""
+    _insert_manual_asset(isolated, "p", "m1")
+    _insert_bypass_asset(isolated, "p", "b1")
+    with TestClient(server.app) as client:
+        body = client.get("/api/export/manifest?project=p").json()
+    assert body["count"] == 1
+    assert body["excluded_bypassed"] == 1
+
+
+def test_export_manifest_empty_project_still_has_excluded_bypassed(isolated) -> None:  # noqa: ANN001
+    """asset 없는 프로젝트라도 excluded_bypassed 가 0 (null/누락 아님)."""
+    with TestClient(server.app) as client:
+        body = client.get("/api/export/manifest?project=does_not_exist").json()
+    assert body["excluded_bypassed"] == 0
+    assert body["items"] == []
+
+
 def test_health_reports_bypass_retention_days(isolated, monkeypatch) -> None:  # noqa: ANN001
     monkeypatch.setenv("AF_BYPASS_RETENTION_DAYS", "3")
     with TestClient(server.app) as client:

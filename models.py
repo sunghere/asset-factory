@@ -16,6 +16,18 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _normalize_asset_row(row: dict[str, Any]) -> dict[str, Any]:
+    """assets 테이블 SELECT 결과 dict 의 응답용 보강.
+
+    ``approval_mode`` 컬럼이 dict 에 없거나 NULL 이면 'manual' 로 채운다 —
+    마이그레이션이 아직 안 돈 환경 (예: 머지 직후 첫 startup 전) 에서도 클라이
+    언트가 키를 안전하게 읽을 수 있게.
+    """
+    if "approval_mode" not in row or row["approval_mode"] is None:
+        row["approval_mode"] = "manual"
+    return row
+
+
 @dataclass(slots=True)
 class JobRecord:
     """작업 레코드."""
@@ -671,7 +683,7 @@ class Database:
             conn.row_factory = aiosqlite.Row
             cursor = await conn.execute(query, params)
             rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
+            return [_normalize_asset_row(dict(row)) for row in rows]
 
     async def get_asset(self, asset_id: str) -> dict[str, Any] | None:
         """에셋 단건 조회."""
@@ -679,7 +691,7 @@ class Database:
             conn.row_factory = aiosqlite.Row
             cursor = await conn.execute("SELECT * FROM assets WHERE id=?", (asset_id,))
             row = await cursor.fetchone()
-            return dict(row) if row else None
+            return _normalize_asset_row(dict(row)) if row else None
 
     async def has_asset(self, project: str, asset_key: str) -> bool:
         """동일 (project, asset_key) 에셋이 이미 존재하는지 확인."""
@@ -700,7 +712,7 @@ class Database:
                 (project, asset_key),
             )
             row = await cursor.fetchone()
-            return dict(row) if row else None
+            return _normalize_asset_row(dict(row)) if row else None
 
     async def soonest_due_seconds(self, *, default: float = 1.0) -> float:
         """다음 실행 가능한 queued 태스크까지 남은 초.
@@ -895,7 +907,7 @@ class Database:
             conn.row_factory = aiosqlite.Row
             cursor = await conn.execute(query, params)
             rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
+            return [_normalize_asset_row(dict(row)) for row in rows]
 
     async def get_asset_summary(self, project: str | None = None) -> dict[str, Any]:
         """에셋 상태/검증/카테고리 집계를 반환한다."""

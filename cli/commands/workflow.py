@@ -47,12 +47,12 @@ def cmd_describe(target: str = typer.Argument(..., help="<category>/<variant>"))
     body = request("GET", "/api/workflows/catalog")
     try:
         spec = body["categories"][category]["variants"][variant]
-    except KeyError:
+    except KeyError as exc:
         typer.echo(
             f"variant {category}/{variant} 가 카탈로그에 없습니다.",
             err=True,
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from exc
     typer.echo(json.dumps({"category": category, "variant": variant, **spec}, ensure_ascii=False, indent=2))
 
 
@@ -156,9 +156,9 @@ def cmd_gen(
     catalog = request("GET", "/api/workflows/catalog")
     try:
         spec = catalog["categories"][category]["variants"][variant]
-    except KeyError:
+    except KeyError as exc:
         typer.echo(f"variant {category}/{variant} 가 카탈로그에 없습니다.", err=True)
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from exc
     valid_labels = {item["label"] for item in spec.get("input_labels", [])}
 
     # 2) --input 파싱 + 필요시 upload.

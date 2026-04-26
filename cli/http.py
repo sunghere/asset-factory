@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import os
-import sys
 from typing import Any
 
 import httpx
@@ -93,13 +92,13 @@ def request(
         return {}
     try:
         return resp.json()
-    except ValueError:
+    except ValueError as exc:
         # 바이너리/text 응답 — caller 가 raw 가 필요하면 별도 헬퍼 써야 함.
         typer.echo(
             f"asset-factory 응답이 JSON 아님 (Content-Type={resp.headers.get('content-type')})",
             err=True,
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from exc
 
 
 def get_bytes(path: str, *, params: dict[str, Any] | None = None, timeout: float = 30.0) -> bytes:

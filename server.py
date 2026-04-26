@@ -2839,6 +2839,10 @@ async def export_manifest(
     approved = await db.list_approved_assets(
         project=project, category=category, since=since
     )
+    approved_with_bypass = await db.list_approved_assets(
+        project=project, category=category, since=since, include_bypassed=True
+    )
+    excluded_bypassed = len(approved_with_bypass) - len(approved)
     items: list[dict[str, Any]] = []
     total_bytes = 0
     for asset in approved:
@@ -2867,7 +2871,12 @@ async def export_manifest(
                 "updated_at": asset.get("updated_at") or asset.get("created_at"),
             }
         )
-    return {"count": len(items), "total_bytes": total_bytes, "items": items}
+    return {
+        "count": len(items),
+        "total_bytes": total_bytes,
+        "items": items,
+        "excluded_bypassed": excluded_bypassed,
+    }
 
 
 async def sse_event_generator(
