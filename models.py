@@ -117,6 +117,10 @@ class Database:
                     batch_id TEXT,
                     lora_spec_json TEXT,
                     seed INTEGER,
+                    backend TEXT NOT NULL DEFAULT 'a1111',
+                    workflow_category TEXT,
+                    workflow_variant TEXT,
+                    workflow_params_json TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY(job_id) REFERENCES jobs(id)
@@ -145,8 +149,25 @@ class Database:
                 await conn.execute("ALTER TABLE generation_tasks ADD COLUMN lora_spec_json TEXT")
             if "seed" not in col_names:
                 await conn.execute("ALTER TABLE generation_tasks ADD COLUMN seed INTEGER")
+            # ComfyUI 백엔드 도입 (Phase 2). 기존 행은 backend='a1111' 로 간주됨
+            # (claim_next_task 가 NULL 도 a1111 로 디스패치).
+            if "backend" not in col_names:
+                await conn.execute(
+                    "ALTER TABLE generation_tasks ADD COLUMN backend TEXT NOT NULL DEFAULT 'a1111'"
+                )
+            if "workflow_category" not in col_names:
+                await conn.execute("ALTER TABLE generation_tasks ADD COLUMN workflow_category TEXT")
+            if "workflow_variant" not in col_names:
+                await conn.execute("ALTER TABLE generation_tasks ADD COLUMN workflow_variant TEXT")
+            if "workflow_params_json" not in col_names:
+                await conn.execute(
+                    "ALTER TABLE generation_tasks ADD COLUMN workflow_params_json TEXT"
+                )
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_tasks_batch ON generation_tasks(batch_id)"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tasks_backend ON generation_tasks(backend)"
             )
             await conn.execute(
                 """
@@ -256,6 +277,7 @@ class Database:
                     retries, max_retries, last_error, expected_size, max_colors,
                     candidate_slot, candidates_total,
                     batch_id, lora_spec_json, seed,
+                    backend, workflow_category, workflow_variant, workflow_params_json,
                     created_at, updated_at
                 )
                 VALUES (
@@ -264,6 +286,7 @@ class Database:
                     0, :max_retries, NULL, :expected_size, :max_colors,
                     :candidate_slot, :candidates_total,
                     :batch_id, :lora_spec_json, :seed,
+                    :backend, :workflow_category, :workflow_variant, :workflow_params_json,
                     :created_at, :updated_at
                 )
                 """,
@@ -274,6 +297,11 @@ class Database:
                     "batch_id": task.get("batch_id"),
                     "lora_spec_json": task.get("lora_spec_json"),
                     "seed": task.get("seed"),
+                    # backend 컬럼은 NOT NULL DEFAULT 'a1111' — task dict 가 안 줘도 디폴트.
+                    "backend": task.get("backend") or "a1111",
+                    "workflow_category": task.get("workflow_category"),
+                    "workflow_variant": task.get("workflow_variant"),
+                    "workflow_params_json": task.get("workflow_params_json"),
                     "created_at": now,
                     "updated_at": now,
                 },

@@ -1,0 +1,40 @@
+{
+  "2": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "your_image.png"
+    },
+    "_meta": {
+      "title": "Load source image"
+    }
+  },
+  "3": {
+    "class_type": "OpenposePreprocessor",
+    "inputs": {
+      "detect_hand": "enable",
+      "detect_body": "enable",
+      "detect_face": "enable",
+      "resolution": 1024,
+      "image": [
+        "2",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "OpenPose Preprocessor"
+    }
+  },
+  "4": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "PoseExtract",
+      "images": [
+        "3",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Save extracted pose"
+    }
+  }
+}

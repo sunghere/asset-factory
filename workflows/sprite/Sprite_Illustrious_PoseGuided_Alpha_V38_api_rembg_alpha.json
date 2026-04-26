@@ -1,0 +1,307 @@
+{
+  "2": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {
+      "ckpt_name": "hyphoria_v002.safetensors"
+    },
+    "_meta": {
+      "title": "CheckpointLoaderSimple"
+    }
+  },
+  "3": {
+    "class_type": "LoraLoader",
+    "inputs": {
+      "lora_name": "pixel_character_sprite_illustrious.safetensors",
+      "strength_model": 0.7,
+      "strength_clip": 0.7,
+      "model": [
+        "2",
+        0
+      ],
+      "clip": [
+        "2",
+        1
+      ]
+    },
+    "_meta": {
+      "title": "LoRA: pixel_character_sprite_illustrious"
+    }
+  },
+  "4": {
+    "class_type": "LoraLoader",
+    "inputs": {
+      "lora_name": "pixelart_up.safetensors",
+      "strength_model": 0.4,
+      "strength_clip": 0.4,
+      "model": [
+        "3",
+        0
+      ],
+      "clip": [
+        "3",
+        1
+      ]
+    },
+    "_meta": {
+      "title": "LoRA: pixelart_up"
+    }
+  },
+  "5": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "pixel_character_sprite, pxlchrctrsprt, sprite, sprite sheet, sprite art, pixel, (pixel art:1.5), retro game, retro, vibrant colors, pixelated, chibi, sd character, full body, (big head:1.15), large eyes, rpg game character, small sprite, retro rpg sprite, character turnaround, three views, front view, right side view, back view, (uniform character size:1.2), white background,\n\n1girl, (black hair:1.2), (side ponytail:1.3), long hair, hair tied at side, medium height ponytail, blue knight armor, (holding silver sword:1.3), sword in right hand, gripping sword tightly, red cape, fantasy warrior,\n\nmasterpiece, best quality, very aesthetic",
+      "clip": [
+        "4",
+        1
+      ]
+    },
+    "_meta": {
+      "title": "Positive Prompt"
+    }
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "(worst quality, low quality:1.4), blurry, jpeg artifacts, deformed, bad anatomy, watermark, text, signature, photorealistic, 3d, realistic, photo, smooth shading, anti-aliasing, smooth lines, blurred edges, gradient background, complex background, scenery, different sizes, varying scale, oversized character, height variation, close-up, upper body, portrait, cropped character, headshot, floating sword, detached weapon, levitating sword, separated weapon, sword in air, weapon hovering, weapon next to character, disembodied weapon",
+      "clip": [
+        "4",
+        1
+      ]
+    },
+    "_meta": {
+      "title": "Negative Prompt"
+    }
+  },
+  "7": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "pose_grid_1x3_mini_2.5h_1280x640.png"
+    },
+    "_meta": {
+      "title": "Pose grid"
+    }
+  },
+  "8": {
+    "class_type": "ControlNetLoader",
+    "inputs": {
+      "control_net_name": "control-lora-openposeXL2-rank256.safetensors"
+    },
+    "_meta": {
+      "title": "ControlNet OpenPose"
+    }
+  },
+  "9": {
+    "class_type": "ControlNetApply",
+    "inputs": {
+      "strength": 0.85,
+      "conditioning": [
+        "5",
+        0
+      ],
+      "control_net": [
+        "8",
+        0
+      ],
+      "image": [
+        "7",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Apply ControlNet"
+    }
+  },
+  "10": {
+    "class_type": "EmptyLatentImage",
+    "inputs": {
+      "width": 1280,
+      "height": 640,
+      "batch_size": 1
+    },
+    "_meta": {
+      "title": "Latent (1280x640)"
+    }
+  },
+  "11": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": 872364182734,
+      "steps": 30,
+      "cfg": 6.5,
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "karras",
+      "denoise": 1,
+      "model": [
+        "4",
+        0
+      ],
+      "positive": [
+        "9",
+        0
+      ],
+      "negative": [
+        "6",
+        0
+      ],
+      "latent_image": [
+        "10",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "KSampler #1"
+    }
+  },
+  "12": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "11",
+        0
+      ],
+      "vae": [
+        "2",
+        2
+      ]
+    },
+    "_meta": {
+      "title": "VAEDecode"
+    }
+  },
+  "13": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "Sprite_Illustrious_PoseGuided_Alpha_V38_Stage1_rembg_alpha",
+      "images": [
+        "12",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Save Stage1"
+    }
+  },
+  "14": {
+    "class_type": "ImageScaleBy",
+    "inputs": {
+      "upscale_method": "bicubic",
+      "scale_by": 1.5,
+      "image": [
+        "12",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Scale Up"
+    }
+  },
+  "15": {
+    "class_type": "VAEEncode",
+    "inputs": {
+      "pixels": [
+        "14",
+        0
+      ],
+      "vae": [
+        "2",
+        2
+      ]
+    },
+    "_meta": {
+      "title": "VAEEncode"
+    }
+  },
+  "16": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": 872364182734,
+      "steps": 18,
+      "cfg": 6.5,
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "karras",
+      "denoise": 0.45,
+      "model": [
+        "4",
+        0
+      ],
+      "positive": [
+        "9",
+        0
+      ],
+      "negative": [
+        "6",
+        0
+      ],
+      "latent_image": [
+        "15",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "KSampler #2 (HiRes)"
+    }
+  },
+  "17": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "16",
+        0
+      ],
+      "vae": [
+        "2",
+        2
+      ]
+    },
+    "_meta": {
+      "title": "VAEDecode"
+    }
+  },
+  "18": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "Sprite_Illustrious_PoseGuided_Alpha_V38_HiRes_rembg_alpha",
+      "images": [
+        "17",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Save HiRes"
+    }
+  },
+  "19": {
+    "class_type": "Image Rembg (Remove Background)",
+    "inputs": {
+      "transparency": true,
+      "model": "u2net",
+      "post_processing": false,
+      "only_mask": false,
+      "alpha_matting": false,
+      "alpha_matting_foreground_threshold": 240,
+      "alpha_matting_background_threshold": 10,
+      "alpha_matting_erode_size": 10,
+      "background_color": "none",
+      "images": [
+        "17",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "rembg AI BG Remove"
+    }
+  },
+  "20": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "Sprite_Illustrious_PoseGuided_Alpha_V38_RembgAlpha_rembg_alpha",
+      "images": [
+        "19",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Save RembgAlpha"
+    }
+  }
+}

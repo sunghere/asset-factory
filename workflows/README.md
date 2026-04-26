@@ -1,0 +1,200 @@
+# ComfyUI 워크플로우 레지스트리
+
+asset-factory 가 ComfyUI 백엔드로 호출하는 워크플로우 모음. `registry.yml` 이
+카테고리·변형·파일 경로·기본값·출력 라벨을 매핑한다.
+
+## 디렉토리 구조
+
+```
+workflows/
+├── registry.yml                # 매니페스트 (단일 진실원)
+├── README.md                   # 이 문서
+├── sprite/                     # 게임 캐릭터 (V36/V37/V38)
+│   ├── Sprite_Illustrious_Pro_V36_api_*.json
+│   ├── Sprite_Illustrious_PoseGuided_V37_api_*.json
+│   ├── Sprite_Illustrious_PoseGuided_Alpha_V38_api_*.json    ⭐ 메인
+│   └── PoseExtract_V37_api.json
+├── illustration/               # 일러스트 (B 시리즈)
+│   ├── B1_AnimagineXL_HiRes_V36_api_*.json
+│   ├── B2_PrefectPony_HiRes_V36_api_*.json
+│   ├── B4_Hyphoria_HiRes_V36_api_*.json
+│   ├── B5_AnythingXL_HiRes_V36_api_*.json
+│   └── B6_MeinaMix_HiRes_V36_api_*.json
+├── pixel_bg/                   # 픽셀 배경 (V35, API 변환 필요)
+│   ├── C1_PixelDiffusionXL_V35.json    ← UI 포맷, 변환 대기
+│   └── C2_RDXLPixelArt_V35.json
+└── icon/                       # 앱 아이콘 (V35, API 변환 필요)
+    └── D1_AppIcon_V35.json
+```
+
+원본은 `D:\DEV\ComfyUI\comfyuiImage_v34\` 에 있고, 여기에 **복사본**이 들어와
+있다. ComfyUI 쪽에서 워크플로우를 수정한 경우 다시 복사 필요 (수동).
+
+## registry.yml 매니페스트 형식
+
+```yaml
+version: 1
+
+presets:                            # ${preset:NAME} 으로 defaults 에서 참조
+  NEG_PIXEL_SPRITE: |
+    (worst quality, low quality:1.4), blurry, jpeg artifacts, ...
+
+categories:
+  <category_name>:
+    description: "사람이 읽는 설명"
+    variants:
+      <variant_name>:
+        description: "변형 설명"
+        file: <category>/<api_format_filename>.json    # 호출 가능 변형
+        primary: true                                   # 카테고리 대표
+        outputs:
+          - { node_title: "Save Stage1", label: stage1 }
+          - { node_title: "Save HiRes",  label: hires, primary: true }
+        defaults:
+          steps: 30
+          cfg: 6.5
+          sampler: dpmpp_2m
+          scheduler: karras
+          width: 1280
+          height: 640
+          pose_image: pose_grid_1x3_mini_2.5h_1280x640.png
+          controlnet_strength: 0.85
+          negative_prompt: ${preset:NEG_PIXEL_SPRITE}
+```
+
+### 필드 의미
+
+- **`file`**: API JSON 경로 (workflows/ 기준 상대). 호출 가능 변형 필수.
+- **`ui_file`**: UI 포맷 JSON 경로 (변환 안내용, 호출엔 안 씀)
+- **`status`**: `ready` (default) 또는 `needs_api_conversion`. 후자는 file: null.
+- **`primary`**: 변형 레벨에서 카테고리 대표 표시 (false 면 자동 fallback)
+- **`outputs[*].node_title`**: ComfyUI 워크플로우 안의 SaveImage 노드 `_meta.title` 정확 일치
+- **`outputs[*].label`**: cherry-pick UI / extra_outputs metadata 에 노출되는 의미적 라벨
+- **`outputs[*].primary`**: 메인 출력 (cherry-pick UI의 대표 이미지). 없으면 첫 번째 자동 승격
+- **`defaults`**: variant 기본값. task 명시값 > workflow_params > defaults 우선순위로 patcher 적용
+
+## V35 C/D 시리즈 → V36 패턴 자동화 ⭐
+
+C1/C2/D1 은 V35 단계라 `_api_*.json` 이 없어 호출 불가였는데, **자동화 스크립트
+2개로 V36 패턴(HiRes 옵션 + D1 알파 자동 합성)까지 한 번에 끌어올림**.
+
+### 1. ComfyUI 측에서 워크플로우 일괄 생성
+
+```bash
+cd D:\DEV\ComfyUI\comfyuiImage_v34
+python generate_cd_workflows.py
+```
+
+산출물 (총 8개):
+- `C1_PixelDiffusionXL_V36.json` (UI) + `_api_stage1.json`, `_api_hires.json`
+- `C2_RDXLPixelArt_V36.json` (UI) + `_api_stage1.json`, `_api_hires.json`
+- `D1_AppIcon_V36.json` (UI, Stage1+Alpha 두 SaveImage) + `_api_default.json`
+
+내부적으로 `generate_v36_workflows.py` 의 `ui_to_api/build_workflow/make_variants` 를
+재활용. D1 은 V38 의 WAS 알파 그룹(`foreground / threshold=245 / tolerance=5`) 도
+자동 합성해 raw + alpha 를 한 실행에 동시 출력.
+
+### 2. asset-factory 로 import
+
+```bash
+cd D:\DEV\asset-factory
+.venv\Scripts\python scripts\import_v36_workflows.py
+```
+
+이 스크립트가:
+- `D:\DEV\ComfyUI\comfyuiImage_v34\` 의 C/D `_api_*.json` 5개를
+  `workflows/{pixel_bg,icon}/` 로 복사
+- `registry.yml` 의 `pixel_bg` / `icon` 카테고리 블록을
+  4 + 1 = 5 변형 (모두 `available=true`) 으로 자동 갱신
+
+환경변수: 다른 ComfyUI 경로면 `COMFYUI_WORKFLOWS_DIR=...` 로 override.
+
+### 3. 활성화 검증
+
+```bash
+.venv\Scripts\python -m pytest tests\test_workflow_registry.py -q
+# 22 passed (+ 새 변형 sanity 도 검증)
+
+# 서버 재시작 후
+af workflow catalog | jq '.categories.pixel_bg.variants | keys'
+# ["sdxl_stage1", "sdxl_hires", "pony_stage1", "pony_hires"]
+af workflow catalog | jq '.categories.icon.variants.flat.outputs'
+# [{"label": "stage1", ...}, {"label": "alpha", "primary": true}]
+```
+
+### 4. smoke 호출
+
+```bash
+af workflow gen pixel_bg/sdxl_hires myproj cave_bg \
+   "pixel art, dark cave background, torch lighting" --seed 100 --wait
+
+af workflow gen icon/flat myproj btn_settings \
+   "settings icon, gear icon, " --seed 200 --wait
+# → 2장 (stage1 + alpha) 한 슬롯에 저장됨
+```
+
+### 5. spec 추가/변경하고 싶을 때
+
+`generate_cd_workflows.py` 의 `WORKFLOWS = [...]` 에 dict 추가/수정 후 두 스크립트
+재실행. registry.yml 은 idempotent (같은 변형명이면 덮어씀).
+
+### (Legacy) 수동 export 절차
+
+자동화 스크립트가 안 맞는 경우 (기존 V35 그대로 보존하고 싶거나, V36 generate
+패턴이 안 맞는 새 워크플로우) — ComfyUI UI 에서 직접 export:
+
+1. ComfyUI 띄우기: `python main.py --listen 0.0.0.0 --port 8188`
+2. UI 에서 워크플로우 로드
+3. 출력 노드 title 정리 (`Save Stage1` 등 정확히), Positive/Negative Prompt 노드도 동일
+4. Settings ⚙ → "Enable Dev mode Options" → `Save (API Format)` 버튼 → export
+5. `workflows/<category>/` 에 복사
+6. `registry.yml` 에 변형 수동 추가 (file 경로, outputs, defaults)
+
+## 새 카테고리/변형 추가하기
+
+같은 절차. `workflows/<new_category>/` 디렉토리 만들고 API JSON 복사, `registry.yml` 에
+새 카테고리 블록 추가. 자동으로 `af workflow catalog` 와 `/api/workflows/catalog`
+응답에 노출.
+
+## patcher 가 인지하는 키
+
+`workflow_patcher.patch_workflow()` 호출 시 사용 가능한 인자 — `defaults` 와
+`workflow_params` (request payload) 양쪽에서 같은 이름 사용:
+
+| 키 | 매칭 노드 (class_type) | 매칭 title | 적용 input 필드 |
+|---|---|---|---|
+| `prompt` | CLIPTextEncode | `^Positive Prompt$` | `text` |
+| `negative_prompt` | CLIPTextEncode | `^Negative Prompt$` | `text` |
+| `seed` | KSampler (모두) | — | `seed` |
+| `steps` | KSampler (모두) | — | `steps` |
+| `cfg` | KSampler (모두) | — | `cfg` |
+| `sampler_name` | KSampler (모두) | — | `sampler_name` |
+| `scheduler` | KSampler (모두) | — | `scheduler` |
+| `pose_image` | LoadImage | `Pose grid` (regex, ci) | `image` |
+| `controlnet_strength` | ControlNetApply | — | `strength` |
+| `checkpoint` | CheckpointLoaderSimple | — | `ckpt_name` |
+| `width` | EmptyLatentImage | — | `width` |
+| `height` | EmptyLatentImage | — | `height` |
+| `lora_strengths` | LoraLoader (lora_name 매칭) | — | `strength_model`/`strength_clip` 동시 |
+
+매칭 노드가 없으면 **조용히 스킵** (`PatchReport.skipped`). V36 Pro 처럼
+ControlNet 없는 변형에 `controlnet_strength` 가 와도 에러 안 남.
+
+새 노드 타입을 patch 대상에 추가하려면 `workflow_patcher._RULES` 에 한 줄 추가.
+
+## 트러블슈팅
+
+| 증상 | 원인 | 해결 |
+|---|---|---|
+| `af workflow catalog` 응답에 변형이 `available: false` | file 경로의 JSON 이 디스크에 없음 | `file:` 경로 정확한지, 실제 파일 존재 확인 |
+| `호출 불가 (status=needs_api_conversion)` | UI 포맷만 등록됨 | 위 §5 순서대로 API export 후 `file:` 채움 |
+| `unknown variant: cat/v` | registry.yml 에 변형 미등록 | `af workflow catalog` 로 정확한 이름 확인 |
+| Positive Prompt 가 안 바뀜 | 워크플로우의 CLIPTextEncode `_meta.title` 이 다름 | UI 에서 노드 title 을 정확히 `Positive Prompt` 로 변경 후 재 export |
+| `매칭되는 SaveImage 결과 없음` | registry outputs 의 `node_title` 과 워크플로우 SaveImage `_meta.title` 불일치 | 둘 정확히 일치시킴 (대소문자·공백 포함) |
+| pose grid 파일 못 찾음 | ComfyUI input/ 에 없음 | `D:\DEV\ComfyUI\input\` 에 png 복사 |
+
+## 관련 문서
+
+- `D:\DEV\sincerity-skills\sd-generator\HANDOFF.md` — 워크플로우 V35→V38 진화사·결정 근거
+- `D:\DEV\asset-factory\sd_backend.py` — ComfyUIBackend 가 task → registry → patcher → ComfyUIClient 호출하는 본문
+- `D:\DEV\asset-factory\workflow_patcher.py` — 패치 규칙 정의

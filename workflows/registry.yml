@@ -1,0 +1,445 @@
+# ComfyUI 워크플로우 레지스트리
+#
+# 카테고리 → 변형(variant) → 워크플로우 API JSON 파일 매핑.
+# asset-factory 가 ComfyUI 백엔드를 호출할 때 어느 워크플로우를 로드할지,
+# 어떤 노드를 어떤 키로 patch 할지, 결과 어디서 가져올지를 정의한다.
+#
+# 패치 대상 노드는 `class_type` + (선택) `title_match` 로 검색하므로
+# 노드 ID 가 변해도 작동한다. (HANDOFF §4 권장 패턴)
+#
+# `status: needs_api_conversion` 인 변형은 ComfyUI UI 포맷만 있어 호출 불가.
+# 사용자가 ComfyUI 에서 "API 포맷 저장" 으로 export 후 file 경로를 채우면 활성화된다.
+
+version: 1
+
+# ---- 공통 noise/negative 프리셋 (선택) ---------------------------------------
+# variant.defaults 에서 ${preset:NEG_PIXEL_SPRITE} 같이 참조 가능 (로더가 치환).
+presets:
+  NEG_PIXEL_SPRITE: |
+    (worst quality, low quality:1.4), blurry, jpeg artifacts, deformed, bad anatomy,
+    watermark, text, signature, photorealistic, 3d, realistic, photo,
+    smooth shading, anti-aliasing, smooth lines, blurred edges,
+    gradient background, complex background, scenery,
+    different sizes, varying scale, oversized character, height variation,
+    close-up, upper body, portrait, cropped character, headshot,
+    floating sword, detached weapon, levitating sword, separated weapon,
+    sword in air, weapon hovering, weapon next to character, disembodied weapon
+  NEG_ILLUSTRATION: |
+    (worst quality, low quality:1.4), blurry, jpeg artifacts, deformed, bad anatomy,
+    watermark, text, signature, extra fingers, mutated hands
+
+# ---- 카테고리 ---------------------------------------------------------------
+categories:
+
+  # =========================================================================
+  # SPRITE — 게임 캐릭터 (1×3 multi-view, ControlNet OpenPose, 픽셀화/알파)
+  # =========================================================================
+  sprite:
+    description: |
+      게임용 픽셀 캐릭터 스프라이트. V38 Alpha 가 메인 라인업이고,
+      V37 은 ControlNet 단계, V36 Pro 는 컨셉 디자인 단계.
+
+    variants:
+
+      # --- V38 Alpha (메인) -----------------------------------------------
+      pixel_alpha:
+        description: "픽셀 그리드 + 투명배경 (게임 엔진용) ⭐"
+        file: sprite/Sprite_Illustrious_PoseGuided_Alpha_V38_api_pixel_alpha.json
+        primary: true
+        outputs:
+          - { node_title: "Save Stage1",     label: stage1 }
+          - { node_title: "Save Pixelized",  label: pixelized }
+          - { node_title: "Save PixelAlpha", label: pixel_alpha, primary: true }
+        defaults:
+          steps: 30
+          cfg: 6.5
+          sampler: dpmpp_2m
+          scheduler: karras
+          width: 1280
+          height: 640
+          pose_image: pose_grid_1x3_mini_2.5h_1280x640.png
+          controlnet_strength: 0.85
+          negative_prompt: ${preset:NEG_PIXEL_SPRITE}
+
+      hires:
+        description: "1920×960 디테일 보강 (흰배경)"
+        file: sprite/Sprite_Illustrious_PoseGuided_Alpha_V38_api_hires.json
+        outputs:
+          - { node_title: "Save Stage1", label: stage1 }
+          - { node_title: "Save HiRes",  label: hires, primary: true }
+        defaults:
+          steps: 30
+          cfg: 6.5
+          sampler: dpmpp_2m
+          scheduler: karras
+          width: 1280
+          height: 640
+          pose_image: pose_grid_1x3_mini_2.5h_1280x640.png
+          controlnet_strength: 0.85
+          negative_prompt: ${preset:NEG_PIXEL_SPRITE}
+
+      rembg_alpha:
+        description: "AI rembg 알파 (일러스트용)"
+        file: sprite/Sprite_Illustrious_PoseGuided_Alpha_V38_api_rembg_alpha.json
+        outputs:
+          - { node_title: "Save Stage1",      label: stage1 }
+          - { node_title: "Save RembgAlpha",  label: rembg_alpha, primary: true }
+        defaults:
+          steps: 30
+          cfg: 6.5
+          sampler: dpmpp_2m
+          scheduler: karras
+          width: 1280
+          height: 640
+          pose_image: pose_grid_1x3_mini_2.5h_1280x640.png
+          controlnet_strength: 0.85
+          negative_prompt: ${preset:NEG_PIXEL_SPRITE}
+
+      stage1:
+        description: "raw 1280×640 (흰배경) — 빠른 디자인 탐색"
+        file: sprite/Sprite_Illustrious_PoseGuided_Alpha_V38_api_stage1.json
+        outputs:
+          - { node_title: "Save Stage1", label: stage1, primary: true }
+        defaults:
+          steps: 30
+          cfg: 6.5
+          sampler: dpmpp_2m
+          scheduler: karras
+          width: 1280
+          height: 640
+          pose_image: pose_grid_1x3_mini_2.5h_1280x640.png
+          controlnet_strength: 0.85
+          negative_prompt: ${preset:NEG_PIXEL_SPRITE}
+
+      full:
+        description: "5종 동시 출력 (Stage1 + HiRes + Pixelized + PixelAlpha + RembgAlpha)"
+        file: sprite/Sprite_Illustrious_PoseGuided_Alpha_V38_api_full.json
+        outputs:
+          - { node_title: "Save Stage1",      label: stage1 }
+          - { node_title: "Save HiRes",       label: hires }
+          - { node_title: "Save Pixelized",   label: pixelized }
+          - { node_title: "Save PixelAlpha",  label: pixel_alpha, primary: true }
+          - { node_title: "Save RembgAlpha",  label: rembg_alpha }
+        defaults:
+          steps: 30
+          cfg: 6.5
+          sampler: dpmpp_2m
+          scheduler: karras
+          width: 1280
+          height: 640
+          pose_image: pose_grid_1x3_mini_2.5h_1280x640.png
+          controlnet_strength: 0.85
+          negative_prompt: ${preset:NEG_PIXEL_SPRITE}
+
+      # --- V37 PoseGuided (alpha 이전 단계) ----------------------------------
+      v37_pixel:
+        description: "[V37] 픽셀화만, alpha 없음"
+        file: sprite/Sprite_Illustrious_PoseGuided_V37_api_pixel.json
+        outputs:
+          - { node_title: "Save Stage1",    label: stage1 }
+          - { node_title: "Save Pixelized", label: pixelized, primary: true }
+        defaults:
+          steps: 30
+          cfg: 6.5
+          sampler: dpmpp_2m
+          scheduler: karras
+          width: 1280
+          height: 640
+          pose_image: pose_grid_1x3_mini_2.5h_1280x640.png
+          controlnet_strength: 0.85
+          negative_prompt: ${preset:NEG_PIXEL_SPRITE}
+
+      v37_full:
+        description: "[V37] 4종 출력 (alpha 단계 없음)"
+        file: sprite/Sprite_Illustrious_PoseGuided_V37_api_full.json
+        outputs:
+          - { node_title: "Save Stage1",    label: stage1 }
+          - { node_title: "Save HiRes",     label: hires }
+          - { node_title: "Save Pixelized", label: pixelized, primary: true }
+        defaults:
+          steps: 30
+          cfg: 6.5
+          sampler: dpmpp_2m
+          scheduler: karras
+          width: 1280
+          height: 640
+          pose_image: pose_grid_1x3_mini_2.5h_1280x640.png
+          controlnet_strength: 0.85
+          negative_prompt: ${preset:NEG_PIXEL_SPRITE}
+
+      # --- V36 Pro (디자인 단계, ControlNet 없음) ----------------------------
+      v36_pro_stage1:
+        description: "[V36 Pro] 컨셉 디자인 — ControlNet 없음, 자유 layout"
+        file: sprite/Sprite_Illustrious_Pro_V36_api_stage1.json
+        outputs:
+          - { node_title: "Save Stage1", label: stage1, primary: true }
+        defaults:
+          steps: 30
+          cfg: 6.5
+          sampler: dpmpp_2m
+          scheduler: karras
+          width: 1280
+          height: 896
+          negative_prompt: ${preset:NEG_PIXEL_SPRITE}
+
+      v36_pro_full:
+        description: "[V36 Pro] 디자인 전체 (Stage1 + HiRes + Pixelized)"
+        file: sprite/Sprite_Illustrious_Pro_V36_api_full.json
+        outputs:
+          - { node_title: "Save Stage1",    label: stage1 }
+          - { node_title: "Save HiRes",     label: hires }
+          - { node_title: "Save Pixelized", label: pixelized, primary: true }
+        defaults:
+          steps: 30
+          cfg: 6.5
+          sampler: dpmpp_2m
+          scheduler: karras
+          width: 1280
+          height: 896
+          negative_prompt: ${preset:NEG_PIXEL_SPRITE}
+
+      # --- 부속 도구 ----------------------------------------------------------
+      pose_extract:
+        description: "기존 이미지에서 OpenPose stick figure 추출 (utility)"
+        file: sprite/PoseExtract_V37_api.json
+        outputs:
+          - { node_title: "Save extracted pose", label: pose, primary: true }
+        defaults: {}
+
+  # =========================================================================
+  # ILLUSTRATION — 모델별 일러스트 (B 시리즈)
+  # =========================================================================
+  illustration:
+    description: |
+      애니메 일러스트레이션. 모델 5종 × (stage1 빠르게 / hires 디테일).
+      픽셀아트 아님 — 마케팅·디자인용.
+
+    variants:
+
+      animagine_hires:
+        description: "Animagine XL — 깔끔한 표준"
+        file: illustration/B1_AnimagineXL_HiRes_V36_api_hires.json
+        primary: true
+        outputs:
+          - { node_title: "Save Stage1", label: stage1 }
+          - { node_title: "Save HiRes",  label: hires, primary: true }
+        defaults:
+          steps: 30
+          cfg: 6.0
+          sampler: dpmpp_2m
+          scheduler: karras
+          width: 1024
+          height: 1024
+          negative_prompt: ${preset:NEG_ILLUSTRATION}
+
+      animagine_stage1:
+        description: "Animagine XL — stage1 only (빠름)"
+        file: illustration/B1_AnimagineXL_HiRes_V36_api_stage1.json
+        outputs:
+          - { node_title: "Save Stage1", label: stage1, primary: true }
+        defaults:
+          steps: 30
+          cfg: 6.0
+          sampler: dpmpp_2m
+          scheduler: karras
+          width: 1024
+          height: 1024
+          negative_prompt: ${preset:NEG_ILLUSTRATION}
+
+      pony_hires:
+        description: "Prefect Pony — Pony 정통 (score_9 트리거 권장)"
+        file: illustration/B2_PrefectPony_HiRes_V36_api_hires.json
+        outputs:
+          - { node_title: "Save Stage1", label: stage1 }
+          - { node_title: "Save HiRes",  label: hires, primary: true }
+        defaults:
+          steps: 30
+          cfg: 6.0
+          sampler: dpmpp_2m
+          scheduler: karras
+          width: 1024
+          height: 1024
+          negative_prompt: ${preset:NEG_ILLUSTRATION}
+
+      pony_stage1:
+        description: "Prefect Pony — stage1 only"
+        file: illustration/B2_PrefectPony_HiRes_V36_api_stage1.json
+        outputs:
+          - { node_title: "Save Stage1", label: stage1, primary: true }
+        defaults:
+          steps: 30
+          cfg: 6.0
+          sampler: dpmpp_2m
+          scheduler: karras
+          width: 1024
+          height: 1024
+          negative_prompt: ${preset:NEG_ILLUSTRATION}
+
+      hyphoria_hires:
+        description: "Hyphoria — Modern Illustrious"
+        file: illustration/B4_Hyphoria_HiRes_V36_api_hires.json
+        outputs:
+          - { node_title: "Save Stage1", label: stage1 }
+          - { node_title: "Save HiRes",  label: hires, primary: true }
+        defaults:
+          steps: 30
+          cfg: 6.5
+          sampler: dpmpp_2m
+          scheduler: karras
+          width: 1024
+          height: 1024
+          negative_prompt: ${preset:NEG_ILLUSTRATION}
+
+      hyphoria_stage1:
+        description: "Hyphoria — stage1 only"
+        file: illustration/B4_Hyphoria_HiRes_V36_api_stage1.json
+        outputs:
+          - { node_title: "Save Stage1", label: stage1, primary: true }
+        defaults:
+          steps: 30
+          cfg: 6.5
+          sampler: dpmpp_2m
+          scheduler: karras
+          width: 1024
+          height: 1024
+          negative_prompt: ${preset:NEG_ILLUSTRATION}
+
+      anything_hires:
+        description: "AnythingXL — 범용"
+        file: illustration/B5_AnythingXL_HiRes_V36_api_hires.json
+        outputs:
+          - { node_title: "Save Stage1", label: stage1 }
+          - { node_title: "Save HiRes",  label: hires, primary: true }
+        defaults:
+          steps: 30
+          cfg: 6.0
+          sampler: dpmpp_2m
+          scheduler: karras
+          width: 1024
+          height: 1024
+          negative_prompt: ${preset:NEG_ILLUSTRATION}
+
+      anything_stage1:
+        description: "AnythingXL — stage1 only"
+        file: illustration/B5_AnythingXL_HiRes_V36_api_stage1.json
+        outputs:
+          - { node_title: "Save Stage1", label: stage1, primary: true }
+        defaults:
+          steps: 30
+          cfg: 6.0
+          sampler: dpmpp_2m
+          scheduler: karras
+          width: 1024
+          height: 1024
+          negative_prompt: ${preset:NEG_ILLUSTRATION}
+
+      meinamix_hires:
+        description: "MeinaMix — SD1.5 빠름"
+        file: illustration/B6_MeinaMix_HiRes_V36_api_hires.json
+        outputs:
+          - { node_title: "Save Stage1", label: stage1 }
+          - { node_title: "Save HiRes",  label: hires, primary: true }
+        defaults:
+          steps: 25
+          cfg: 7.0
+          sampler: dpmpp_2m
+          scheduler: karras
+          width: 512
+          height: 768
+          negative_prompt: ${preset:NEG_ILLUSTRATION}
+
+      meinamix_stage1:
+        description: "MeinaMix — stage1 only"
+        file: illustration/B6_MeinaMix_HiRes_V36_api_stage1.json
+        outputs:
+          - { node_title: "Save Stage1", label: stage1, primary: true }
+        defaults:
+          steps: 25
+          cfg: 7.0
+          sampler: dpmpp_2m
+          scheduler: karras
+          width: 512
+          height: 768
+          negative_prompt: ${preset:NEG_ILLUSTRATION}
+
+  # =========================================================================
+  # PIXEL_BG — 픽셀 배경/타일 (V35, API 변환 필요)
+  # =========================================================================
+  pixel_bg:
+    description: "픽셀 배경·타일·환경 자산 (V36 generate_cd_workflows 산출)."
+    variants:
+
+      sdxl_stage1:
+        description: "PixelDiffusionXL — stage1 only (1024x1024)"
+        file: pixel_bg/C1_PixelDiffusionXL_V36_api_stage1.json
+        outputs:
+          - { node_title: "Save Stage1", label: stage1, primary: true }
+        defaults:
+          steps: 30
+          cfg: 6.5
+          sampler: "dpmpp_2m"
+          scheduler: "karras"
+          width: 1024
+          height: 1024
+
+      sdxl_hires:
+        description: "PixelDiffusionXL — HiRes (1.5x upscale + refine)"
+        file: pixel_bg/C1_PixelDiffusionXL_V36_api_hires.json
+        primary: true
+        outputs:
+          - { node_title: "Save Stage1", label: stage1 }
+          - { node_title: "Save HiRes", label: hires, primary: true }
+        defaults:
+          steps: 30
+          cfg: 6.5
+          sampler: "dpmpp_2m"
+          scheduler: "karras"
+          width: 1024
+          height: 1024
+
+      pony_stage1:
+        description: "RDXL Pony pixel (Fnaf style) — stage1 only. score_9 트리거 권장"
+        file: pixel_bg/C2_RDXLPixelArt_V36_api_stage1.json
+        outputs:
+          - { node_title: "Save Stage1", label: stage1, primary: true }
+        defaults:
+          steps: 30
+          cfg: 5.5
+          sampler: "dpmpp_2m"
+          scheduler: "karras"
+          width: 1024
+          height: 1024
+
+      pony_hires:
+        description: "RDXL Pony pixel (Fnaf style) — HiRes"
+        file: pixel_bg/C2_RDXLPixelArt_V36_api_hires.json
+        outputs:
+          - { node_title: "Save Stage1", label: stage1 }
+          - { node_title: "Save HiRes", label: hires, primary: true }
+        defaults:
+          steps: 30
+          cfg: 5.5
+          sampler: "dpmpp_2m"
+          scheduler: "karras"
+          width: 1024
+          height: 1024
+
+  icon:
+    description: "앱 UI 아이콘 (V36 + WAS 알파 자동 추출)."
+    variants:
+
+      flat:
+        description: "Animagine flat icon — 한 실행에 raw + alpha 두 출력"
+        file: icon/D1_AppIcon_V36_api_default.json
+        primary: true
+        outputs:
+          - { node_title: "Save Stage1", label: stage1 }
+          - { node_title: "Save Alpha", label: alpha, primary: true }
+        defaults:
+          steps: 25
+          cfg: 7.0
+          sampler: "dpmpp_2m"
+          scheduler: "karras"
+          width: 1024
+          height: 1024
+

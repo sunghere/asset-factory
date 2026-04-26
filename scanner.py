@@ -9,7 +9,7 @@ from typing import Any
 
 def infer_category(relative_path: Path) -> str:
     """경로를 기반으로 카테고리를 추론한다."""
-    lowered = str(relative_path).lower()
+    lowered = relative_path.as_posix().lower()
     if "/ui/" in f"/{lowered}" or lowered.startswith("ui/"):
         return "ui"
     if "/background" in f"/{lowered}" or lowered.startswith("background"):

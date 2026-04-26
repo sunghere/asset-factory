@@ -229,3 +229,85 @@ def save_candidate_slot_image(
     output_path = target_dir / f"slot_{slot_index}.png"
     output_path.write_bytes(image_bytes)
     return output_path
+
+
+def save_candidate_slot_outputs(
+    outputs: list[tuple[str, bytes]],
+    output_root: Path,
+    project: str,
+    asset_key: str,
+    job_id: str,
+    slot_index: int,
+) -> dict[str, Path]:
+    """ComfyUI 류 다중 출력을 한 candidate 슬롯에 저장.
+
+    첫 번째 항목을 primary 로 간주, 기존 ``save_candidate_slot_image`` 와
+    같은 경로(``slot_{N}.png``)에 저장 → cherry-pick UI 등 기존 코드 호환.
+    나머지는 같은 디렉토리에 ``slot_{N}__{label}.png`` 로 저장.
+
+    Args:
+        outputs: ``[(label, image_bytes), ...]`` 첫 번째가 primary
+    Returns:
+        ``{label: saved_path}`` (primary 라벨도 포함)
+    """
+    if not outputs:
+        raise ValueError("save_candidate_slot_outputs 에 빈 outputs")
+    safe_project = _safe_path_segment(project)
+    safe_key = _safe_path_segment(asset_key)
+    safe_job = _safe_path_segment(job_id)
+    target_dir = output_root / "candidates" / safe_project / safe_key / safe_job
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    saved: dict[str, Path] = {}
+    primary_label, primary_bytes = outputs[0]
+    primary_path = target_dir / f"slot_{slot_index}.png"
+    primary_path.write_bytes(primary_bytes)
+    saved[primary_label] = primary_path
+
+    for label, img_bytes in outputs[1:]:
+        safe_label = _safe_path_segment(label)
+        extra_path = target_dir / f"slot_{slot_index}__{safe_label}.png"
+        extra_path.write_bytes(img_bytes)
+        saved[label] = extra_path
+
+    return saved
+
+
+def save_generated_outputs(
+    outputs: list[tuple[str, bytes]],
+    output_root: Path,
+    project: str,
+    asset_key: str,
+    job_id: str | None = None,
+) -> dict[str, Path]:
+    """단일 모드용 다중 출력 저장. ``save_generated_image`` 의 다중 버전.
+
+    primary 는 기존 ``save_generated_image`` 와 같은 경로 (``<key>__<job>.png``),
+    extras 는 같은 디렉토리에 ``__{label}`` suffix.
+    """
+    if not outputs:
+        raise ValueError("save_generated_outputs 에 빈 outputs")
+    safe_project = _safe_path_segment(project)
+    safe_key = _safe_path_segment(asset_key)
+    project_dir = output_root / "candidates" / safe_project
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    if job_id:
+        safe_job = _safe_path_segment(job_id)
+        primary_stem = f"{safe_key}__{safe_job}"
+    else:
+        primary_stem = safe_key
+
+    saved: dict[str, Path] = {}
+    primary_label, primary_bytes = outputs[0]
+    primary_path = project_dir / f"{primary_stem}.png"
+    primary_path.write_bytes(primary_bytes)
+    saved[primary_label] = primary_path
+
+    for label, img_bytes in outputs[1:]:
+        safe_label = _safe_path_segment(label)
+        extra_path = project_dir / f"{primary_stem}__{safe_label}.png"
+        extra_path.write_bytes(img_bytes)
+        saved[label] = extra_path
+
+    return saved
