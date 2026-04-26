@@ -107,6 +107,10 @@ P0 머지 후 SKILL.md 를 `docs/TODOS_for_SKILL.md` "최종 호출 인터페이
   어떤 preset 이 적용됐는지 `recommended_negative_preset_name` 메타를 별도로
   노출하면 사용자가 알기 쉬움.
 - **P2-9** `dry_run=true` — `workflow_patcher.PatchReport` 그대로 반환.
+- **워크플로우 이슈** (사용자 통합 smoke 에서 발견, 본 PR 범위 외): sprite/
+  pixel_alpha 출력이 픽셀화 안 됨 (`palette: 4864색`, primary 가 픽셀화 전
+  단계인 듯). `validation_status: fail`. 워크플로우 노드 그래프의 출력 라벨
+  매핑 또는 Pixelize/Quantize 노드 결선 검토 필요.
 
 ### 환경 이슈
 
