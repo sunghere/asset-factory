@@ -214,6 +214,90 @@ def test_upload_truncated_png_returns_400(isolated: _FakeComfyClient) -> None:
     assert isolated.calls == []
 
 
+def test_upload_real_png_with_appended_zip_payload_strips_trailing(
+    isolated: _FakeComfyClient,
+) -> None:
+    """진짜 valid PNG + 뒤에 ZIP/PHP 페이로드 (real polyglot) — 200 통과하지만
+    ComfyUI 로 forward 되는 bytes 는 재인코딩되어 trailing payload 가 strip 돼야 한다.
+
+    이 케이스가 ``Image.verify()`` 로는 못 잡혔던 회귀 — IEND chunk 까지만 검증
+    하고 그 뒤 데이터를 무시했음. ``load() + save()`` 패턴은 픽셀 디코드 후
+    재인코딩하므로 trailing 자동 제거.
+    """
+    real_png = _png_bytes(size=(16, 16))
+    payload = b"PK\x03\x04" + b"<?php system($_GET[0]); ?>" + b"\x00" * 100
+    polyglot = real_png + payload
+
+    with TestClient(server.app) as client:
+        r = client.post(
+            "/api/workflows/inputs",
+            files={"file": ("evil.png", polyglot, "image/png")},
+        )
+    # 실제 valid PNG 부분이 디코드 가능하므로 200
+    assert r.status_code == 200, r.text
+    assert len(isolated.calls) == 1
+    forwarded_bytes = isolated.calls[0]["image_bytes_len"]
+    # 재인코딩된 bytes 가 ComfyUI 로 가야 — 길이가 polyglot 원본과 다름
+    assert forwarded_bytes != len(polyglot)
+
+
+def test_upload_polyglot_bytes_actually_stripped_of_payload_signature(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """forward 되는 bytes 자체에 ZIP signature 가 없는지 직접 검증."""
+    # 캡처용 — bytes 도 보관
+    captured: dict[str, bytes] = {}
+
+    class _CapturingFake(_FakeComfyClient):
+        async def upload_input_image(  # type: ignore[override]
+            self, image_bytes: bytes, filename: str,
+            subfolder: str = "asset-factory", overwrite: bool = True,
+        ) -> dict[str, str]:
+            captured["bytes"] = image_bytes
+            return await super().upload_input_image(
+                image_bytes, filename, subfolder, overwrite,
+            )
+
+    db = Database(tmp_path / "wf.db")
+    asyncio.run(db.init())
+    monkeypatch.setattr(server, "db", db)
+    monkeypatch.setattr(server, "api_key", None)
+    monkeypatch.setattr(server, "comfyui_client", _CapturingFake())
+
+    real_png = _png_bytes(size=(16, 16))
+    polyglot = real_png + b"PK\x03\x04EVIL_PAYLOAD_MARKER"
+    with TestClient(server.app) as client:
+        r = client.post(
+            "/api/workflows/inputs",
+            files={"file": ("evil.png", polyglot, "image/png")},
+        )
+    assert r.status_code == 200
+    assert b"EVIL_PAYLOAD_MARKER" not in captured["bytes"]
+    assert b"PK\x03\x04" not in captured["bytes"]
+
+
+def test_upload_decompression_bomb_returns_400(
+    isolated: _FakeComfyClient, monkeypatch,
+) -> None:
+    """``Image.DecompressionBombError`` (픽셀폭탄) → 400.
+
+    PIL 의 ``MAX_IMAGE_PIXELS`` 임계 초과 입력은 ``DecompressionBombError``
+    를 raise. 이 예외는 ``OSError`` / ``ValueError`` 어디에도 안 들어가므로
+    명시적으로 except 절에 포함되지 않으면 HTTP 500 으로 새어나간다.
+    """
+    # 임계값을 작게 강제 — 8x8=64 pixels 도 bomb 처리되도록.
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 16)
+    bomb = _png_bytes(size=(8, 8))  # 64 pixels > 16 → bomb 판정
+    with TestClient(server.app) as client:
+        r = client.post(
+            "/api/workflows/inputs",
+            files={"file": ("bomb.png", bomb, "image/png")},
+        )
+    assert r.status_code == 400
+    assert "디코딩 실패" in r.json().get("detail", "")
+    assert isolated.calls == []
+
+
 # ----------------------------------------------------------------------------
 # downstream errors
 # ----------------------------------------------------------------------------

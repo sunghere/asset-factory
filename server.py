@@ -1196,13 +1196,17 @@ async def upload_workflow_input(
     ``workflow_params.load_images.<label>`` 에 사용한다.
 
     방어:
-    - ``content-type`` whitelist (PNG/JPEG/WEBP)
-    - ``MAX_INPUT_BYTES`` 상한 (20MB)
-    - PIL ``Image.verify()`` 로 실제 디코딩 검증 — content-type 위장 polyglot 차단
+    - ``content-type`` whitelist (PNG/JPEG/WEBP) — 1차 거부
+    - ``MAX_INPUT_BYTES`` 상한 (20MB) — 413
+    - PIL ``Image.load()`` 로 실제 픽셀 디코딩 + 같은 포맷으로 재인코딩 →
+      trailing payload (PNG 헤더 + ZIP/PHP polyglot) 자동 strip + EXIF/ICC 메타 정화
+    - ``DecompressionBombError`` 캐치 → 픽셀폭탄 입력도 400
     - ``_safe_subfolder`` / ``_safe_input_filename`` 으로 path traversal /
       비-whitelist 문자 정규화
 
     참고: ``subfolder`` 가 비었거나 위반이면 ``asset-factory`` 로 정규화.
+    ComfyUI 로 forward 되는 bytes 는 재인코딩된 *정화본* 이라 원본 sha256 과는
+    다를 수 있다.
     """
     if file.content_type not in _ALLOWED_INPUT_CONTENT_TYPES:
         raise HTTPException(
@@ -1218,25 +1222,53 @@ async def upload_workflow_input(
             detail=f"이미지 너무 큼: {len(bytes_)} > {MAX_INPUT_BYTES}",
         )
 
-    # PIL 디코딩 검증 — content-type 위장 polyglot 차단. Image.verify() 는 헤더
-    # 레벨 검증만 하므로 빠르다. PIL 이 던지는 예외 surface 가 넓어서
-    # (UnidentifiedImageError / OSError / SyntaxError 등) 한 번에 잡고 400 처리.
+    # PIL 디코딩 + 재인코딩 — content-type 위장 polyglot 차단.
+    # Image.verify() 는 PNG IEND 까지만 검증하고 trailing payload (PNG 헤더 +
+    # 뒤에 붙은 ZIP/PHP 등) 를 그대로 통과시킨다. 픽셀을 실제 디코드 (load) 한
+    # 다음 같은 포맷으로 재인코딩 하면 trailing 데이터가 자동 strip 되고
+    # EXIF/ICC 등 메타데이터도 정화된다.
+    # DecompressionBombError 는 OSError/ValueError 어디에도 안 들어가므로
+    # 명시적으로 except 절에 포함 — 픽셀폭탄 입력으로 HTTP 500 이 새는 회귀 방어.
     try:
-        with Image.open(BytesIO(bytes_)) as img:
-            img.verify()
-            actual_format = img.format
-    except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as exc:
+        src = Image.open(BytesIO(bytes_))
+        src.load()  # trigger 픽셀 디코딩 — verify() 보다 강함
+        actual_format = src.format
+    except (
+        UnidentifiedImageError,
+        Image.DecompressionBombError,
+        OSError,
+        SyntaxError,
+        ValueError,
+    ) as exc:
         raise HTTPException(status_code=400, detail=f"이미지 디코딩 실패: {exc}") from exc
+
     if actual_format not in _ALLOWED_INPUT_FORMATS:
+        src.close()
         raise HTTPException(
             status_code=415,
             detail=f"지원 안 되는 포맷: {actual_format}",
         )
 
+    # 같은 포맷으로 재인코딩 — JPEG 는 quality="keep" 로 양자화 테이블 보존해
+    # 시각적 손실 0. PNG/WEBP 는 lossless 재인코딩.
+    clean_buf = BytesIO()
+    save_kwargs: dict[str, object] = {"format": actual_format}
+    if actual_format == "JPEG":
+        save_kwargs["quality"] = "keep"
+    try:
+        src.save(clean_buf, **save_kwargs)
+    except (OSError, ValueError) as exc:
+        src.close()
+        raise HTTPException(
+            status_code=400, detail=f"이미지 재인코딩 실패: {exc}"
+        ) from exc
+    src.close()
+    sanitized_bytes = clean_buf.getvalue()
+
     try:
         return await comfyui_client.upload_input_image(
-            image_bytes=bytes_,
-            filename=_safe_input_filename(file.filename, bytes_),
+            image_bytes=sanitized_bytes,
+            filename=_safe_input_filename(file.filename, sanitized_bytes),
             subfolder=_safe_subfolder(subfolder),
         )
     except SDError as exc:
