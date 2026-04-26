@@ -104,7 +104,7 @@ def _set_input(field: str) -> Callable[[dict[str, Any], Any], None]:
     return _apply
 
 
-# 각 패치 키에 대한 단일 규칙. (lora_strengths 만 dict 라 별도 처리)
+# 각 패치 키에 대한 단일 규칙. (lora_strengths / load_images 는 별도 dict 처리)
 _RULES: dict[str, _PatchRule] = {
     "prompt": _PatchRule(
         class_type="CLIPTextEncode",
@@ -141,11 +141,6 @@ _RULES: dict[str, _PatchRule] = {
         title_match=None,
         apply=_set_input("scheduler"),
     ),
-    "pose_image": _PatchRule(
-        class_type="LoadImage",
-        title_match=r"Pose grid",  # PoseExtract 의 "Load source image" 는 매칭 안 됨
-        apply=_set_input("image"),
-    ),
     "controlnet_strength": _PatchRule(
         class_type="ControlNetApply",
         title_match=None,
@@ -165,6 +160,29 @@ _RULES: dict[str, _PatchRule] = {
         class_type="EmptyLatentImage",
         title_match=None,
         apply=_set_input("height"),
+    ),
+}
+
+
+# LoadImage 라벨별 매칭 규칙. ``load_images: {<label>: <filename>}`` 로 dispatch.
+# 라벨이 본 dict 에 없으면 silent skip + ``report.skipped`` 기록.
+#
+# 신규 LoadImage 노드를 패치 대상에 추가하려면 여기에 한 줄 추가하면 된다 —
+# patch_workflow 시그니처/타입 변경 0회.
+_LOAD_IMAGE_RULES: dict[str, _PatchRule] = {
+    "pose_image": _PatchRule(
+        class_type="LoadImage",
+        # "Pose grid" 와 "Pose grid (ControlNet input)" 둘 다 매칭. PoseExtract
+        # 의 "Load source image" 는 안 매칭 (의도). loose regex 유지.
+        title_match=r"Pose grid",
+        apply=_set_input("image"),
+    ),
+    "source_image": _PatchRule(
+        class_type="LoadImage",
+        # PoseExtract_V37 의 정확한 title. anchor 강제 — "Pose grid" 등 다른
+        # LoadImage 와 충돌 방지.
+        title_match=r"^Load source image$",
+        apply=_set_input("image"),
     ),
 }
 
@@ -202,6 +220,7 @@ def patch_workflow(
     width: int | None = None,
     height: int | None = None,
     ksampler_overrides: dict[str, dict[str, Any]] | None = None,
+    load_images: dict[str, str] | None = None,
 ) -> tuple[WorkflowJson, PatchReport]:
     """워크플로우 API JSON 의 패치된 사본을 반환한다.
 
@@ -212,6 +231,12 @@ def patch_workflow(
     일괄 패치 (``seed``/``steps``/``cfg``/``sampler_name``/``scheduler``) 가
     먼저 적용된 뒤, 이 dict 의 title 정규식에 매칭되는 KSampler 만 그 값으로
     덮어쓴다. 예: ``{r"hires|refine": {"steps": 8, "cfg": 4.0}}``.
+
+    ``load_images`` 는 LoadImage 노드 dispatch — ``{<label>: <filename>}``.
+    라벨은 ``_LOAD_IMAGE_RULES`` 의 키 (현재: ``pose_image`` / ``source_image``).
+    미등록 라벨은 ``report.skipped`` 에 기록 (silent skip). 기존 ``pose_image``
+    스칼라 kwarg 는 backward-compat 별칭 — ``load_images`` 가 같은 라벨을 가지면
+    ``load_images`` 가 우선.
     """
     wf = copy.deepcopy(api_json)
     applied: dict[str, list[str]] = {}
@@ -225,7 +250,6 @@ def patch_workflow(
         "cfg": cfg,
         "sampler_name": sampler_name,
         "scheduler": scheduler,
-        "pose_image": pose_image,
         "controlnet_strength": controlnet_strength,
         "checkpoint": checkpoint,
         "width": width,
@@ -245,6 +269,28 @@ def patch_workflow(
             inputs = node.setdefault("inputs", {})
             rule.apply(inputs, value)
             applied[key].append(nid)
+
+    # LoadImage dispatch — ``load_images`` dict 와 ``pose_image`` backward-compat
+    # 별칭 합성. dict 가 명시한 라벨이 있으면 그게 우선 (테스트 매트릭스 §6).
+    effective_load_images: dict[str, str] = dict(load_images or {})
+    if pose_image is not None and "pose_image" not in effective_load_images:
+        effective_load_images["pose_image"] = pose_image
+
+    for label, image_name in effective_load_images.items():
+        rule = _LOAD_IMAGE_RULES.get(label)
+        if rule is None:
+            # 미등록 라벨 — silent skip
+            skipped.append(label)
+            continue
+        matches = find_nodes(wf, rule.class_type, title_match=rule.title_match)
+        if not matches:
+            skipped.append(label)
+            continue
+        applied[label] = []
+        for nid, node in matches:
+            inputs = node.setdefault("inputs", {})
+            rule.apply(inputs, image_name)
+            applied[label].append(nid)
 
     if lora_strengths:
         applied_loras = _apply_lora_strengths(wf, lora_strengths)

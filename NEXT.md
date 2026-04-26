@@ -2,89 +2,73 @@
 
 > Transient 문서. 작성/삭제 규칙은 [`CLAUDE.md`](./CLAUDE.md#세션-핸드오프-nextmd) 참조.
 
-_작성: 2026-04-20 · 세션 종료 시점_
+_작성: 2026-04-26 · 세션 종료 시점_
 
 ---
 
 ## 최근작업
 
-### 테스트 커버리지 보강 (2026-04-21)
+### ComfyUI 백엔드 스택 + Windows 회귀 fix (PR #13, 2026-04-26)
 
-- `tests/test_generator.py` 신규 — `SDClient.health_check/list_models/list_loras`,
-  `txt2img` payload·bad info 처리, `_request_json` retry/HTTP error 분기,
-  저장 helper 2종 경로 sanitization까지 단위 테스트 추가.
-- `tests/test_validator_unit.py` 신규 — PNG 성공 케이스, size/palette/format
-  복합 실패 케이스, `_count_colors()` palette overflow fallback 추가.
-- `tests/test_catalog_api.py` — invalid YAML, fallback field/title/alias, invalid
-  metadata entry skip 케이스 보강.
-- `tests/test_gc_policy.py` — rejected path 로딩 schema error fallback, candidates
-  루트 밖 파일 보호 케이스 추가.
-- `.gitignore` 에 `.coverage` 추가 (coverage 산출물 추적 방지).
+- **PR #13 머지 완료** ([4de9fbf](https://github.com/sunghere/asset-factory/commit/4de9fbf), squash):
+  - ComfyUI 백엔드 (`generator_comfyui.py`, `sd_backend.py`, `workflow_registry.py`,
+    `workflow_patcher.py`) + 41개 워크플로우 카탈로그 + 신규 엔드포인트
+    `GET /api/workflows/catalog`, `POST /api/workflows/generate`
+  - Windows 환경 회귀 fix: `server.py:_allowed_roots`(`os.pathsep`),
+    `scanner.py:infer_category`(`as_posix`)
+- **1차 리뷰 + 비판 검토 후 P1×9 + P2×5 모두 같은 PR 에 반영** — lint/CodeQL,
+  KSampler title-aware 패치, ClientSession 재사용, prompt_lost fail-fast,
+  빈 outputs 디버깅 메시지, catalog 절대경로 회피, atomic registry 갱신,
+  GenerationOutcome invariant, VariantSpec 타이핑, disk guard scaling,
+  random seed fallback. **기존 mock 시그니처 가변 인자 패턴 통일**.
+- **신규/보강 테스트 +17** (`tests/test_generator_comfyui.py` 13 케이스 +
+  workflow_patcher 3 + sd_backend 2)
+- **검증**: pytest **202 passed**, ruff **All checks passed**
 
-### 검증
-- `.venv/bin/python -m pytest tests/ -q` → **122 passed**
-- `.venv/bin/python -m ruff check .` → **All checks passed**
-- `.venv/bin/coverage run -m pytest tests/ -q && .venv/bin/coverage report -m`
-  → 전체 **87%**, `generator.py` **97%**, `validator.py` **100%**,
-  `catalog.py` **95%**, `candidate_gc.py` **88%**
+### 문서/기획 (2026-04-26)
+
+- [`docs/PLAN_comfyui_dynamic_inputs.md`](./docs/PLAN_comfyui_dynamic_inputs.md) —
+  ComfyUI 동적 입력 업로드 1차 PR 상세 계획 (8단계 ~3.5h, 코드 스켈레톤 +
+  테스트 매트릭스 + 위험 표 + 결정 사항 6개 확정)
+- [`docs/TODOS.md`](./docs/TODOS.md) — 후속 작업 추적 신설 (P0/P1/P2 13항목,
+  라벨 6종)
 
 ---
 
-## 핸드오프 — 기획 ↔ 구현 갭 (재검수 · 코드 기준 2026-04-20)
+## 핸드오프
 
-아래는 **구 self-check 목록(동일 날짜 초안)을 코드와 대조해 재분류**한 것이다.
-단일 진실은 계속 `docs/SCREEN_SPEC_v0.2.md` 이며, followups 문서의 §1–§5(썸네일·키맵·projects·SSE 명세·캐시) 중복은 생략한다.
+### B 작업 — ComfyUI 동적 입력 1차 PR (신규 세션 픽업)
 
-**범례:** `해결` = 초안 주장이 더 이상 맞지 않음 · `부분` = 구현됐으나 스펙과 디테일 차이 · `미해결` = 여전히 갭
+상위 설계는 [`docs/PLAN_comfyui_dynamic_inputs.md`](./docs/PLAN_comfyui_dynamic_inputs.md),
+**신규 세션을 위한 상세 핸드오프**는
+[`docs/HANDOFF_comfyui_dynamic_inputs.md`](./docs/HANDOFF_comfyui_dynamic_inputs.md)
+에 작성 — 코드 위치(file:line), 결정 사항, 테스트 패턴, 개발 환경, CI 게이트,
+git 워크플로우 템플릿, loose ends 까지 포함.
 
-### 구 번호 → 재분류 (요약)
+**선결 (사용자 외부 작업):** ComfyUI 의 `POST /upload/image` 가 존재하지 않는
+subfolder 를 자동 생성하는지 curl 1회 실측. 결과에 따라 폴백 분기 결정. 상세는
+HANDOFF 문서 §3 참조.
 
-| 구# | 재분류 | 한 줄 |
-|-----|--------|--------|
-| 1 CherryPick 사이드 | **해결** | 380px SidePanel·Preview/Meta/Actions·Compare |
-| 2 키맵 | **부분** | Enter/x/v/c/i/m/?/J·K·LoRA 등 대부분 반영; 스펙 문구와 1:1 대조는 별도 |
-| 3 Compare | **해결** | `Dialog`/`CompareDialog`·비교 set |
-| 4 SSE | **부분** | Dashboard/Queue/CherryPick/Batches/BatchDetail·AssetDetail 연결됨. `gc_run_completed`·`sd_health_changed` UI 연동·Export는 `export_completed` SSE 추가됨. 다중 `EventSource`·폴링 주기 vs §6.1 수치는 여전히 검토 여지 |
-| 5 Tasks 탭 | **해결** | 3탭·`/api/batches/{id}/tasks`·retry-failed |
-| 6 가상화·prefetch | **부분** | 구현 있음; 100장 실측·스펙 §11 문구 정밀 대조는 미완 |
-| 7 Dashboard | **부분** | SD·by_category·curl 등 일부 블록/카피는 §6.1과 차이 |
-| 8 Queue 행 | **부분** | 풀 와이어 vs 현재 테이블 밀도 |
-| 9 Assets | **부분** | 정렬·URL·bulk·페이징·SSE 일부 반영; 스펙 문장 전부 충족은 아님 |
-| 10 Settings auto-advance | **부분** | 설정 키 존재; CherryPick이 읽는지·도움말 버튼은 재확인 |
-| 11 System | **해결** | DB/Worker/Logs 블록·API 존재 |
-| 12 AssetDetail 복원 | **부분** | restore 플로우·SSE 배치 처리(검수 후속에서 수정) |
-| 13 a11y | **부분** | listbox 등 일부; Toast role·SegProgress 등 잔여 |
-| 14 BatchNew | **부분** | 200+ 경고·JSON 프리뷰·loras 매트릭스 등 |
-| 15 Catalog | **부분** | 카드·역참조 등 — 3자 검수에서는 pass 근접, 스펙 전 항목은 재확인 권장 |
-| 16 Export | **부분** | category/since·트리·MB 등 상당 부분 구현; 레이아웃 vs §6.9 |
-| 17 에러·배너 | **부분** | ErrorPanel·PersistentBanners·401 복구 UX vs §9–10 정밀 |
-| 18 localStorage 키 | **부분** | `af_api_key`·마이그레이션 여부 코드 확인 |
-| 19 모바일 | **미해결** |
-| 20 분석 이벤트 §12 | **미해결** |
-| 21 TopBar API 키 | **해결** | `ApiKeyChip` 등 |
+### C-P0 #2 — `workflows/README.md` 의 `af workflow gen` 광고 정정 (uncommitted)
 
-### SCREEN_SPEC §6·§8 기준 **부분(partial)** 이슈 풀 (이슈 쪼개기용)
+이번 세션이 시작했다가 인터럽트로 중단. 3개 hunk 가 working tree 에 남아 있을
+수 있음 (상단 CLI 미구현 배너 + §3-§4 curl 예제 교체 + §새 카테고리 한 줄
+정정). 처리 옵션:
 
-1. **IA 표기**: 문서는 `/cherry-pick?batch=` · 앱은 `/cherry-pick/:batchId` (레거시 쿼리는 서버에서 `/app/cherry-pick/:id` 로 리다이렉트).
-2. **§6.1 Dashboard**: CTA가 큐가 아닌 바로 체리픽으로 가는지·카드 클릭·타임라인 밀도.
-3. **§6.2 Queue**: empty state curl·행 풀 스펙·footer.
-4. **§6.3 CherryPick**: 3-segment 진행바·다음 배치 자동 진입 등 세부.
-5. **§6.4–6.5 Assets / AssetDetail**: 캐러셀 vs 테이블·옵션 `role` 완성도.
-6. **§6.6 BatchDetail**: Spec 탭 curl 복사 등.
-7. **§6.7 BatchNew**: 성공 후 자동 이동 vs 토스트만.
-8. **§6.9 Export**: 3열 와이어 vs 2열 그리드.
-9. **§8 a11y**: Toast `role`·`Thumb`+listbox·`SegProgress` progressbar.
+1. **B 작업 PR 에 묶음** (권장 — 어차피 B 가 `workflows/README.md` 에 curl 예제
+   추가하므로 자연스럽게 합쳐짐)
+2. 별도 작은 PR 로 먼저 처리 (5분)
+3. revert 후 B 끝나고 다시 — `git checkout workflows/README.md`
 
-### 기타 관찰 (갱신)
+### 워크트리 잔재 (사용자 외부 작업)
 
-- `app.jsx` 에 `/regen` → `/batches/new` 리다이렉트만 남음; 사이드 네비에서 `/monitor`·`/errors` 노출은 **제거된 상태**로 보는 것이 맞다(재확인: `chrome.jsx` `NAV_ITEMS`).
-- 스크립트 로더는 `static/app/manifest.json` 로 이전 완료 — 초안의 "index.html 알파벳 순" 지적은 **구식**.
+이번 세션이 `claude/vigorous-torvalds-a1e1af` 워크트리 안에서 돌고 있어 강제
+삭제 불가. 사용자가 본인 터미널에서 (선택):
 
-### 추천 다음 스프린트 (실제 갭 위주로 수정)
+```bash
+cd D:/DEV/asset-factory
+git worktree remove --force .claude/worktrees/vigorous-torvalds-a1e1af
+git branch -D claude/vigorous-torvalds-a1e1af
+```
 
-- **A — 스펙 밀도**: §6.1 대시보드 · §6.2 큐 · §6.3 체리픽 세부(진행바·empty)·§6.9 익스포트 레이아웃.
-- **B — SSE·폴링**: `sd_health_changed` / `EVENTS.md` 소비자 정리, 단일 구독 여부, §7.3 이름과 코드 정렬(`task_error` vs 문서 `task_failed` 등).
-- **C — a11y·설정**: §8 잔여 · Settings 도움말/auto-advance 검증.
-- **D — 장기**: §12 계측 · 모바일 §19.
-
-브라우저 스모크 순서는 [`docs/BROWSER_SMOKE_CHECKLIST.md`](docs/BROWSER_SMOKE_CHECKLIST.md).
+이미 `.gitignore` 에 `.claude/` 들어가 있어 안 지워도 향후 커밋 오염 0.

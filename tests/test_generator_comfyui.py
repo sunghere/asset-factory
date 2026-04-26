@@ -342,3 +342,181 @@ def test_async_context_manager_closes_session() -> None:
             assert not client._session.closed
         # exit 후 닫힘
         assert client._session is None
+
+    asyncio.run(scenario())
+
+
+# ----------------------------------------------------------------------------
+# upload_input_image (POST /upload/image, multipart)
+# ----------------------------------------------------------------------------
+
+
+def test_upload_input_image_happy_path_returns_response_dict() -> None:
+    """200 + ComfyUI JSON 응답을 그대로 호출자에게 전달."""
+
+    async def scenario() -> None:
+        async with _client() as client:
+            with aioresponses() as m:
+                m.post(
+                    "http://comfy:8188/upload/image",
+                    payload={
+                        "name": "abc_input.png",
+                        "subfolder": "asset-factory",
+                        "type": "input",
+                    },
+                )
+                resp = await client.upload_input_image(
+                    image_bytes=b"PNG_BYTES",
+                    filename="abc_input.png",
+                )
+                assert resp == {
+                    "name": "abc_input.png",
+                    "subfolder": "asset-factory",
+                    "type": "input",
+                }
+
+    asyncio.run(scenario())
+
+
+def test_upload_input_image_413_classified_as_sd_client_error() -> None:
+    """ComfyUI 가 4xx 거부 → sd_client_error (재시도 안 함)."""
+
+    async def scenario() -> None:
+        async with _client(retries=1) as client:
+            with aioresponses() as m:
+                m.post(
+                    "http://comfy:8188/upload/image",
+                    status=413,
+                    body="Payload Too Large",
+                )
+                with pytest.raises(SDError) as ei:
+                    await client.upload_input_image(
+                        image_bytes=b"x", filename="x.png",
+                    )
+                assert ei.value.code == "sd_client_error"
+                assert ei.value.http_status == 413
+
+    asyncio.run(scenario())
+
+
+def test_upload_input_image_503_classified_as_sd_server_error() -> None:
+    """5xx → sd_server_error."""
+
+    async def scenario() -> None:
+        async with _client(retries=1) as client:
+            with aioresponses() as m:
+                m.post(
+                    "http://comfy:8188/upload/image",
+                    status=503,
+                    body="Service Unavailable",
+                )
+                with pytest.raises(SDError) as ei:
+                    await client.upload_input_image(
+                        image_bytes=b"x", filename="x.png",
+                    )
+                assert ei.value.code == "sd_server_error"
+
+    asyncio.run(scenario())
+
+
+def test_upload_input_image_504_classified_as_timeout() -> None:
+    """504 → timeout."""
+
+    async def scenario() -> None:
+        async with _client(retries=1) as client:
+            with aioresponses() as m:
+                m.post(
+                    "http://comfy:8188/upload/image",
+                    status=504,
+                    body="Gateway Timeout",
+                )
+                with pytest.raises(SDError) as ei:
+                    await client.upload_input_image(
+                        image_bytes=b"x", filename="x.png",
+                    )
+                assert ei.value.code == "timeout"
+
+    asyncio.run(scenario())
+
+
+def test_upload_input_image_connection_error_classified_as_unreachable() -> None:
+    """aiohttp.ClientError → unreachable (모든 재시도 소진 후)."""
+    import aiohttp
+
+    async def scenario() -> None:
+        async with _client(retries=2) as client:
+            with aioresponses() as m:
+                m.post(
+                    "http://comfy:8188/upload/image",
+                    exception=aiohttp.ClientConnectionError("conn refused"),
+                )
+                m.post(
+                    "http://comfy:8188/upload/image",
+                    exception=aiohttp.ClientConnectionError("conn refused"),
+                )
+                with pytest.raises(SDError) as ei:
+                    await client.upload_input_image(
+                        image_bytes=b"x", filename="x.png",
+                    )
+                assert ei.value.code == "unreachable"
+
+    asyncio.run(scenario())
+
+
+def test_upload_input_image_retry_then_success() -> None:
+    """첫 시도 실패 → 재시도 성공. FormData 가 재구성돼야 한다 (소진 회귀 방어)."""
+    import aiohttp
+
+    async def scenario() -> None:
+        async with _client(retries=2) as client:
+            with aioresponses() as m:
+                m.post(
+                    "http://comfy:8188/upload/image",
+                    exception=aiohttp.ClientConnectionError("transient"),
+                )
+                m.post(
+                    "http://comfy:8188/upload/image",
+                    payload={
+                        "name": "x.png",
+                        "subfolder": "asset-factory",
+                        "type": "input",
+                    },
+                )
+                resp = await client.upload_input_image(
+                    image_bytes=b"PNG_BYTES",
+                    filename="x.png",
+                )
+                assert resp["name"] == "x.png"
+
+    asyncio.run(scenario())
+
+
+def test_upload_input_image_overwrite_false_param_propagates() -> None:
+    """overwrite=False → form field 'false'. aioresponses 의 requests 기록으로 검증."""
+    from yarl import URL
+
+    async def scenario() -> None:
+        async with _client() as client:
+            with aioresponses() as m:
+                m.post(
+                    "http://comfy:8188/upload/image",
+                    payload={"name": "x.png", "subfolder": "asset-factory", "type": "input"},
+                )
+                await client.upload_input_image(
+                    image_bytes=b"PNG",
+                    filename="x.png",
+                    overwrite=False,
+                )
+
+                # aioresponses 가 잡은 호출 — kwargs['data'] 가 FormData 인스턴스
+                key = ("POST", URL("http://comfy:8188/upload/image"))
+                calls = m.requests.get(key) or []
+                assert len(calls) == 1
+                form = calls[0].kwargs["data"]
+                # FormData._fields: list of (info, headers, value)
+                fields = {f[0]["name"]: f[2] for f in form._fields}
+                assert fields["overwrite"] == "false"
+                assert fields["type"] == "input"
+                assert fields["subfolder"] == "asset-factory"
+
+    asyncio.run(scenario())
