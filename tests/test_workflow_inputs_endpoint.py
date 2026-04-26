@@ -340,6 +340,54 @@ def test_max_input_bytes_default_is_20mb() -> None:
     assert server.MAX_INPUT_BYTES == 20 * 1024 * 1024
 
 
+def test_upload_lossless_webp_preserves_pixels(monkeypatch, tmp_path: Path) -> None:
+    """무손실 WEBP 입력은 재인코딩 후에도 픽셀 그대로.
+
+    PIL 디폴트 ``save(format="WEBP")`` 는 lossy quality=80 — 무손실 reference
+    이미지를 silent lossy 변환하면 ControlNet 입력 품질 저하. lossless flag 보존
+    여부를 정화기가 책임.
+    """
+    captured: dict[str, bytes] = {}
+
+    class _Cap(_FakeComfyClient):
+        async def upload_input_image(  # type: ignore[override]
+            self, image_bytes: bytes, filename: str,
+            subfolder: str = "asset-factory", overwrite: bool = True,
+        ) -> dict[str, str]:
+            captured["bytes"] = image_bytes
+            return await super().upload_input_image(
+                image_bytes, filename, subfolder, overwrite,
+            )
+
+    db = Database(tmp_path / "wf.db")
+    asyncio.run(db.init())
+    monkeypatch.setattr(server, "db", db)
+    monkeypatch.setattr(server, "api_key", None)
+    monkeypatch.setattr(server, "comfyui_client", _Cap())
+
+    # 알파 + 미세한 그라디언트로 lossy 변환 시 즉각 차이 나는 입력
+    src = Image.new("RGBA", (16, 16), (255, 0, 0, 200))
+    for x in range(16):
+        for y in range(16):
+            src.putpixel((x, y), (x * 16, y * 16, 100, 200))
+    buf = io.BytesIO()
+    src.save(buf, format="WEBP", lossless=True)
+    webp_bytes = buf.getvalue()
+
+    with TestClient(server.app) as client:
+        r = client.post(
+            "/api/workflows/inputs",
+            files={"file": ("c.webp", webp_bytes, "image/webp")},
+        )
+    assert r.status_code == 200, r.text
+
+    orig_pixels = Image.open(io.BytesIO(webp_bytes)).convert("RGBA").tobytes()
+    forwarded_pixels = (
+        Image.open(io.BytesIO(captured["bytes"])).convert("RGBA").tobytes()
+    )
+    assert orig_pixels == forwarded_pixels
+
+
 def test_upload_comfy_response_missing_name_returns_502(
     monkeypatch, tmp_path: Path,
 ) -> None:

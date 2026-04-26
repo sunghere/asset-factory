@@ -169,7 +169,9 @@ def _safe_input_filename(original: str | None, content_bytes: bytes) -> str:
     base = original or "input.png"
     stem, dot, ext = base.rpartition(".")
     if not dot:
-        stem, ext = base or "input", "png"
+        # 확장자 없는 입력 → ``input.png`` 디폴트 분리. ``base`` 는 line 위에서
+        # ``or`` 로 truthy 보장된 값이라 추가 fallback 불필요.
+        stem, ext = base, "png"
     safe_stem = _SAFE_FILENAME_CHARS.sub("_", stem).replace("..", "_").strip(".") or "input"
     safe_ext = _SAFE_FILENAME_CHARS.sub("_", ext).replace("..", "_").strip(".") or "png"
     return f"{digest}_{safe_stem[:64]}.{safe_ext[:8]}"
@@ -215,7 +217,20 @@ def _decode_and_reencode_image(image_bytes: bytes) -> tuple[bytes, str]:
     clean_buf = BytesIO()
     save_kwargs: dict[str, object] = {"format": actual_format}
     if actual_format == "JPEG":
+        # quality="keep" 으로 양자화 테이블 보존 — 시각 손실 0
         save_kwargs["quality"] = "keep"
+    elif actual_format == "WEBP":
+        # 무손실 입력은 무손실로 보존, 그 외는 quality=100 high-fidelity.
+        # 디폴트 (quality=80) 로 재인코딩하면 무손실 reference 가 silent lossy
+        # 변환되어 ControlNet 입력 품질 저하 가능.
+        # PIL ``src.info`` 는 WEBP 의 lossless 플래그를 노출하지 않아 RIFF chunk
+        # fourcc 직접 검사 (``VP8L`` = lossless, ``VP8 `` = lossy, VP8X 확장 형식
+        # 은 우리 endpoint 가 다루는 정적 이미지 범위 외).
+        is_lossless = (
+            len(image_bytes) >= 16 and image_bytes[12:16] == b"VP8L"
+        )
+        save_kwargs["lossless"] = is_lossless
+        save_kwargs["quality"] = 100
     try:
         src.save(clean_buf, **save_kwargs)
     except (OSError, ValueError) as exc:
