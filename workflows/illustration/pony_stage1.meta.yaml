@@ -1,0 +1,61 @@
+# illustration/pony_stage1 — Prefect Pony XL (Pony 정통 anime, stage1).
+#
+# 워크플로우: B2_PrefectPony_HiRes_V36_api_stage1.json. ckpt: prefectPonyXL_v6.
+# Pony 정통 — score_9 prefix 필수.
+schema_version: 1
+
+intent: |
+  Pony-style anime illustration (Prefect Pony XL base) with score_9 prefix
+  auto-prepended. Strong character expression / variety vs Animagine.
+
+use_cases:
+  - "Pony-style anime character (more diverse expression than Animagine)"
+  - "Anime illustration with strong character emphasis (poses, action)"
+  - "Quick Pony iteration before hires"
+
+not_for:
+  - "high-resolution deliverable — use illustration/pony_hires"
+  - "standard clean anime — use illustration/animagine_stage1"
+  - "pixel art — use sprite/* or pixel_bg/pony_stage1 (RDXL Pony pixel)"
+
+output_layout:
+  kind: single
+  rows: 1
+  cols: 1
+  per_cell_size: [1024, 1024]
+  alpha: false
+  notes: "1024×1024 raw stage1. Pony score_9 prefix 자동 prepend."
+
+tags:
+  - anime
+  - illustration
+  - pony
+  - 1024x1024
+  - stage1
+  - 일러스트
+  - score_9
+
+prompt_template:
+  # base_positive: Pony 정통 score_9 prefix. user 가 또 박을 필요 없음.
+  base_positive: |
+    score_9, score_8_up, score_7_up, score_6_up,
+    masterpiece, best quality
+  # base_negative: Pony 의 score_3~5 가 negative trigger.
+  base_negative: |
+    score_5, score_4, score_3, score_2, score_1,
+    (worst quality, low quality:1.4), blurry, jpeg artifacts, deformed, bad anatomy,
+    watermark, text, signature, extra fingers, mutated hands
+  user_slot:
+    label: subject
+    description: |
+      anime 캐릭터/장면 묘사. score_9 prefix 는 base 에 박혀있어 user 가
+      또 박을 필요 없음. Pony 학습이 표현·다양성 강함 — 액션/표정 디테일 prompt 가
+      Animagine 보다 잘 반영.
+    examples:
+      - "1girl, blue hair, school uniform, smiling, anime style"
+      - "1boy, dragon companion, fantasy warrior, action pose"
+      - "1girl, magical girl, twirling pose, sparkles"
+    required: true
+    min_chars: 5
+    max_chars: 400
+  injection_rule: "{base_positive}, {subject}"

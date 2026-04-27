@@ -1,0 +1,60 @@
+# illustration/meinamix_stage1 — MeinaMix SD1.5 anime (stage1).
+#
+# 워크플로우: B6_MeinaMix_HiRes_V36_api_stage1.json. ckpt: meinamix_v12Final (SD1.5).
+# 가장 가벼운 변형 — VRAM 5GB, 15초/장. 저사양 환경 / 대량 prototyping.
+schema_version: 1
+
+intent: |
+  SD1.5 anime illustration (MeinaMix base, 512×768 default). Lightest variant
+  for low-VRAM systems and bulk prototyping.
+
+use_cases:
+  - "Low-VRAM environment (10GB 이하 GPU 가능)"
+  - "Bulk prototyping (모든 SDXL 변형보다 빠름)"
+  - "Quick anime sketch / mood test before SDXL hires"
+
+not_for:
+  - "1024×1024 이상 고해상도 — SDXL 시리즈 사용 (animagine/pony/hyphoria/anything)"
+  - "Illustrious / Pony 정통 트리거 호환 안 됨 — 학습 base 다름"
+  - "high-resolution deliverable — use illustration/meinamix_hires"
+
+output_layout:
+  kind: single
+  rows: 1
+  cols: 1
+  per_cell_size: [512, 768]
+  alpha: false
+  notes: |
+    512×768 raw stage1. SD1.5 기본 해상도. SDXL 의 1024×1024 와 다르니 width/
+    height defaults 확인.
+
+tags:
+  - anime
+  - illustration
+  - sd1.5
+  - meinamix
+  - low-vram
+  - fast
+  - 512x768
+  - stage1
+  - 일러스트
+
+prompt_template:
+  base_positive: |
+    masterpiece, best quality
+  base_negative: |
+    (worst quality, low quality:1.4), blurry, jpeg artifacts, deformed, bad anatomy,
+    watermark, text, signature, extra fingers, mutated hands
+  user_slot:
+    label: subject
+    description: |
+      anime 캐릭터/장면 묘사. SD1.5 라 SDXL 트리거 (very aesthetic / absurdres
+      등) 효과 약함 — 단순 anime prompt 패턴 그대로 사용.
+    examples:
+      - "1girl, anime style, portrait, soft lighting"
+      - "1boy, fantasy outfit, detailed eyes"
+      - "anime landscape, vibrant colors"
+    required: true
+    min_chars: 5
+    max_chars: 300
+  injection_rule: "{subject}, {base_positive}"
