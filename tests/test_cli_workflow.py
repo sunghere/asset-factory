@@ -113,6 +113,52 @@ def test_catalog_command_emits_json(runner: CliRunner, base_url: str) -> None:
 
 
 # ----------------------------------------------------------------------------
+# recommend
+# ----------------------------------------------------------------------------
+
+
+def test_recommend_command_passes_filters_as_query(runner: CliRunner, base_url: str) -> None:
+    with respx.mock(base_url=base_url) as mock:
+        route = mock.get("/api/workflows/recommend").mock(
+            return_value=httpx.Response(200, json={
+                "filters": {"kind": "character", "style": "pixel-art"},
+                "matches": [
+                    {
+                        "category": "sprite", "variant": "pixel_alpha",
+                        "tags": {"kind": "character", "style": "pixel-art",
+                                 "format": "multi-view-1x3", "output": "alpha-pixel",
+                                 "model_family": "illustrious"},
+                        "primary": True, "use_cases": ["uc 1"],
+                        "cost": {"est_seconds": 45, "vram_gb": 12.0},
+                    }
+                ]
+            })
+        )
+        result = runner.invoke(
+            app,
+            ["workflow", "recommend", "--kind", "character", "--style", "pixel-art"],
+        )
+    assert result.exit_code == 0, _err_text(result)
+    sent = route.calls.last.request
+    assert "kind=character" in str(sent.url)
+    assert "style=pixel-art" in str(sent.url)
+    out = json.loads(result.stdout)
+    assert out["matches"][0]["variant"] == "pixel_alpha"
+
+
+def test_recommend_command_no_filters_omits_query(runner: CliRunner, base_url: str) -> None:
+    with respx.mock(base_url=base_url) as mock:
+        route = mock.get("/api/workflows/recommend").mock(
+            return_value=httpx.Response(200, json={"filters": {}, "matches": []})
+        )
+        result = runner.invoke(app, ["workflow", "recommend"])
+    assert result.exit_code == 0, _err_text(result)
+    # no query params 전송됨 (모두 None → 미포함)
+    sent = route.calls.last.request
+    assert sent.url.query == b""
+
+
+# ----------------------------------------------------------------------------
 # upload
 # ----------------------------------------------------------------------------
 

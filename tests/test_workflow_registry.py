@@ -15,8 +15,15 @@ from pathlib import Path
 import pytest
 
 from workflow_registry import (
+    CostEstimate,
+    ForbiddenToken,
     InputLabelSpec,
     OutputSpec,
+    PromptExample,
+    PromptTemplate,
+    PromptToken,
+    RelatedRefs,
+    TagSet,
     VariantSpec,
     WorkflowRegistry,
     WorkflowRegistryError,
@@ -728,3 +735,518 @@ categories:
     with pytest.raises(Exception):
         v.name = "other"  # type: ignore[misc]
     assert isinstance(v, VariantSpec)
+
+
+# ----------------------------------------------------------------------------
+# 디스커버리 메타 — use_cases / tags / prompt_template / cost / pitfalls / related
+# ----------------------------------------------------------------------------
+
+
+def test_meta_absent_keeps_defaults(tmp_path: Path) -> None:
+    """메타 미작성 변형은 None / 빈 tuple — 기존 호출 호환성 확보."""
+    _write_workflow(tmp_path, "sprite/v.json")
+    _write_manifest(
+        tmp_path,
+        """
+version: 1
+categories:
+  sprite:
+    variants:
+      v:
+        file: sprite/v.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+""",
+    )
+    reg = WorkflowRegistry(root=tmp_path)
+    v = reg.variant("sprite", "v")
+    assert v.use_cases == ()
+    assert v.not_for == ()
+    assert v.tags is None
+    assert v.character_proportions is None
+    assert v.prompt_template is None
+    assert v.cost is None
+    assert v.pitfalls == ()
+    assert v.related is None
+
+
+def test_meta_full_roundtrip(tmp_path: Path) -> None:
+    _write_workflow(tmp_path, "sprite/v.json")
+    _write_manifest(
+        tmp_path,
+        """
+version: 1
+categories:
+  sprite:
+    variants:
+      v:
+        file: sprite/v.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+        use_cases:
+          - "use case A"
+          - "use case B"
+        not_for:
+          - "anti use 1"
+        tags:
+          kind: character
+          style: pixel-art
+          format: multi-view-1x3
+          output: alpha-pixel
+          model_family: illustrious
+        character_proportions:
+          head_ratio: 2.5
+          chibi: true
+        prompt_template:
+          skeleton: |
+            {gender}, {hair}, masterpiece
+          model_triggers:
+            - "score_9, score_8_up"
+          required_tokens:
+            - { placeholder: "{gender}", examples: ["1girl", "1boy"] }
+            - placeholder: "{hair}"
+              examples: ["black hair"]
+          forbidden_tokens:
+            - { token: "(chibi:1.4)", reason: "ControlNet 충돌" }
+          examples:
+            - prompt: "1girl, black hair, masterpiece"
+              seed: 42
+              note: "검증된 prompt"
+        cost:
+          est_seconds: 45
+          vram_gb: 12
+        pitfalls:
+          - "pitfall A"
+        related:
+          sibling: [sprite/other]
+          upstream: [sprite/upstream_one]
+          downstream: []
+""",
+    )
+    reg = WorkflowRegistry(root=tmp_path)
+    v = reg.variant("sprite", "v")
+    assert v.use_cases == ("use case A", "use case B")
+    assert v.not_for == ("anti use 1",)
+    assert v.tags == TagSet(
+        kind="character",
+        style="pixel-art",
+        format="multi-view-1x3",
+        output="alpha-pixel",
+        model_family="illustrious",
+    )
+    assert v.character_proportions == {"head_ratio": 2.5, "chibi": True}
+    assert v.prompt_template is not None
+    assert "{gender}, {hair}" in v.prompt_template.skeleton
+    assert v.prompt_template.model_triggers == ("score_9, score_8_up",)
+    assert v.prompt_template.required_tokens == (
+        PromptToken(placeholder="{gender}", examples=("1girl", "1boy")),
+        PromptToken(placeholder="{hair}", examples=("black hair",)),
+    )
+    assert v.prompt_template.forbidden_tokens == (
+        ForbiddenToken(token="(chibi:1.4)", reason="ControlNet 충돌"),
+    )
+    assert v.prompt_template.examples == (
+        PromptExample(
+            prompt="1girl, black hair, masterpiece", seed=42, note="검증된 prompt"
+        ),
+    )
+    assert v.cost == CostEstimate(est_seconds=45, vram_gb=12.0)
+    assert v.pitfalls == ("pitfall A",)
+    assert v.related == RelatedRefs(
+        sibling=("sprite/other",),
+        upstream=("sprite/upstream_one",),
+        downstream=(),
+    )
+
+
+def test_catalog_emits_full_meta(tmp_path: Path) -> None:
+    """to_catalog 가 신규 메타 필드를 모두 직렬화."""
+    _write_workflow(tmp_path, "sprite/v.json")
+    _write_manifest(
+        tmp_path,
+        """
+version: 1
+categories:
+  sprite:
+    variants:
+      v:
+        file: sprite/v.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+        use_cases: ["uc 1"]
+        tags: { kind: character, style: pixel-art }
+        character_proportions: { head_ratio: 2.5 }
+        prompt_template:
+          skeleton: "skeleton"
+          model_triggers: ["t1"]
+          required_tokens:
+            - { placeholder: "{x}", examples: ["a", "b"] }
+          forbidden_tokens:
+            - { token: "bad", reason: "why" }
+          examples:
+            - { prompt: "p", seed: 1, note: "n" }
+        cost: { est_seconds: 10, vram_gb: 8 }
+        pitfalls: ["pf"]
+        related: { sibling: ["sprite/x"] }
+""",
+    )
+    reg = WorkflowRegistry(root=tmp_path)
+    cat = reg.to_catalog()
+    v = cat["categories"]["sprite"]["variants"]["v"]
+    assert v["use_cases"] == ["uc 1"]
+    assert v["not_for"] == []
+    assert v["tags"] == {
+        "kind": "character",
+        "style": "pixel-art",
+        "format": None,
+        "output": None,
+        "model_family": None,
+    }
+    assert v["character_proportions"] == {"head_ratio": 2.5}
+    assert v["prompt_template"] == {
+        "skeleton": "skeleton",
+        "model_triggers": ["t1"],
+        "required_tokens": [{"placeholder": "{x}", "examples": ["a", "b"]}],
+        "forbidden_tokens": [{"token": "bad", "reason": "why"}],
+        "examples": [{"prompt": "p", "seed": 1, "note": "n"}],
+    }
+    assert v["cost"] == {"est_seconds": 10, "vram_gb": 8.0}
+    assert v["pitfalls"] == ["pf"]
+    assert v["related"] == {
+        "sibling": ["sprite/x"],
+        "upstream": [],
+        "downstream": [],
+    }
+
+
+def test_catalog_emits_none_for_absent_meta(tmp_path: Path) -> None:
+    """메타 미작성 변형의 catalog 직렬화 — None / 빈 list 로 노출."""
+    _write_workflow(tmp_path, "sprite/v.json")
+    _write_manifest(
+        tmp_path,
+        """
+version: 1
+categories:
+  sprite:
+    variants:
+      v:
+        file: sprite/v.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+""",
+    )
+    reg = WorkflowRegistry(root=tmp_path)
+    v = reg.to_catalog()["categories"]["sprite"]["variants"]["v"]
+    assert v["use_cases"] == []
+    assert v["not_for"] == []
+    assert v["tags"] is None
+    assert v["character_proportions"] is None
+    assert v["prompt_template"] is None
+    assert v["cost"] is None
+    assert v["pitfalls"] == []
+    assert v["related"] is None
+
+
+def test_invalid_tag_key_rejected(tmp_path: Path) -> None:
+    _write_workflow(tmp_path, "sprite/v.json")
+    _write_manifest(
+        tmp_path,
+        """
+version: 1
+categories:
+  sprite:
+    variants:
+      v:
+        file: sprite/v.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+        tags:
+          kind: character
+          weird_key: foo
+""",
+    )
+    with pytest.raises(WorkflowRegistryError, match="unknown keys"):
+        WorkflowRegistry(root=tmp_path)
+
+
+def test_forbidden_token_requires_reason(tmp_path: Path) -> None:
+    _write_workflow(tmp_path, "sprite/v.json")
+    _write_manifest(
+        tmp_path,
+        """
+version: 1
+categories:
+  sprite:
+    variants:
+      v:
+        file: sprite/v.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+        prompt_template:
+          forbidden_tokens:
+            - { token: "(chibi:1.4)" }
+""",
+    )
+    with pytest.raises(WorkflowRegistryError, match="`token` and `reason`"):
+        WorkflowRegistry(root=tmp_path)
+
+
+def test_required_token_requires_placeholder(tmp_path: Path) -> None:
+    _write_workflow(tmp_path, "sprite/v.json")
+    _write_manifest(
+        tmp_path,
+        """
+version: 1
+categories:
+  sprite:
+    variants:
+      v:
+        file: sprite/v.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+        prompt_template:
+          required_tokens:
+            - { examples: ["1girl"] }
+""",
+    )
+    with pytest.raises(WorkflowRegistryError, match="needs `placeholder`"):
+        WorkflowRegistry(root=tmp_path)
+
+
+def test_cost_must_be_numbers(tmp_path: Path) -> None:
+    _write_workflow(tmp_path, "sprite/v.json")
+    _write_manifest(
+        tmp_path,
+        """
+version: 1
+categories:
+  sprite:
+    variants:
+      v:
+        file: sprite/v.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+        cost:
+          est_seconds: "not a number"
+""",
+    )
+    with pytest.raises(WorkflowRegistryError, match="est_seconds"):
+        WorkflowRegistry(root=tmp_path)
+
+
+def test_cost_rejects_bool_for_est_seconds(tmp_path: Path) -> None:
+    """YAML 의 `est_seconds: yes` 가 True (= 1) 로 silent 통과 방지."""
+    _write_workflow(tmp_path, "sprite/v.json")
+    _write_manifest(
+        tmp_path,
+        """
+version: 1
+categories:
+  sprite:
+    variants:
+      v:
+        file: sprite/v.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+        cost:
+          est_seconds: true
+""",
+    )
+    with pytest.raises(WorkflowRegistryError, match="est_seconds"):
+        WorkflowRegistry(root=tmp_path)
+
+
+def test_cost_rejects_bool_for_vram_gb(tmp_path: Path) -> None:
+    _write_workflow(tmp_path, "sprite/v.json")
+    _write_manifest(
+        tmp_path,
+        """
+version: 1
+categories:
+  sprite:
+    variants:
+      v:
+        file: sprite/v.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+        cost:
+          vram_gb: true
+""",
+    )
+    with pytest.raises(WorkflowRegistryError, match="vram_gb"):
+        WorkflowRegistry(root=tmp_path)
+
+
+def test_related_unknown_key_rejected(tmp_path: Path) -> None:
+    _write_workflow(tmp_path, "sprite/v.json")
+    _write_manifest(
+        tmp_path,
+        """
+version: 1
+categories:
+  sprite:
+    variants:
+      v:
+        file: sprite/v.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+        related:
+          sibling: [sprite/x]
+          unknown_rel: foo
+""",
+    )
+    with pytest.raises(WorkflowRegistryError, match="unknown keys"):
+        WorkflowRegistry(root=tmp_path)
+
+
+def test_real_registry_all_variants_have_meta(tmp_path: Path) -> None:
+    """레포의 실제 매니페스트 — 25 변형 모두 디스커버리 메타 작성됨."""
+    repo_root = Path(__file__).resolve().parent.parent
+    registry_root = repo_root / "workflows"
+    if not (registry_root / "registry.yml").exists():
+        pytest.skip("workflows/registry.yml 이 없음")
+    reg = WorkflowRegistry(root=registry_root)
+    missing: list[str] = []
+    for cname, cat in reg.categories.items():
+        for vname, v in cat.variants.items():
+            if v.tags is None or not v.use_cases or v.cost is None:
+                missing.append(f"{cname}/{vname}")
+    assert not missing, f"메타 누락 변형: {missing}"
+
+
+# ----------------------------------------------------------------------------
+# recommend (rule-based filter)
+# ----------------------------------------------------------------------------
+
+
+def _recommend_fixture(tmp_path: Path) -> WorkflowRegistry:
+    """sprite/char (character + pixel-art), illust/anime (illustration + anime),
+    sprite/no_meta (메타 없음 — 필터 적용 시 매칭 불가) 를 가진 미니 레지스트리."""
+    _write_workflow(tmp_path, "a.json")
+    _write_workflow(tmp_path, "b.json")
+    _write_workflow(tmp_path, "c.json")
+    _write_manifest(
+        tmp_path,
+        """
+version: 1
+categories:
+  sprite:
+    variants:
+      char:
+        file: a.json
+        primary: true
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+        use_cases: ["pixel character"]
+        tags: { kind: character, style: pixel-art, model_family: illustrious }
+        cost: { est_seconds: 45, vram_gb: 12 }
+      no_meta:
+        file: b.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+  illust:
+    variants:
+      anime:
+        file: c.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+        use_cases: ["anime illust"]
+        tags: { kind: illustration, style: anime, model_family: pony }
+        cost: { est_seconds: 50, vram_gb: 12 }
+""",
+    )
+    return WorkflowRegistry(root=tmp_path)
+
+
+def test_recommend_no_filters_returns_all_available(tmp_path: Path) -> None:
+    reg = _recommend_fixture(tmp_path)
+    matches = reg.recommend()
+    names = {(m["category"], m["variant"]) for m in matches}
+    # no_meta 는 메타 없지만 필터 없으면 포함 (available 만)
+    assert names == {("sprite", "char"), ("sprite", "no_meta"), ("illust", "anime")}
+    # 응답 shape — score / matched_axes 노출 안 함 (strict-AND)
+    assert "score" not in matches[0]
+    assert "matched_axes" not in matches[0]
+
+
+def test_recommend_single_filter(tmp_path: Path) -> None:
+    reg = _recommend_fixture(tmp_path)
+    matches = reg.recommend(kind="character")
+    assert len(matches) == 1
+    m = matches[0]
+    assert m["category"] == "sprite"
+    assert m["variant"] == "char"
+    assert m["tags"]["kind"] == "character"
+    assert "use_cases" in m and "cost" in m
+
+
+def test_recommend_multi_filter_all_match(tmp_path: Path) -> None:
+    reg = _recommend_fixture(tmp_path)
+    matches = reg.recommend(kind="character", style="pixel-art")
+    assert len(matches) == 1
+    assert matches[0]["variant"] == "char"
+
+
+def test_recommend_filter_no_match(tmp_path: Path) -> None:
+    reg = _recommend_fixture(tmp_path)
+    # character 인데 anime 스타일 — strict-AND, 어느 변형도 매칭 안 됨
+    matches = reg.recommend(kind="character", style="anime")
+    assert matches == []
+
+
+def test_recommend_strict_and_one_axis_mismatch_excludes(tmp_path: Path) -> None:
+    """한 축이라도 mismatch 면 제외 (partial 매치 안 함)."""
+    reg = _recommend_fixture(tmp_path)
+    # sprite/char 는 kind=character / style=pixel-art / model_family=illustrious
+    # style 만 일부러 다르게 → partial 매치라면 score<1 로 들어왔을 텐데, strict 라 빈 결과
+    matches = reg.recommend(kind="character", style="anime")
+    assert matches == []
+
+
+def test_recommend_excludes_no_meta_when_filtered(tmp_path: Path) -> None:
+    reg = _recommend_fixture(tmp_path)
+    # 메타 없는 변형 (sprite/no_meta) 은 필터 적용 시 제외됨
+    matches = reg.recommend(model_family="illustrious")
+    names = {(m["category"], m["variant"]) for m in matches}
+    assert names == {("sprite", "char")}
+
+
+def test_recommend_primary_sorted_first(tmp_path: Path) -> None:
+    """primary=True 가 첫 번째."""
+    _write_workflow(tmp_path, "a.json")
+    _write_workflow(tmp_path, "b.json")
+    _write_manifest(
+        tmp_path,
+        """
+version: 1
+categories:
+  sprite:
+    variants:
+      a:
+        file: a.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+        tags: { kind: character }
+      b:
+        file: b.json
+        primary: true
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+        tags: { kind: character }
+""",
+    )
+    reg = WorkflowRegistry(root=tmp_path)
+    matches = reg.recommend(kind="character")
+    # b 가 primary → 첫 번째
+    assert matches[0]["variant"] == "b"
+    assert matches[1]["variant"] == "a"
+
+
+def test_recommend_excludes_unavailable_variants(tmp_path: Path) -> None:
+    """file 없는 (available=False) 변형은 결과에서 제외."""
+    _write_workflow(tmp_path, "exists.json")
+    _write_manifest(
+        tmp_path,
+        """
+version: 1
+categories:
+  sprite:
+    variants:
+      ok:
+        file: exists.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+        tags: { kind: character }
+      missing:
+        file: gone.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+        tags: { kind: character }
+""",
+    )
+    reg = WorkflowRegistry(root=tmp_path)
+    matches = reg.recommend(kind="character")
+    names = {m["variant"] for m in matches}
+    assert names == {"ok"}

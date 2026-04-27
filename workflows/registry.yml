@@ -28,6 +28,267 @@ presets:
     (worst quality, low quality:1.4), blurry, jpeg artifacts, deformed, bad anatomy,
     watermark, text, signature, extra fingers, mutated hands
 
+# ---- 디스커버리 메타 anchor (변형 간 공유) ----------------------------------
+# 같은 워크플로우 family 의 변형들은 prompt_template / pitfalls 를 공유.
+# 변형마다 다른 메타 (use_cases / not_for / cost / related) 는 변형 내부에 직접 작성.
+# 로더는 _anchors 키를 무시 — yaml anchor expansion 만 활용.
+_anchors:
+
+  # ===== sprite V37/V38 (ControlNet OpenPose, pixel_character_sprite_illustrious LoRA) =====
+  sprite_pose_prompt_template: &sprite_pose_prompt_template
+    skeleton: |
+      {gender_count}, {hair_features}, {outfit_features},
+      {pose_or_action}, {scene_qualifiers},
+      masterpiece, best quality, very aesthetic
+    model_triggers:
+      # pixel_character_sprite_illustrious LoRA 트리거 (LoRA 노드는 워크플로우에
+      # 박혀 있어 <lora:...> syntax 는 불필요 — 트리거 단어만 prompt 에 포함)
+      - "pixel_character_sprite, sprite, sprite sheet, (pixel art:1.5), white background"
+    required_tokens:
+      - { placeholder: "{gender_count}", examples: ["1girl", "1boy", "1other"] }
+      - placeholder: "{hair_features}"
+        examples:
+          - "(black hair:1.2), (side ponytail:1.3), long hair"
+          - "(silver hair:1.2), short hair, twintails"
+      - placeholder: "{outfit_features}"
+        examples:
+          - "blue knight armor, red cape"
+          - "white wizard robe, pointed hat"
+          - "leather rogue outfit, hooded cloak"
+      - placeholder: "{pose_or_action}"
+        examples:
+          - "(holding silver sword:1.3), sword in right hand, gripping sword tightly"
+          - "casting spell, holding wooden staff"
+          - "drawing bow, arrow nocked"
+      - placeholder: "{scene_qualifiers}"
+        examples: ["fantasy warrior", "fantasy mage", "fantasy archer"]
+    forbidden_tokens:
+      - token: "(chibi:1.4)"
+        reason: "ControlNet stick figure 가 등신 결정. 강한 chibi 가중치는 비율 과적용·깨짐 (HANDOFF §5.2/5.5). chibi 단어 자체는 약하게 OK"
+      - token: "(chibi:1.5)"
+        reason: "(chibi:1.4) 와 동일 — 가중치 강조 금지"
+      - token: "background, scenery"
+        reason: "흰배경 강제 워크플로우 — scenery 가 들어가면 배경 노이즈 + alpha 추출 실패"
+      - token: "close-up, upper body, portrait, headshot"
+        reason: "1×3 full body multi-view 와 충돌 — 잘림 발생"
+      - token: "floating sword, detached weapon"
+        reason: "negative 에 이미 8개 키워드로 박혀있음 — positive 에 넣으면 무력화"
+    examples:
+      - prompt: |
+          1girl, (black hair:1.2), (side ponytail:1.3), long hair,
+          hair tied at side, medium height ponytail,
+          blue knight armor, (holding silver sword:1.3), sword in right hand,
+          gripping sword tightly, red cape, fantasy warrior,
+          masterpiece, best quality, very aesthetic
+        seed: 42
+        note: "HANDOFF §1.1 메인 검증 캐릭터 — 검 떠다님 해결된 정형 prompt"
+
+  sprite_pose_pitfalls: &sprite_pose_pitfalls
+    - "검 든 캐릭터: (holding silver sword:1.3) + sword in right hand + gripping sword tightly 동사 묶기 필수. negative 의 floating sword 8개 키워드와 세트 (HANDOFF §5.4)"
+    - "좌측 view 는 게임 엔진에서 flipX 권장 — SDXL/Illustrious 가 좌측 옆모습 학습 약함 (HANDOFF §5.3)"
+    - "chibi 강조 가중치 금지 — ControlNet stick figure 가 비율 결정. 'chibi, sd character' 정도만 (HANDOFF §5.2)"
+    - "WAS rembg 노드 mode 라벨 직관 반대 — 'foreground' 가 흰배경 alpha 처리. 워크플로우엔 이미 정확히 박혀있음 (HANDOFF §5.1)"
+
+  sprite_pose_proportions: &sprite_pose_proportions
+    head_ratio: 2.5
+    view_count: 3
+    layout: front-rightside-back
+    chibi: true
+
+  # ===== sprite V36 Pro (ControlNet 없음, 자유 layout, 컨셉 디자인용) =====
+  sprite_v36_pro_prompt_template: &sprite_v36_pro_prompt_template
+    skeleton: |
+      {gender_count}, {hair_features}, {outfit_features},
+      {pose_or_action}, {scene_qualifiers}, full body,
+      masterpiece, best quality, very aesthetic
+    model_triggers:
+      - "pixel_character_sprite, sprite art, (pixel art:1.5), white background, chibi, sd character"
+    required_tokens:
+      - { placeholder: "{gender_count}", examples: ["1girl", "1boy", "1other"] }
+      - placeholder: "{hair_features}"
+        examples: ["(black hair:1.2), short hair", "(silver hair:1.2), long hair, ponytail"]
+      - placeholder: "{outfit_features}"
+        examples: ["knight armor, red cape", "wizard robe, pointed hat"]
+      - placeholder: "{pose_or_action}"
+        examples: ["standing, hands on hips", "holding sword", "casting spell"]
+      - placeholder: "{scene_qualifiers}"
+        examples: ["fantasy warrior, simple pose", "fantasy mage"]
+    forbidden_tokens:
+      - token: "background, scenery"
+        reason: "흰배경 강제 — scenery 가 들어가면 배경 노이즈"
+      - token: "(chibi:1.4)"
+        reason: "강한 chibi 가중치는 LoRA 와 과적용. 'chibi, sd character' 정도가 적정"
+    examples:
+      - prompt: |
+          1girl, (black hair:1.2), (side ponytail:1.3), long hair,
+          blue knight armor, holding sword, fantasy warrior,
+          chibi, sd character, full body,
+          masterpiece, best quality, very aesthetic
+        note: "V36 Pro 컨셉 디자인 — 자유 layout (멀티뷰 강제 없음)"
+
+  sprite_v36_pro_pitfalls: &sprite_v36_pro_pitfalls
+    - "V37/V38 와 달리 ControlNet 없음 — 등신·layout 자유. 다양한 디자인 탐색용"
+    - "chibi 강조 가중치 금지 — LoRA 가 약하게 비율 학습 (HANDOFF §5.5)"
+    - "결과를 V37/V38 에 그대로 못 씀 — sprite/pose_extract 로 stick figure 추출 후 ControlNet 단계로 (HANDOFF §5.6)"
+
+  # ===== illustration 모델별 prompt template =====
+  illust_animagine_prompt_template: &illust_animagine_prompt_template
+    skeleton: |
+      {subject}, {style_qualifiers},
+      masterpiece, best quality, very aesthetic, absurdres
+    model_triggers: []   # animagine 은 별도 트리거 불필요
+    required_tokens:
+      - placeholder: "{subject}"
+        examples:
+          - "1girl, silver hair, blue dress, sitting on flower field"
+          - "1boy, black coat, holding sword, fantasy knight"
+          - "fantasy castle, sunset, dramatic lighting"
+      - placeholder: "{style_qualifiers}"
+        examples: ["soft lighting, detailed", "cinematic, vibrant colors", "anime style, clean lines"]
+    forbidden_tokens: []
+    examples:
+      - prompt: "1girl, silver hair, blue dress, sitting on flower field, soft lighting, masterpiece, best quality, very aesthetic, absurdres"
+        note: "animagine 표준 — 깔끔한 anime 일러스트"
+
+  illust_pony_prompt_template: &illust_pony_prompt_template
+    skeleton: |
+      score_9, score_8_up, score_7_up,
+      {subject}, {style_qualifiers},
+      masterpiece, best quality
+    model_triggers:
+      # Pony 정통: score_9 트리거 prefix 가 거의 필수 (Pony tagger 학습)
+      - "score_9, score_8_up, score_7_up"
+    required_tokens:
+      - placeholder: "{subject}"
+        examples:
+          - "1girl, blue hair, school uniform"
+          - "1boy, dragon companion, fantasy warrior"
+      - placeholder: "{style_qualifiers}"
+        examples: ["soft lighting, anime style", "detailed background, vibrant"]
+    forbidden_tokens:
+      - token: "score_3, score_4, score_5, score_6"
+        reason: "Pony 의 negative 트리거 — positive 에 들어가면 품질 폭락"
+    examples:
+      - prompt: "score_9, score_8_up, score_7_up, 1girl, blue hair, school uniform, anime style, masterpiece, best quality"
+        note: "Pony 정통 — score_9 prefix 필수"
+
+  illust_hyphoria_prompt_template: &illust_hyphoria_prompt_template
+    skeleton: |
+      {subject}, {style_qualifiers},
+      masterpiece, best quality, very aesthetic
+    model_triggers: []
+    required_tokens:
+      - placeholder: "{subject}"
+        examples: ["1girl, modern outfit", "fantasy landscape, mountains"]
+      - placeholder: "{style_qualifiers}"
+        examples: ["modern illustration, soft shading", "detailed, vibrant"]
+    forbidden_tokens: []
+    examples:
+      - prompt: "1girl, modern outfit, modern illustration, soft shading, masterpiece, best quality, very aesthetic"
+        note: "Hyphoria — Modern Illustrious 베이스 (sprite 와 같은 ckpt 지만 LoRA 없이 일러스트용)"
+
+  illust_anything_prompt_template: &illust_anything_prompt_template
+    skeleton: |
+      {subject}, {style_qualifiers},
+      masterpiece, best quality
+    model_triggers: []
+    required_tokens:
+      - placeholder: "{subject}"
+        examples: ["1girl, casual outfit, smile", "fantasy character, detailed"]
+      - placeholder: "{style_qualifiers}"
+        examples: ["anime style", "soft lighting"]
+    forbidden_tokens: []
+    examples:
+      - prompt: "1girl, casual outfit, smile, anime style, masterpiece, best quality"
+        note: "AnythingXL — 범용 anime"
+
+  illust_meinamix_prompt_template: &illust_meinamix_prompt_template
+    skeleton: |
+      {subject}, {style_qualifiers},
+      masterpiece, best quality
+    model_triggers: []
+    required_tokens:
+      - placeholder: "{subject}"
+        examples: ["1girl, anime style, portrait", "fantasy character"]
+      - placeholder: "{style_qualifiers}"
+        examples: ["soft anime, detailed eyes", "vibrant colors"]
+    forbidden_tokens: []
+    examples:
+      - prompt: "1girl, anime style, portrait, soft anime, detailed eyes, masterpiece, best quality"
+        note: "MeinaMix — SD1.5 빠른 anime"
+
+  # ===== pixel_bg (픽셀 배경/타일) =====
+  pixel_bg_sdxl_prompt_template: &pixel_bg_sdxl_prompt_template
+    skeleton: |
+      pixel art, {scene}, {atmosphere}, {detail_qualifiers}
+    model_triggers:
+      # PixelDiffusionXL spriteShaper 가 base — pixel art 트리거 + LoRA 보강
+      - "pixel art"
+    required_tokens:
+      - placeholder: "{scene}"
+        examples:
+          - "fantasy forest, ancient ruins"
+          - "medieval town square, market stalls"
+          - "underground cave, glowing crystals"
+      - placeholder: "{atmosphere}"
+        examples: ["sunset golden hour", "moonlit night, stars", "rainy day, mist"]
+      - placeholder: "{detail_qualifiers}"
+        examples: ["highly detailed, retro game", "16-bit aesthetic", "colorful, vibrant"]
+    forbidden_tokens:
+      - token: "1girl, 1boy, character, portrait"
+        reason: "배경 워크플로우 — 캐릭터 들어가면 비율·구도 깨짐. 캐릭터 sprite 는 sprite/* 사용"
+    examples:
+      - prompt: "pixel art, fantasy forest, ancient ruins, sunset golden hour, highly detailed, retro game"
+        note: "PixelDiffusionXL — 환경 자산"
+
+  pixel_bg_pony_prompt_template: &pixel_bg_pony_prompt_template
+    skeleton: |
+      score_9, score_8_up, score_7_up,
+      pixel art, game assets, overworld, {scene}, {atmosphere}
+    model_triggers:
+      # RDXL Pixel Art Pony2 + Fnaf_into_the_Pit LoRA — score_9 prefix + LoRA 의
+      # trained_words 3종 (pixel art / game assets / overworld) 모두 포함.
+      # sd_catalog: fnaf_into_the_pit__style.civitai.trained_words 와 일치.
+      - "score_9, score_8_up, score_7_up, pixel art, game assets, overworld"
+    required_tokens:
+      - placeholder: "{scene}"
+        examples:
+          - "horror corridor, fluorescent lights"
+          - "abandoned arcade, neon signs"
+          - "haunted mansion interior"
+      - placeholder: "{atmosphere}"
+        examples: ["dim lighting, eerie", "fnaf style, retro horror"]
+    forbidden_tokens:
+      - token: "score_3, score_4, score_5, score_6"
+        reason: "Pony negative 트리거 — positive 금지"
+      - token: "1girl, 1boy, character, animatronic"
+        reason: "배경/오버월드 전용 — 캐릭터 키워드는 구도 깨짐"
+    examples:
+      - prompt: "score_9, score_8_up, score_7_up, pixel art, game assets, horror corridor, fluorescent lights, fnaf style, retro horror"
+        note: "RDXL Pony pixel + Fnaf LoRA — 호러 픽셀 환경"
+
+  # ===== icon =====
+  icon_flat_prompt_template: &icon_flat_prompt_template
+    skeleton: |
+      {subject_icon}, {style_qualifiers},
+      flat design, simple background, masterpiece, best quality
+    model_triggers: []
+    required_tokens:
+      - placeholder: "{subject_icon}"
+        examples:
+          - "shield icon, blue and silver"
+          - "sword icon, golden hilt"
+          - "potion bottle, red liquid"
+          - "compass icon, brass"
+      - placeholder: "{style_qualifiers}"
+        examples: ["clean lines, minimal", "vector style, bold colors", "game UI icon"]
+    forbidden_tokens:
+      - token: "complex background, scenery"
+        reason: "icon 워크플로우 — 알파 추출 위해 단순 배경 강제 (WAS rembg)"
+    examples:
+      - prompt: "shield icon, blue and silver, clean lines, minimal, flat design, simple background, masterpiece, best quality"
+        note: "앱 UI 아이콘 — alpha 추출 (WAS) 동시"
+
 # ---- 카테고리 ---------------------------------------------------------------
 categories:
 
@@ -60,6 +321,24 @@ categories:
           pose_image: pose_grid_1x3_mini_2.5h_1280x640.png
           controlnet_strength: 0.85
           negative_prompt: ${preset:NEG_PIXEL_SPRITE}
+        use_cases:
+          - "게임 엔진용 캐릭터 sprite (1×3 multi-view, 투명 배경, 픽셀 그리드)"
+          - "RPG 도트 캐릭터 — 2.5등신 chibi 비율 강제"
+          - "ControlNet OpenPose 로 정확한 좌우대칭 (front / right_side / back)"
+        not_for:
+          - "단일 view 일러스트 → illustration/* 사용"
+          - "자유 layout 컨셉 디자인 → sprite/v36_pro_stage1"
+          - "AI rembg 알파 (반투명 디테일) → sprite/rembg_alpha"
+          - "흰배경 고해상도 디테일만 필요 → sprite/hires"
+        tags: { kind: character, style: pixel-art, format: multi-view-1x3, output: alpha-pixel, model_family: illustrious }
+        character_proportions: *sprite_pose_proportions
+        prompt_template: *sprite_pose_prompt_template
+        cost: { est_seconds: 45, vram_gb: 12 }
+        pitfalls: *sprite_pose_pitfalls
+        related:
+          sibling: [sprite/hires, sprite/rembg_alpha, sprite/stage1, sprite/full]
+          upstream: [sprite/v36_pro_stage1]
+          downstream: []
 
       hires:
         description: "1920×960 디테일 보강 (흰배경)"
@@ -77,6 +356,21 @@ categories:
           pose_image: pose_grid_1x3_mini_2.5h_1280x640.png
           controlnet_strength: 0.85
           negative_prompt: ${preset:NEG_PIXEL_SPRITE}
+        use_cases:
+          - "디테일 강조한 1920×960 multi-view 일러스트 (흰배경)"
+          - "alpha 처리 필요 없고 캐릭터 시트 마케팅·홍보용"
+        not_for:
+          - "게임 엔진 sprite — 픽셀 그리드 정렬·투명 배경 필요 → sprite/pixel_alpha"
+          - "AI rembg 알파 → sprite/rembg_alpha"
+        tags: { kind: character, style: pixel-art, format: multi-view-1x3, output: hires, model_family: illustrious }
+        character_proportions: *sprite_pose_proportions
+        prompt_template: *sprite_pose_prompt_template
+        cost: { est_seconds: 60, vram_gb: 13 }
+        pitfalls: *sprite_pose_pitfalls
+        related:
+          sibling: [sprite/pixel_alpha, sprite/rembg_alpha, sprite/stage1, sprite/full]
+          upstream: [sprite/v36_pro_stage1]
+          downstream: []
 
       rembg_alpha:
         description: "AI rembg 알파 (일러스트용)"
@@ -94,6 +388,21 @@ categories:
           pose_image: pose_grid_1x3_mini_2.5h_1280x640.png
           controlnet_strength: 0.85
           negative_prompt: ${preset:NEG_PIXEL_SPRITE}
+        use_cases:
+          - "AI rembg 알파 — 반투명 디테일 (머리카락 끝, 천 가장자리) 보존"
+          - "일러스트 용도 (게임 엔진 sprite 보다 부드러운 알파)"
+        not_for:
+          - "게임 엔진 픽셀 정렬 sprite → sprite/pixel_alpha"
+          - "흰배경 그대로 사용 → sprite/hires"
+        tags: { kind: character, style: pixel-art, format: multi-view-1x3, output: alpha-rembg, model_family: illustrious }
+        character_proportions: *sprite_pose_proportions
+        prompt_template: *sprite_pose_prompt_template
+        cost: { est_seconds: 50, vram_gb: 12 }
+        pitfalls: *sprite_pose_pitfalls
+        related:
+          sibling: [sprite/pixel_alpha, sprite/hires, sprite/stage1, sprite/full]
+          upstream: [sprite/v36_pro_stage1]
+          downstream: []
 
       stage1:
         description: "raw 1280×640 (흰배경) — 빠른 디자인 탐색"
@@ -110,6 +419,20 @@ categories:
           pose_image: pose_grid_1x3_mini_2.5h_1280x640.png
           controlnet_strength: 0.85
           negative_prompt: ${preset:NEG_PIXEL_SPRITE}
+        use_cases:
+          - "빠른 prompt 검증·디자인 iteration (Pixelize/Alpha 단계 스킵)"
+          - "Stage1 결과 확인 후 다른 변형으로 재실행"
+        not_for:
+          - "최종 deliverable — alpha 추출 안 됨, 픽셀 그리드 정렬 안 됨"
+        tags: { kind: character, style: pixel-art, format: multi-view-1x3, output: raw, model_family: illustrious }
+        character_proportions: *sprite_pose_proportions
+        prompt_template: *sprite_pose_prompt_template
+        cost: { est_seconds: 30, vram_gb: 12 }
+        pitfalls: *sprite_pose_pitfalls
+        related:
+          sibling: [sprite/pixel_alpha, sprite/hires, sprite/rembg_alpha, sprite/full]
+          upstream: [sprite/v36_pro_stage1]
+          downstream: [sprite/pixel_alpha, sprite/hires, sprite/rembg_alpha]
 
       full:
         description: "5종 동시 출력 (Stage1 + HiRes + Pixelized + PixelAlpha + RembgAlpha)"
@@ -130,6 +453,20 @@ categories:
           pose_image: pose_grid_1x3_mini_2.5h_1280x640.png
           controlnet_strength: 0.85
           negative_prompt: ${preset:NEG_PIXEL_SPRITE}
+        use_cases:
+          - "한 호출로 5종 출력 동시 생성 (cherry-pick UI 후보 풍부화)"
+          - "캐릭터 시트 풀세트 — 일러스트 + 게임 sprite 둘 다 필요"
+        not_for:
+          - "한 종류만 필요 — 시간/VRAM 낭비. 단일 변형 사용 권장"
+        tags: { kind: character, style: pixel-art, format: multi-view-1x3, output: alpha-pixel, model_family: illustrious }
+        character_proportions: *sprite_pose_proportions
+        prompt_template: *sprite_pose_prompt_template
+        cost: { est_seconds: 90, vram_gb: 14 }
+        pitfalls: *sprite_pose_pitfalls
+        related:
+          sibling: [sprite/pixel_alpha, sprite/hires, sprite/rembg_alpha, sprite/stage1]
+          upstream: [sprite/v36_pro_stage1]
+          downstream: []
 
       # --- V37 PoseGuided (alpha 이전 단계) ----------------------------------
       v37_pixel:
@@ -148,6 +485,22 @@ categories:
           pose_image: pose_grid_1x3_mini_2.5h_1280x640.png
           controlnet_strength: 0.85
           negative_prompt: ${preset:NEG_PIXEL_SPRITE}
+        use_cases:
+          - "[V37] 픽셀 그리드 정렬된 흰배경 multi-view (alpha 추출 없이 빠르게)"
+          - "alpha 처리 사용자가 직접 하고 싶을 때 (V38 의 WAS 알파 mode 가 unfit 한 케이스)"
+        not_for:
+          - "투명 배경 sprite 필요 → sprite/pixel_alpha (V38)"
+          - "흰배경 그대로 사용 가능하면 → sprite/hires"
+        tags: { kind: character, style: pixel-art, format: multi-view-1x3, output: raw, model_family: illustrious }
+        character_proportions: *sprite_pose_proportions
+        prompt_template: *sprite_pose_prompt_template
+        cost: { est_seconds: 40, vram_gb: 12 }
+        pitfalls: *sprite_pose_pitfalls
+        related:
+          # V37 ↔ V38 라인업 cross-ref — V37 사용자가 alpha 옵션 (V38) 으로 점프 쉽게.
+          sibling: [sprite/v37_full, sprite/pixel_alpha, sprite/hires, sprite/rembg_alpha, sprite/stage1, sprite/full]
+          upstream: [sprite/v36_pro_stage1]
+          downstream: []
 
       v37_full:
         description: "[V37] 4종 출력 (alpha 단계 없음)"
@@ -166,6 +519,21 @@ categories:
           pose_image: pose_grid_1x3_mini_2.5h_1280x640.png
           controlnet_strength: 0.85
           negative_prompt: ${preset:NEG_PIXEL_SPRITE}
+        use_cases:
+          - "[V37] Stage1 + HiRes + Pixelized 한 호출 — alpha 단계만 빼고 다"
+          - "V38 의 WAS 알파 노드를 우회하고 싶을 때"
+        not_for:
+          - "alpha 출력 포함된 풀세트 → sprite/full (V38)"
+        tags: { kind: character, style: pixel-art, format: multi-view-1x3, output: raw, model_family: illustrious }
+        character_proportions: *sprite_pose_proportions
+        prompt_template: *sprite_pose_prompt_template
+        cost: { est_seconds: 70, vram_gb: 13 }
+        pitfalls: *sprite_pose_pitfalls
+        related:
+          # V37 ↔ V38 라인업 cross-ref
+          sibling: [sprite/v37_pixel, sprite/full, sprite/pixel_alpha, sprite/hires, sprite/rembg_alpha, sprite/stage1]
+          upstream: [sprite/v36_pro_stage1]
+          downstream: []
 
       # --- V36 Pro (디자인 단계, ControlNet 없음) ----------------------------
       v36_pro_stage1:
@@ -181,6 +549,21 @@ categories:
           width: 1280
           height: 896
           negative_prompt: ${preset:NEG_PIXEL_SPRITE}
+        use_cases:
+          - "캐릭터 컨셉 디자인 단계 — 자유로운 layout, 다양한 포즈 탐색"
+          - "ControlNet 강제 없이 LoRA 만으로 sprite 스타일 생성"
+          - "V37/V38 ControlNet 단계 전 디자인 iteration"
+        not_for:
+          - "정확한 멀티뷰 (1×3 layout) 필요 → sprite/pixel_alpha 또는 sprite/v37_pixel"
+          - "최종 게임 자산 — alpha 추출 / 픽셀 정렬 없음"
+        tags: { kind: character, style: pixel-art, format: single, output: raw, model_family: illustrious }
+        prompt_template: *sprite_v36_pro_prompt_template
+        cost: { est_seconds: 25, vram_gb: 11 }
+        pitfalls: *sprite_v36_pro_pitfalls
+        related:
+          sibling: [sprite/v36_pro_full]
+          upstream: []
+          downstream: [sprite/pose_extract, sprite/pixel_alpha, sprite/v37_pixel]
 
       v36_pro_full:
         description: "[V36 Pro] 디자인 전체 (Stage1 + HiRes + Pixelized)"
@@ -197,6 +580,19 @@ categories:
           width: 1280
           height: 896
           negative_prompt: ${preset:NEG_PIXEL_SPRITE}
+        use_cases:
+          - "[V36 Pro] 컨셉 디자인 풀세트 — Stage1+HiRes+Pixelized 한 호출"
+          - "디자인 결정 후 픽셀화 미리보기까지 같이"
+        not_for:
+          - "ControlNet 멀티뷰 강제 → V37/V38 사용"
+        tags: { kind: character, style: pixel-art, format: single, output: hires, model_family: illustrious }
+        prompt_template: *sprite_v36_pro_prompt_template
+        cost: { est_seconds: 70, vram_gb: 13 }
+        pitfalls: *sprite_v36_pro_pitfalls
+        related:
+          sibling: [sprite/v36_pro_stage1]
+          upstream: []
+          downstream: [sprite/pose_extract, sprite/pixel_alpha]
 
       # --- 부속 도구 ----------------------------------------------------------
       pose_extract:
@@ -205,6 +601,23 @@ categories:
         outputs:
           - { node_title: "Save extracted pose", label: pose, primary: true }
         defaults: {}
+        use_cases:
+          - "기존 캐릭터 이미지에서 OpenPose stick figure 추출 → ControlNet 입력으로 재사용"
+          - "V36 Pro 컨셉 디자인 → V37/V38 ControlNet 단계 전환 (HANDOFF §5.6)"
+          - "사용자 업로드 이미지의 포즈 가져와 sprite 변형으로 chain"
+        not_for:
+          - "캐릭터 생성 자체 — 이건 utility (포즈 추출 only)"
+        tags: { kind: utility, style: ~, format: ~, output: pose, model_family: ~ }
+        prompt_template: ~   # utility — prompt 무관 (DWPose 추출 only)
+        cost: { est_seconds: 5, vram_gb: 4 }
+        pitfalls:
+          - "stick figure 가 잘못 추출되면 ControlNet 입력으로 부적합 — 결과 미리보기 후 사용"
+          - "원본 이미지가 multi-view 면 그대로 multi-view stick figure 출력 (PR #14 동적 입력으로 source_image 라벨 사용)"
+        related:
+          sibling: []
+          upstream: [sprite/v36_pro_stage1, sprite/v36_pro_full]
+          # 추출된 stick figure 는 V37/V38 의 모든 ControlNet 변형 입력으로 사용 가능
+          downstream: [sprite/pixel_alpha, sprite/hires, sprite/rembg_alpha, sprite/stage1, sprite/full, sprite/v37_pixel, sprite/v37_full]
 
   # =========================================================================
   # ILLUSTRATION — 모델별 일러스트 (B 시리즈)
@@ -231,6 +644,22 @@ categories:
           width: 1024
           height: 1024
           negative_prompt: ${preset:NEG_ILLUSTRATION}
+        use_cases:
+          - "깔끔한 anime 일러스트 — 캐릭터 / 표지 / 키비주얼"
+          - "1.5x upscale + refine — 마케팅·홍보용 고해상도"
+          - "표준적인 anime 미술 (실험적 스타일 X)"
+        not_for:
+          - "픽셀 아트 → pixel_bg/* 또는 sprite/*"
+          - "Pony 정통 — score_9 트리거 필요 → illustration/pony_*"
+        tags: { kind: illustration, style: anime, format: single, output: hires, model_family: sdxl-anime }
+        prompt_template: *illust_animagine_prompt_template
+        cost: { est_seconds: 50, vram_gb: 12 }
+        pitfalls:
+          - "하나의 모델로는 일러스트 다양성 부족 — Pony / Hyphoria / Anything 도 시도"
+        related:
+          sibling: [illustration/animagine_stage1, illustration/hyphoria_hires, illustration/anything_hires]
+          upstream: []
+          downstream: []
 
       animagine_stage1:
         description: "Animagine XL — stage1 only (빠름)"
@@ -245,6 +674,19 @@ categories:
           width: 1024
           height: 1024
           negative_prompt: ${preset:NEG_ILLUSTRATION}
+        use_cases:
+          - "빠른 prompt iteration — 1024×1024 raw, upscale 단계 스킵"
+          - "디자인 탐색 후 hires 변형으로 재실행"
+        not_for:
+          - "최종 deliverable — 해상도 부족하면 hires 사용"
+        tags: { kind: illustration, style: anime, format: single, output: raw, model_family: sdxl-anime }
+        prompt_template: *illust_animagine_prompt_template
+        cost: { est_seconds: 25, vram_gb: 10 }
+        pitfalls: []
+        related:
+          sibling: [illustration/animagine_hires]
+          upstream: []
+          downstream: [illustration/animagine_hires]
 
       pony_hires:
         description: "Prefect Pony — Pony 정통 (score_9 트리거 권장)"
@@ -260,6 +702,23 @@ categories:
           width: 1024
           height: 1024
           negative_prompt: ${preset:NEG_ILLUSTRATION}
+        use_cases:
+          - "Pony 정통 anime 일러스트 — score_9 prefix 로 품질 끌어올림"
+          - "표현력 강한 캐릭터 일러스트 (Animagine 보다 다양성↑)"
+          - "1.5x upscale 고해상도 deliverable"
+        not_for:
+          - "픽셀 아트 → pixel_bg/pony_* (RDXL Pixel Art Pony2 ckpt) 사용"
+          - "표준 깔끔한 anime → illustration/animagine_*"
+        tags: { kind: illustration, style: anime, format: single, output: hires, model_family: pony }
+        prompt_template: *illust_pony_prompt_template
+        cost: { est_seconds: 50, vram_gb: 12 }
+        pitfalls:
+          - "score_9, score_8_up, score_7_up prefix 필수 — 누락 시 품질 폭락"
+          - "Pony 의 score_3, score_4, score_5, score_6 는 negative 트리거 — positive 에 들어가면 결과 깨짐"
+        related:
+          sibling: [illustration/pony_stage1, illustration/animagine_hires]
+          upstream: []
+          downstream: []
 
       pony_stage1:
         description: "Prefect Pony — stage1 only"
@@ -274,6 +733,19 @@ categories:
           width: 1024
           height: 1024
           negative_prompt: ${preset:NEG_ILLUSTRATION}
+        use_cases:
+          - "Pony 빠른 iteration — score_9 효과 미리보기"
+        not_for:
+          - "최종 high-res deliverable → pony_hires"
+        tags: { kind: illustration, style: anime, format: single, output: raw, model_family: pony }
+        prompt_template: *illust_pony_prompt_template
+        cost: { est_seconds: 25, vram_gb: 10 }
+        pitfalls:
+          - "score_9 prefix 필수"
+        related:
+          sibling: [illustration/pony_hires]
+          upstream: []
+          downstream: [illustration/pony_hires]
 
       hyphoria_hires:
         description: "Hyphoria — Modern Illustrious"
@@ -289,6 +761,21 @@ categories:
           width: 1024
           height: 1024
           negative_prompt: ${preset:NEG_ILLUSTRATION}
+        use_cases:
+          - "Modern Illustrious anime — 부드러운 셰이딩, 모던 스타일"
+          - "Animagine / AnythingXL 와는 다른 톤이 필요할 때"
+          - "sprite 와 같은 ckpt (hyphoria_v002) 지만 LoRA 없이 일러스트 용"
+        not_for:
+          - "Pony 정통 → illustration/pony_*"
+          - "픽셀 아트 → sprite/* 또는 pixel_bg/*"
+        tags: { kind: illustration, style: anime, format: single, output: hires, model_family: illustrious }
+        prompt_template: *illust_hyphoria_prompt_template
+        cost: { est_seconds: 55, vram_gb: 12 }
+        pitfalls: []
+        related:
+          sibling: [illustration/hyphoria_stage1, illustration/animagine_hires]
+          upstream: []
+          downstream: []
 
       hyphoria_stage1:
         description: "Hyphoria — stage1 only"
@@ -303,6 +790,18 @@ categories:
           width: 1024
           height: 1024
           negative_prompt: ${preset:NEG_ILLUSTRATION}
+        use_cases:
+          - "Hyphoria 빠른 디자인 탐색"
+        not_for:
+          - "최종 deliverable → hyphoria_hires"
+        tags: { kind: illustration, style: anime, format: single, output: raw, model_family: illustrious }
+        prompt_template: *illust_hyphoria_prompt_template
+        cost: { est_seconds: 28, vram_gb: 10 }
+        pitfalls: []
+        related:
+          sibling: [illustration/hyphoria_hires]
+          upstream: []
+          downstream: [illustration/hyphoria_hires]
 
       anything_hires:
         description: "AnythingXL — 범용"
@@ -318,6 +817,19 @@ categories:
           width: 1024
           height: 1024
           negative_prompt: ${preset:NEG_ILLUSTRATION}
+        use_cases:
+          - "범용 anime 일러스트 — Animagine 보다 부드러운 톤"
+          - "특정 style 모델 안 맞을 때 fallback"
+        not_for:
+          - "Pony 정통 / Hyphoria 모던 톤은 별도 변형"
+        tags: { kind: illustration, style: anime, format: single, output: hires, model_family: sdxl-anime }
+        prompt_template: *illust_anything_prompt_template
+        cost: { est_seconds: 50, vram_gb: 12 }
+        pitfalls: []
+        related:
+          sibling: [illustration/anything_stage1, illustration/animagine_hires]
+          upstream: []
+          downstream: []
 
       anything_stage1:
         description: "AnythingXL — stage1 only"
@@ -332,6 +844,18 @@ categories:
           width: 1024
           height: 1024
           negative_prompt: ${preset:NEG_ILLUSTRATION}
+        use_cases:
+          - "AnythingXL 빠른 iteration"
+        not_for:
+          - "최종 deliverable → anything_hires"
+        tags: { kind: illustration, style: anime, format: single, output: raw, model_family: sdxl-anime }
+        prompt_template: *illust_anything_prompt_template
+        cost: { est_seconds: 25, vram_gb: 10 }
+        pitfalls: []
+        related:
+          sibling: [illustration/anything_hires]
+          upstream: []
+          downstream: [illustration/anything_hires]
 
       meinamix_hires:
         description: "MeinaMix — SD1.5 빠름"
@@ -347,6 +871,22 @@ categories:
           width: 512
           height: 768
           negative_prompt: ${preset:NEG_ILLUSTRATION}
+        use_cases:
+          - "SD1.5 anime — VRAM·시간 부족할 때 (10GB 이하 GPU 가능)"
+          - "빠른 대량 prototyping (모든 SDXL 보다 빠름)"
+        not_for:
+          - "1024×1024 이상 고해상도 — SDXL 시리즈 사용"
+          - "Illustrious / Pony 정통 트리거 사용 — 학습 다른 모델"
+        tags: { kind: illustration, style: anime, format: single, output: hires, model_family: sd1.5 }
+        prompt_template: *illust_meinamix_prompt_template
+        cost: { est_seconds: 30, vram_gb: 6 }
+        pitfalls:
+          - "기본 해상도 512×768 — SDXL 의 1024×1024 와 다름. width/height defaults 확인"
+          - "SD1.5 라 SDXL 트리거 (very aesthetic 등) 효과 약함"
+        related:
+          sibling: [illustration/meinamix_stage1, illustration/animagine_hires]
+          upstream: []
+          downstream: []
 
       meinamix_stage1:
         description: "MeinaMix — stage1 only"
@@ -361,6 +901,19 @@ categories:
           width: 512
           height: 768
           negative_prompt: ${preset:NEG_ILLUSTRATION}
+        use_cases:
+          - "SD1.5 anime 가장 빠른 iteration (~15초)"
+          - "저사양 GPU 환경 검증"
+        not_for:
+          - "고해상도 → meinamix_hires"
+        tags: { kind: illustration, style: anime, format: single, output: raw, model_family: sd1.5 }
+        prompt_template: *illust_meinamix_prompt_template
+        cost: { est_seconds: 15, vram_gb: 5 }
+        pitfalls: []
+        related:
+          sibling: [illustration/meinamix_hires]
+          upstream: []
+          downstream: [illustration/meinamix_hires]
 
   # =========================================================================
   # PIXEL_BG — 픽셀 배경/타일 (V35, API 변환 필요)
@@ -381,6 +934,21 @@ categories:
           scheduler: "karras"
           width: 1024
           height: 1024
+        use_cases:
+          - "픽셀 배경/타일 빠른 prototyping — PixelDiffusionXL spriteShaper 베이스"
+          - "환경·풍경·맵 타일 디자인 탐색 (캐릭터 X)"
+        not_for:
+          - "캐릭터 sprite → sprite/* 사용"
+          - "고해상도 deliverable → sdxl_hires"
+        tags: { kind: background, style: pixel-art, format: tile, output: raw, model_family: sdxl-pixel }
+        prompt_template: *pixel_bg_sdxl_prompt_template
+        cost: { est_seconds: 30, vram_gb: 11 }
+        pitfalls:
+          - "pixel art 트리거 누락 시 SDXL 기본 모드로 빠짐 — pixel art 강조 필수"
+        related:
+          sibling: [pixel_bg/sdxl_hires, pixel_bg/pony_stage1]
+          upstream: []
+          downstream: [pixel_bg/sdxl_hires]
 
       sdxl_hires:
         description: "PixelDiffusionXL — HiRes (1.5x upscale + refine)"
@@ -396,6 +964,21 @@ categories:
           scheduler: "karras"
           width: 1024
           height: 1024
+        use_cases:
+          - "픽셀 배경/타일 고해상도 — 1.5x upscale + refine"
+          - "마케팅·홍보용 환경 자산 (인게임 사용엔 stage1 도 충분)"
+        not_for:
+          - "Fnaf 스타일 호러 픽셀 → pixel_bg/pony_*"
+          - "캐릭터 → sprite/*"
+        tags: { kind: background, style: pixel-art, format: tile, output: hires, model_family: sdxl-pixel }
+        prompt_template: *pixel_bg_sdxl_prompt_template
+        cost: { est_seconds: 60, vram_gb: 13 }
+        pitfalls:
+          - "pixel art 트리거 누락 시 SDXL 기본 모드로 빠짐"
+        related:
+          sibling: [pixel_bg/sdxl_stage1, pixel_bg/pony_hires]
+          upstream: []
+          downstream: []
 
       pony_stage1:
         description: "RDXL Pony pixel (Fnaf style) — stage1 only. score_9 트리거 권장"
@@ -409,6 +992,22 @@ categories:
           scheduler: "karras"
           width: 1024
           height: 1024
+        use_cases:
+          - "Fnaf 스타일 호러 픽셀 환경 — RDXL Pixel Art Pony2 + Fnaf LoRA"
+          - "어두운 톤·네온·복도·아케이드 등 호러 게임 배경"
+        not_for:
+          - "밝은 fantasy 환경 → pixel_bg/sdxl_*"
+          - "캐릭터 → sprite/*"
+        tags: { kind: background, style: pixel-art, format: tile, output: raw, model_family: pony-pixel }
+        prompt_template: *pixel_bg_pony_prompt_template
+        cost: { est_seconds: 30, vram_gb: 11 }
+        pitfalls:
+          - "score_9, score_8_up, score_7_up + pixel art + game assets prefix 모두 필요"
+          - "fantasy / 밝은 톤은 어울리지 않음 — 호러·다크 전용"
+        related:
+          sibling: [pixel_bg/pony_hires, pixel_bg/sdxl_stage1]
+          upstream: []
+          downstream: [pixel_bg/pony_hires]
 
       pony_hires:
         description: "RDXL Pony pixel (Fnaf style) — HiRes"
@@ -423,6 +1022,19 @@ categories:
           scheduler: "karras"
           width: 1024
           height: 1024
+        use_cases:
+          - "Fnaf 스타일 호러 픽셀 — 고해상도 deliverable"
+        not_for:
+          - "밝은 fantasy → pixel_bg/sdxl_hires"
+        tags: { kind: background, style: pixel-art, format: tile, output: hires, model_family: pony-pixel }
+        prompt_template: *pixel_bg_pony_prompt_template
+        cost: { est_seconds: 60, vram_gb: 13 }
+        pitfalls:
+          - "score_9 prefix + Fnaf LoRA 트리거 (pixel art / game assets) 모두 필요"
+        related:
+          sibling: [pixel_bg/pony_stage1, pixel_bg/sdxl_hires]
+          upstream: []
+          downstream: []
 
   icon:
     description: "앱 UI 아이콘 (V36 + WAS 알파 자동 추출)."
@@ -442,4 +1054,22 @@ categories:
           scheduler: "karras"
           width: 1024
           height: 1024
+        use_cases:
+          - "앱 UI / 게임 UI 아이콘 — flat / vector 풍, 단순 배경"
+          - "한 호출에 raw + WAS 알파 자동 추출 (알파 PNG 바로 사용)"
+          - "방패·검·포션·나침반 등 fantasy RPG 인벤토리 아이콘"
+        not_for:
+          - "캐릭터 sprite → sprite/*"
+          - "복잡한 일러스트 → illustration/*"
+          - "게임 배경 / 환경 → pixel_bg/*"
+        tags: { kind: icon, style: flat, format: single, output: alpha-rembg, model_family: sdxl-anime }
+        prompt_template: *icon_flat_prompt_template
+        cost: { est_seconds: 20, vram_gb: 10 }
+        pitfalls:
+          - "복잡한 배경/scenery 가 들어가면 알파 추출 실패 — 단순 배경 강제"
+          - "WAS rembg 노드 mode 라벨 직관 반대 — 'foreground' 가 흰배경 alpha 처리 (sprite 와 동일)"
+        related:
+          sibling: []
+          upstream: []
+          downstream: []
 

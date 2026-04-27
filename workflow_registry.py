@@ -22,7 +22,8 @@ import re
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Mapping
 
 import yaml
 
@@ -90,6 +91,100 @@ class InputLabelSpec:
     description: str = ""
 
 
+# ------------------------------------------------------ 디스커버리 메타 (선택)
+#
+# LLM/클라이언트가 task → variant 결정 + prompt 골격 채우기에 쓰는 메타.
+# 모두 optional — 미작성 변형은 기존처럼 호출만 가능, 디스커버리 약함.
+
+
+@dataclass(slots=True, frozen=True)
+class TagSet:
+    """rule-based 필터링용 태그 (kind / style / format / output / model_family).
+
+    값 어휘는 자유 — 매니페스트 작성자가 일관성을 유지. 권장 어휘:
+    - kind: character | background | icon | illustration | utility
+    - style: pixel-art | anime | flat | 3d
+    - format: single | multi-view-1x3 | tile
+    - output: alpha-pixel | alpha-rembg | raw | hires | pose
+    - model_family: illustrious | sdxl | sd1.5 | pony | sdxl-pixel | pony-pixel
+    """
+
+    kind: str | None = None
+    style: str | None = None
+    format: str | None = None
+    output: str | None = None
+    model_family: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class PromptToken:
+    """prompt skeleton 의 placeholder + 채우기 examples."""
+
+    placeholder: str          # 예: "{gender_count}"
+    examples: tuple[str, ...] = ()
+
+
+@dataclass(slots=True, frozen=True)
+class ForbiddenToken:
+    """워크플로우와 충돌해 prompt 에 쓰면 안 되는 토큰 + 이유."""
+
+    token: str
+    reason: str
+
+
+@dataclass(slots=True, frozen=True)
+class PromptExample:
+    """검증된 prompt 예시 (재현용 seed/note 동반)."""
+
+    prompt: str
+    seed: int | None = None
+    note: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class PromptTemplate:
+    """변형이 받는 prompt 의 골격 + 모델 트리거 + 제약.
+
+    - skeleton: placeholder 가 박힌 골격. 변형마다 자유 (sprite 는 강한 구조,
+      illustration 은 한 줄). 빈 문자열 가능.
+    - model_triggers: prompt 앞에 prepend 권장되는 LoRA/모델 트리거
+      (예: ``score_9, score_8_up, score_7_up`` for Pony, sprite LoRA 트리거 등).
+    - required_tokens: skeleton 의 placeholder 가 어떤 식으로 채워지는지
+      examples 와 함께 노출.
+    - forbidden_tokens: 워크플로우 자체와 충돌하는 토큰 (예: ControlNet sprite
+      에 ``(chibi:1.4)`` 가 비율 결정과 충돌).
+    - examples: 검증된 prompt 1~N 개. seed/note 재현용.
+    """
+
+    skeleton: str = ""
+    model_triggers: tuple[str, ...] = ()
+    required_tokens: tuple[PromptToken, ...] = ()
+    forbidden_tokens: tuple[ForbiddenToken, ...] = ()
+    examples: tuple[PromptExample, ...] = ()
+
+
+@dataclass(slots=True, frozen=True)
+class CostEstimate:
+    """배치 ETA / VRAM 사전 알림 (RTX 4080 기준 — HANDOFF §1.3)."""
+
+    est_seconds: int | None = None
+    vram_gb: float | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class RelatedRefs:
+    """다른 변형으로의 참조. 형식: ``"<category>/<variant>"``.
+
+    - sibling: 같은 카테고리의 가까운 변형 (fallback / 동급)
+    - upstream: 이 변형 입력으로 쓸 수 있는 결과를 만드는 변형
+    - downstream: 이 변형 결과를 입력으로 받는 변형
+    """
+
+    sibling: tuple[str, ...] = ()
+    upstream: tuple[str, ...] = ()
+    downstream: tuple[str, ...] = ()
+
+
 @dataclass(slots=True, frozen=True)
 class VariantSpec:
     """한 카테고리 안의 변형 (= 호출 단위)."""
@@ -104,6 +199,18 @@ class VariantSpec:
     outputs: tuple[OutputSpec, ...]
     defaults: dict[str, Any]
     input_labels: tuple[InputLabelSpec, ...] = ()
+    # ---- 디스커버리 메타 (모두 optional) ----
+    use_cases: tuple[str, ...] = ()
+    not_for: tuple[str, ...] = ()
+    tags: TagSet | None = None
+    # character_proportions 는 sprite-specific schema 자유 (head_ratio / view_count
+    # / layout / chibi 등) 라 dict 유지. 다만 frozen 일관성 위해 read-only view 로
+    # wrapping — 호출자가 in-place 변경 시 TypeError.
+    character_proportions: Mapping[str, Any] | None = None
+    prompt_template: PromptTemplate | None = None
+    cost: CostEstimate | None = None
+    pitfalls: tuple[str, ...] = ()
+    related: RelatedRefs | None = None
 
     @property
     def available(self) -> bool:
@@ -204,6 +311,74 @@ class WorkflowRegistry:
             if v.status == "needs_api_conversion"
         ]
 
+    def recommend(
+        self,
+        *,
+        kind: str | None = None,
+        style: str | None = None,
+        format: str | None = None,
+        output: str | None = None,
+        model_family: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """rule-based filter — 지정된 모든 tag 축이 정확히 일치하는 변형만 반환 (strict-AND).
+
+        - 모든 인자 optional. None 이면 그 축은 필터 안 함.
+        - 한 축이라도 mismatch 면 제외. 변형의 ``tags`` 가 None 이고 필터가
+          비어있지 않으면 제외 (메타 없는 변형은 매칭 불가).
+        - 인자 모두 None → 모든 ``available`` 변형 반환.
+        - ``available=False`` 변형은 항상 제외 (호출 가능한 것만).
+        - 정렬: ``primary=True`` 우선, 그 다음 ``(category, variant)`` 알파벳.
+
+        반환 dict 는 LLM 의사결정에 필요한 핵심 메타만: category / variant /
+        description / tags / primary / use_cases / cost. 풀 메타 (prompt_template /
+        pitfalls / forbidden_tokens 등) 는 ``to_catalog()`` 또는 변형 단위 호출 사용.
+
+        partial 매치 (지정 축 중 일부만 일치) 가 필요하면 호출자가 한 축씩 빼서
+        재호출 — 이 endpoint 는 "정확 매치만" 보장.
+        """
+        filters: dict[str, str] = {
+            k: v
+            for k, v in (
+                ("kind", kind),
+                ("style", style),
+                ("format", format),
+                ("output", output),
+                ("model_family", model_family),
+            )
+            if v is not None
+        }
+
+        matches: list[dict[str, Any]] = []
+        for cat in self._categories.values():
+            for v in cat.variants.values():
+                if not v.available:
+                    continue
+                if filters:
+                    if v.tags is None:
+                        continue   # 메타 없는 변형은 필터 적용 시 매칭 불가
+                    rejected = False
+                    for axis, expected in filters.items():
+                        if getattr(v.tags, axis) != expected:
+                            rejected = True
+                            break
+                    if rejected:
+                        continue
+                matches.append({
+                    "category": v.category,
+                    "variant": v.name,
+                    "description": v.description,
+                    "tags": _tags_to_dict(v.tags),
+                    "primary": v.primary,
+                    "use_cases": list(v.use_cases),
+                    "cost": _cost_to_dict(v.cost),
+                })
+
+        # primary 우선, 그 다음 (category, variant) 알파벳
+        matches.sort(
+            key=lambda m: (0 if m["primary"] else 1, m["category"], m["variant"])
+        )
+        return matches
+
     def to_catalog(self) -> dict[str, Any]:
         """REST 응답에 그대로 쓸 수 있는 카탈로그 dict.
 
@@ -249,6 +424,18 @@ class WorkflowRegistry:
                                 }
                                 for il in v.input_labels
                             ],
+                            "use_cases": list(v.use_cases),
+                            "not_for": list(v.not_for),
+                            "tags": _tags_to_dict(v.tags),
+                            "character_proportions": (
+                                dict(v.character_proportions)
+                                if v.character_proportions is not None
+                                else None
+                            ),
+                            "prompt_template": _prompt_template_to_dict(v.prompt_template),
+                            "cost": _cost_to_dict(v.cost),
+                            "pitfalls": list(v.pitfalls),
+                            "related": _related_to_dict(v.related),
                         }
                         for vname, v in cat.variants.items()
                     },
@@ -344,6 +531,18 @@ class WorkflowRegistry:
             outputs=outputs,
             defaults=defaults,
             input_labels=input_labels,
+            use_cases=_parse_str_tuple(category, name, "use_cases", data.get("use_cases")),
+            not_for=_parse_str_tuple(category, name, "not_for", data.get("not_for")),
+            tags=_parse_tags(category, name, data.get("tags")),
+            character_proportions=_parse_character_proportions(
+                category, name, data.get("character_proportions")
+            ),
+            prompt_template=_parse_prompt_template(
+                category, name, data.get("prompt_template")
+            ),
+            cost=_parse_cost(category, name, data.get("cost")),
+            pitfalls=_parse_str_tuple(category, name, "pitfalls", data.get("pitfalls")),
+            related=_parse_related(category, name, data.get("related")),
         )
 
     def _build_input_labels(
@@ -442,6 +641,256 @@ class WorkflowRegistry:
             return self._presets[key]
 
         return _PRESET_RE.sub(repl, value)
+
+
+# ------------------------------------------------------------------ 메타 파서
+#
+# 모두 입력이 None 이면 None / 빈 tuple 반환 — 메타 미작성 변형이 그대로 통과.
+
+
+_VALID_TAG_KEYS = {"kind", "style", "format", "output", "model_family"}
+
+
+def _err(category: str, name: str, msg: str) -> WorkflowRegistryError:
+    return WorkflowRegistryError(f"variant {category}/{name} {msg}")
+
+
+def _parse_str_tuple(
+    category: str, name: str, field_name: str, raw: Any
+) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise _err(category, name, f"`{field_name}` must be a list of strings")
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            raise _err(category, name, f"`{field_name}` entries must be strings")
+        out.append(item)
+    return tuple(out)
+
+
+def _parse_tags(category: str, name: str, raw: Any) -> TagSet | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise _err(category, name, "`tags` must be a mapping")
+    unknown = set(raw.keys()) - _VALID_TAG_KEYS
+    if unknown:
+        raise _err(
+            category, name, f"`tags` has unknown keys: {sorted(unknown)} "
+            f"(allowed: {sorted(_VALID_TAG_KEYS)})"
+        )
+    def _opt(key: str) -> str | None:
+        v = raw.get(key)
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            raise _err(category, name, f"`tags.{key}` must be a string")
+        return v
+    return TagSet(
+        kind=_opt("kind"),
+        style=_opt("style"),
+        format=_opt("format"),
+        output=_opt("output"),
+        model_family=_opt("model_family"),
+    )
+
+
+def _parse_character_proportions(
+    category: str, name: str, raw: Any
+) -> Mapping[str, Any] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise _err(category, name, "`character_proportions` must be a mapping")
+    return MappingProxyType(dict(raw))
+
+
+def _parse_prompt_template(
+    category: str, name: str, raw: Any
+) -> PromptTemplate | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise _err(category, name, "`prompt_template` must be a mapping")
+
+    skeleton = raw.get("skeleton") or ""
+    if not isinstance(skeleton, str):
+        raise _err(category, name, "`prompt_template.skeleton` must be a string")
+
+    triggers_raw = raw.get("model_triggers")
+    triggers: tuple[str, ...] = ()
+    if triggers_raw is not None:
+        if not isinstance(triggers_raw, list):
+            raise _err(category, name, "`prompt_template.model_triggers` must be a list")
+        triggers = tuple(str(t) for t in triggers_raw)
+
+    required: list[PromptToken] = []
+    req_raw = raw.get("required_tokens") or []
+    if not isinstance(req_raw, list):
+        raise _err(category, name, "`prompt_template.required_tokens` must be a list")
+    for item in req_raw:
+        if not isinstance(item, dict):
+            raise _err(
+                category, name,
+                "`prompt_template.required_tokens` entry must be a mapping"
+            )
+        ph = item.get("placeholder")
+        if not ph or not isinstance(ph, str):
+            raise _err(
+                category, name,
+                "`prompt_template.required_tokens` entry needs `placeholder`"
+            )
+        ex = item.get("examples") or []
+        if not isinstance(ex, list):
+            raise _err(
+                category, name,
+                f"`prompt_template.required_tokens[{ph}].examples` must be a list"
+            )
+        required.append(PromptToken(placeholder=ph, examples=tuple(str(e) for e in ex)))
+
+    forbidden: list[ForbiddenToken] = []
+    forb_raw = raw.get("forbidden_tokens") or []
+    if not isinstance(forb_raw, list):
+        raise _err(category, name, "`prompt_template.forbidden_tokens` must be a list")
+    for item in forb_raw:
+        if not isinstance(item, dict):
+            raise _err(
+                category, name,
+                "`prompt_template.forbidden_tokens` entry must be a mapping"
+            )
+        token = item.get("token")
+        reason = item.get("reason")
+        if not token or not reason:
+            raise _err(
+                category, name,
+                "`prompt_template.forbidden_tokens` entry needs `token` and `reason`"
+            )
+        forbidden.append(ForbiddenToken(token=str(token), reason=str(reason)))
+
+    examples: list[PromptExample] = []
+    ex_raw = raw.get("examples") or []
+    if not isinstance(ex_raw, list):
+        raise _err(category, name, "`prompt_template.examples` must be a list")
+    for item in ex_raw:
+        if not isinstance(item, dict):
+            raise _err(
+                category, name, "`prompt_template.examples` entry must be a mapping"
+            )
+        prompt = item.get("prompt")
+        if not prompt or not isinstance(prompt, str):
+            raise _err(
+                category, name,
+                "`prompt_template.examples` entry needs string `prompt`"
+            )
+        seed = item.get("seed")
+        if seed is not None and not isinstance(seed, int):
+            raise _err(
+                category, name,
+                "`prompt_template.examples[].seed` must be an integer"
+            )
+        note = item.get("note")
+        if note is not None and not isinstance(note, str):
+            raise _err(
+                category, name,
+                "`prompt_template.examples[].note` must be a string"
+            )
+        examples.append(PromptExample(prompt=prompt, seed=seed, note=note))
+
+    return PromptTemplate(
+        skeleton=skeleton,
+        model_triggers=triggers,
+        required_tokens=tuple(required),
+        forbidden_tokens=tuple(forbidden),
+        examples=tuple(examples),
+    )
+
+
+def _parse_cost(category: str, name: str, raw: Any) -> CostEstimate | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise _err(category, name, "`cost` must be a mapping")
+    est = raw.get("est_seconds")
+    vram = raw.get("vram_gb")
+    # Python 의 bool 은 int 의 subclass — YAML 의 `vram_gb: yes` 같은 오타가
+    # 조용히 1.0 으로 들어가는 걸 막는다. bool 명시 거부 후 numeric 검사.
+    if est is not None and (isinstance(est, bool) or not isinstance(est, int)):
+        raise _err(category, name, "`cost.est_seconds` must be an integer")
+    if vram is not None and (isinstance(vram, bool) or not isinstance(vram, (int, float))):
+        raise _err(category, name, "`cost.vram_gb` must be a number")
+    return CostEstimate(
+        est_seconds=int(est) if est is not None else None,
+        vram_gb=float(vram) if vram is not None else None,
+    )
+
+
+def _parse_related(category: str, name: str, raw: Any) -> RelatedRefs | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise _err(category, name, "`related` must be a mapping")
+    unknown = set(raw.keys()) - {"sibling", "upstream", "downstream"}
+    if unknown:
+        raise _err(category, name, f"`related` has unknown keys: {sorted(unknown)}")
+    return RelatedRefs(
+        sibling=_parse_str_tuple(category, name, "related.sibling", raw.get("sibling")),
+        upstream=_parse_str_tuple(category, name, "related.upstream", raw.get("upstream")),
+        downstream=_parse_str_tuple(
+            category, name, "related.downstream", raw.get("downstream")
+        ),
+    )
+
+
+# ------------------------------------------------------------------ catalog 직렬화
+
+
+def _tags_to_dict(t: TagSet | None) -> dict[str, str | None] | None:
+    if t is None:
+        return None
+    return {
+        "kind": t.kind,
+        "style": t.style,
+        "format": t.format,
+        "output": t.output,
+        "model_family": t.model_family,
+    }
+
+
+def _prompt_template_to_dict(p: PromptTemplate | None) -> dict[str, Any] | None:
+    if p is None:
+        return None
+    return {
+        "skeleton": p.skeleton,
+        "model_triggers": list(p.model_triggers),
+        "required_tokens": [
+            {"placeholder": t.placeholder, "examples": list(t.examples)}
+            for t in p.required_tokens
+        ],
+        "forbidden_tokens": [
+            {"token": t.token, "reason": t.reason} for t in p.forbidden_tokens
+        ],
+        "examples": [
+            {"prompt": e.prompt, "seed": e.seed, "note": e.note} for e in p.examples
+        ],
+    }
+
+
+def _cost_to_dict(c: CostEstimate | None) -> dict[str, Any] | None:
+    if c is None:
+        return None
+    return {"est_seconds": c.est_seconds, "vram_gb": c.vram_gb}
+
+
+def _related_to_dict(r: RelatedRefs | None) -> dict[str, list[str]] | None:
+    if r is None:
+        return None
+    return {
+        "sibling": list(r.sibling),
+        "upstream": list(r.upstream),
+        "downstream": list(r.downstream),
+    }
 
 
 # ------------------------------------------------------------------ 싱글톤 헬퍼

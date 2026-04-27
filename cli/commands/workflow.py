@@ -42,7 +42,7 @@ def cmd_catalog() -> None:
 
 @workflow_app.command("describe")
 def cmd_describe(target: str = typer.Argument(..., help="<category>/<variant>")) -> None:
-    """단일 변형 상세 (input_labels, defaults, outputs) 를 JSON 으로 출력."""
+    """단일 변형 상세 (input_labels, defaults, outputs, 디스커버리 메타) 를 JSON 으로 출력."""
     category, variant = _parse_category_variant(target)
     body = request("GET", "/api/workflows/catalog")
     try:
@@ -54,6 +54,33 @@ def cmd_describe(target: str = typer.Argument(..., help="<category>/<variant>"))
         )
         raise typer.Exit(code=1) from exc
     typer.echo(json.dumps({"category": category, "variant": variant, **spec}, ensure_ascii=False, indent=2))
+
+
+@workflow_app.command("recommend")
+def cmd_recommend(
+    kind: str | None = typer.Option(None, "--kind", help="character | background | icon | illustration | utility"),
+    style: str | None = typer.Option(None, "--style", help="pixel-art | anime | flat | ..."),
+    format: str | None = typer.Option(None, "--format", help="single | multi-view-1x3 | tile"),
+    output: str | None = typer.Option(None, "--output", help="alpha-pixel | alpha-rembg | raw | hires | pose"),
+    model_family: str | None = typer.Option(None, "--model-family", help="illustrious | sdxl-anime | pony | sd1.5 | sdxl-pixel | pony-pixel"),
+) -> None:
+    """tag 필터로 변형 추천 — score 순. 모든 옵션 미지정 시 사용 가능한 모든 변형.
+
+    예: ``af workflow recommend --kind character --style pixel-art --output alpha-pixel`` →
+    sprite/pixel_alpha 가 score=1.0 primary 첫 번째.
+    """
+    params: dict[str, str] = {}
+    for key, val in (
+        ("kind", kind),
+        ("style", style),
+        ("format", format),
+        ("output", output),
+        ("model_family", model_family),
+    ):
+        if val is not None:
+            params[key] = val
+    body = request("GET", "/api/workflows/recommend", params=params)
+    typer.echo(json.dumps(body, ensure_ascii=False, indent=2))
 
 
 # ----------------------------------------------------------------------------

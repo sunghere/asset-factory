@@ -8,6 +8,36 @@ _작성: 2026-04-27 · 세션 종료 시점_
 
 ## 최근작업
 
+### 워크플로우 디스커버리 메타데이터 인덱스 — Phase A + D (2026-04-27, 미커밋)
+
+[`docs/PLAN_workflow_discovery_metadata.md`](./docs/PLAN_workflow_discovery_metadata.md)
+풀 코스 구현. 25 변형 모두 `use_cases` / `tags` / `prompt_template` / `cost` /
+`pitfalls` / `related` 메타 + `/api/workflows/recommend` rule-based filter +
+`af workflow recommend` CLI + SKILL.md LLM 의사결정 가이드.
+
+핵심 파일:
+- [`workflow_registry.py`](./workflow_registry.py) — 신규 dataclass 7종 (`TagSet` /
+  `PromptTemplate` 외) + 파서 + `recommend()` + `to_catalog()` 직렬화 확장
+- [`workflows/registry.yml`](./workflows/registry.yml) — `_anchors` 섹션 (family 별
+  `prompt_template` / `pitfalls` 공유) + 25 변형 메타. 검증 prompt examples /
+  pitfalls 는 [`HANDOFF.md §1.1, §5`](../sincerity-skills/sd-generator/HANDOFF.md)
+  에서 옮김. Pony 의 `score_9` / sprite LoRA 트리거 / RDXL Pony pixel 의 `pixel art, game assets` 명시
+- [`server.py`](./server.py) `/api/workflows/recommend` endpoint
+- [`cli/commands/workflow.py`](./cli/commands/workflow.py) `af workflow recommend`
+- [`tests/test_workflow_registry.py`](./tests/test_workflow_registry.py),
+  [`tests/test_workflow_endpoints.py`](./tests/test_workflow_endpoints.py),
+  [`tests/test_cli_workflow.py`](./tests/test_cli_workflow.py) — +28 테스트 (parse / roundtrip / recommend / endpoint smoke / CLI)
+- [`sincerity-skills/asset-factory-api/SKILL.md`](../sincerity-skills/asset-factory-api/SKILL.md) — "디스커버리 메타 — task → variant 결정" 섹션 + tag 어휘 + 모델별 트리거 주의
+
+호환성: 모든 신규 메타 필드 optional. 기존 클라이언트는 새 필드 무시
+(forward-compatible). 기존 `/api/workflows/generate` 호출 무영향.
+
+전체 348 테스트 통과 (이전 세션 314 → 348).
+
+다음 세션 픽업: 사용자가 매니페스트 메타 (특히 prompt examples / pitfalls 의 도메인
+디테일) 검토 후 PR 으로 묶기. 위의 `feat/skill-p0-gaps` 브랜치와 독립이라 별도
+브랜치로 가능.
+
 ### `feat/skill-p0-gaps` 브랜치 — `docs/TODOS_for_SKILL.md` P0 3개 완료 (2026-04-27)
 
 세 커밋 독립 (각각 별 PR 가능), 회귀 `pytest -q --ignore=tests/test_generator_comfyui.py`

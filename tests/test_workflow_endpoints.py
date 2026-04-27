@@ -63,6 +63,9 @@ categories:
           steps: 30
           cfg: 6.5
           sampler: dpmpp_2m
+        tags: { kind: character, style: pixel-art, model_family: illustrious }
+        use_cases: ["테스트 character variant"]
+        cost: { est_seconds: 30, vram_gb: 12 }
   pixel_bg:
     description: "API 변환 필요"
     variants:
@@ -131,6 +134,64 @@ def test_catalog_endpoint_returns_registry_shape(isolated) -> None:  # noqa: ANN
     assert cats["pixel_bg"]["primary_variant"] is None
     assert cats["pixel_bg"]["variants"]["sdxl"]["available"] is False
     assert cats["pixel_bg"]["variants"]["sdxl"]["status"] == "needs_api_conversion"
+
+
+# ----------------------------------------------------------------------------
+# /api/workflows/recommend
+# ----------------------------------------------------------------------------
+
+
+def test_recommend_endpoint_filters_by_kind(isolated) -> None:  # noqa: ANN001
+    with TestClient(server.app) as client:
+        r = client.get("/api/workflows/recommend?kind=character")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["filters"] == {"kind": "character"}
+    matches = data["matches"]
+    assert len(matches) == 1
+    m = matches[0]
+    assert m["category"] == "sprite"
+    assert m["variant"] == "v"
+    assert m["tags"]["kind"] == "character"
+    # strict-AND — score / matched_axes 필드 없음
+    assert "score" not in m
+    assert "matched_axes" not in m
+
+
+def test_recommend_endpoint_no_filters_lists_all(isolated) -> None:  # noqa: ANN001
+    with TestClient(server.app) as client:
+        r = client.get("/api/workflows/recommend")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["filters"] == {}
+    assert len(data["matches"]) == 1   # available 만 = sprite/v
+
+
+def test_recommend_endpoint_no_match_returns_empty(isolated) -> None:  # noqa: ANN001
+    with TestClient(server.app) as client:
+        r = client.get("/api/workflows/recommend?kind=icon")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["matches"] == []
+
+
+def test_recommend_endpoint_empty_string_param_normalizes_to_unset(isolated) -> None:  # noqa: ANN001
+    """`?kind=` (빈 문자열) 은 미지정으로 정규화 — 모든 변형 reject 되는 함정 회피."""
+    with TestClient(server.app) as client:
+        r = client.get("/api/workflows/recommend?kind=&style=")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["filters"] == {}     # 빈 문자열은 응답 filters 에도 표기 안 함
+    assert len(data["matches"]) == 1   # = 빈 query 와 동일 (sprite/v)
+
+
+def test_recommend_endpoint_whitespace_param_normalizes(isolated) -> None:  # noqa: ANN001
+    """`?kind=%20%20` (whitespace) 도 미지정으로 정규화."""
+    with TestClient(server.app) as client:
+        r = client.get("/api/workflows/recommend?kind=%20%20")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["filters"] == {}
 
 
 # ----------------------------------------------------------------------------

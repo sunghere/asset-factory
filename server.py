@@ -1285,6 +1285,57 @@ async def workflows_catalog() -> dict[str, Any]:
     return workflow_registry.to_catalog()
 
 
+@app.get("/api/workflows/recommend")
+async def workflows_recommend(
+    kind: str | None = None,
+    style: str | None = None,
+    format: str | None = None,
+    output: str | None = None,
+    model_family: str | None = None,
+) -> dict[str, Any]:
+    """tag 기반 strict-AND filter — LLM/클라이언트가 task → variant 결정에 사용.
+
+    예: ``GET /api/workflows/recommend?kind=character&style=pixel-art`` →
+    지정된 모든 축이 정확히 일치하는 변형만 (primary 우선 → 알파벳 순).
+
+    빈 query → 모든 호출 가능한 변형. 빈 문자열 (`?kind=`) 은 미지정으로
+    정규화 (모든 변형 reject 되는 함정 회피). 결과는 의사결정 핵심 메타만 —
+    풀 ``prompt_template`` / ``pitfalls`` 는 catalog 응답 참조.
+    """
+    def _normalize(v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+    kind = _normalize(kind)
+    style = _normalize(style)
+    format = _normalize(format)
+    output = _normalize(output)
+    model_family = _normalize(model_family)
+
+    matches = workflow_registry.recommend(
+        kind=kind,
+        style=style,
+        format=format,
+        output=output,
+        model_family=model_family,
+    )
+    return {
+        "filters": {
+            k: v
+            for k, v in (
+                ("kind", kind),
+                ("style", style),
+                ("format", format),
+                ("output", output),
+                ("model_family", model_family),
+            )
+            if v is not None
+        },
+        "matches": matches,
+    }
+
+
 # ── ComfyUI 동적 입력 업로드 ──────────────────────────────────────────────
 # LoadImage 노드가 참조할 임의 이미지를 ComfyUI ``input/<subfolder>/`` 에 올린다.
 # 이후 /api/workflows/generate 의 ``workflow_params.load_images`` 에 응답의 ``name`` 을
