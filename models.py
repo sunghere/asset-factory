@@ -135,6 +135,11 @@ class Database:
                     workflow_variant TEXT,
                     workflow_params_json TEXT,
                     approval_mode TEXT NOT NULL DEFAULT 'manual',
+                    -- §1.B subject-injection: PromptResolution.to_dict() JSON.
+                    -- legacy 모드 task 도 mode='legacy' + final_positive=prompt 형태로 저장
+                    -- (호출 시 항상 채움). NULL 은 legacy DB row 만 — /api/jobs/{id} 응답에서
+                    -- 재구성하지 않고 None 으로 노출.
+                    prompt_resolution_json TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY(job_id) REFERENCES jobs(id)
@@ -182,6 +187,11 @@ class Database:
             if "approval_mode" not in col_names:
                 await conn.execute(
                     "ALTER TABLE generation_tasks ADD COLUMN approval_mode TEXT NOT NULL DEFAULT 'manual'"
+                )
+            # §1.B subject-injection — PromptResolution JSON. NULL 은 legacy DB row.
+            if "prompt_resolution_json" not in col_names:
+                await conn.execute(
+                    "ALTER TABLE generation_tasks ADD COLUMN prompt_resolution_json TEXT"
                 )
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_tasks_batch ON generation_tasks(batch_id)"
@@ -315,7 +325,7 @@ class Database:
                     candidate_slot, candidates_total,
                     batch_id, lora_spec_json, seed,
                     backend, workflow_category, workflow_variant, workflow_params_json,
-                    approval_mode,
+                    approval_mode, prompt_resolution_json,
                     created_at, updated_at
                 )
                 VALUES (
@@ -325,7 +335,7 @@ class Database:
                     :candidate_slot, :candidates_total,
                     :batch_id, :lora_spec_json, :seed,
                     :backend, :workflow_category, :workflow_variant, :workflow_params_json,
-                    :approval_mode,
+                    :approval_mode, :prompt_resolution_json,
                     :created_at, :updated_at
                 )
                 """,
@@ -342,6 +352,8 @@ class Database:
                     "workflow_variant": task.get("workflow_variant"),
                     "workflow_params_json": task.get("workflow_params_json"),
                     "approval_mode": task.get("approval_mode") or "manual",
+                    # §1.B prompt_resolution JSON. legacy DB row 호환 위해 None 허용.
+                    "prompt_resolution_json": task.get("prompt_resolution_json"),
                     "created_at": now,
                     "updated_at": now,
                 },
@@ -641,6 +653,29 @@ class Database:
             if row is None:
                 return None
             return JobRecord(**dict(row))
+
+    async def get_first_task_prompt_resolution(
+        self, job_id: str
+    ) -> dict[str, Any] | None:
+        """job 의 첫 task 의 prompt_resolution_json 을 dict 로 반환.
+
+        §1.B — `/api/jobs/{id}` 응답에 `prompt_resolution` 노출용. 모든 task 가
+        같은 resolution 을 공유 (cherry-pick N 후보도 prompt 는 동일, seed 만
+        다름). NULL 또는 legacy DB row 면 None.
+        """
+        async with aiosqlite.connect(self.db_path) as conn:
+            cursor = await conn.execute(
+                "SELECT prompt_resolution_json FROM generation_tasks "
+                "WHERE job_id=? ORDER BY id ASC LIMIT 1",
+                (job_id,),
+            )
+            row = await cursor.fetchone()
+            if row is None or row[0] is None:
+                return None
+            try:
+                return json.loads(row[0])
+            except json.JSONDecodeError:
+                return None
 
     async def list_assets(
         self,

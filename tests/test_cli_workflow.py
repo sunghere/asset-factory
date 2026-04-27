@@ -269,6 +269,77 @@ def test_gen_bypass_approval_sets_request_field(
     assert body["approval_mode"] == "bypass"
 
 
+# ----------------------------------------------------------------------------
+# §1.B — --subject / --prompt-mode / --style-extra
+# ----------------------------------------------------------------------------
+
+
+def test_gen_subject_mode_flags_propagated(runner: CliRunner, base_url: str) -> None:
+    """``--subject`` + ``--style-extra`` 가 generate body 에 그대로 전달."""
+    with respx.mock(base_url=base_url) as mock:
+        mock.get("/api/workflows/catalog").mock(
+            return_value=httpx.Response(200, json=_catalog_body())
+        )
+        gen_route = mock.post("/api/workflows/generate").mock(
+            return_value=httpx.Response(200, json={
+                "job_id": "job-subj",
+                "prompt_resolution": {
+                    "mode": "subject",
+                    "user_slot": "subject",
+                    "user_input": "1girl, silver hair",
+                    "final_positive": "pixel art, ..., 1girl, silver hair, cinematic",
+                    "final_negative": "blurry, ...",
+                },
+            })
+        )
+        result = runner.invoke(
+            app,
+            [
+                "workflow", "gen", "sprite/v", "tmp", "k", "",
+                "--subject", "1girl, silver hair",
+                "--style-extra", "cinematic",
+            ],
+        )
+    assert result.exit_code == 0, _err_text(result)
+    body = json.loads(gen_route.calls.last.request.content)
+    assert body["subject"] == "1girl, silver hair"
+    assert body["style_extra"] == "cinematic"
+    assert body["prompt_mode"] == "auto"     # default
+
+
+def test_gen_prompt_mode_legacy_flag(runner: CliRunner, base_url: str) -> None:
+    """``--prompt-mode legacy`` 가 body 에 들어감."""
+    with respx.mock(base_url=base_url) as mock:
+        mock.get("/api/workflows/catalog").mock(
+            return_value=httpx.Response(200, json=_catalog_body())
+        )
+        gen_route = mock.post("/api/workflows/generate").mock(
+            return_value=httpx.Response(200, json={"job_id": "job-leg"})
+        )
+        result = runner.invoke(
+            app,
+            [
+                "workflow", "gen", "sprite/v", "tmp", "k",
+                "user-written prompt with all keywords",
+                "--prompt-mode", "legacy",
+            ],
+        )
+    assert result.exit_code == 0, _err_text(result)
+    body = json.loads(gen_route.calls.last.request.content)
+    assert body["prompt_mode"] == "legacy"
+    assert body["prompt"] == "user-written prompt with all keywords"
+
+
+def test_gen_requires_prompt_or_subject(runner: CliRunner, base_url: str) -> None:
+    """prompt 와 --subject 모두 빈 입력이면 exit 2."""
+    result = runner.invoke(
+        app,
+        ["workflow", "gen", "sprite/v", "tmp", "k"],
+    )
+    assert result.exit_code == 2
+    assert "prompt 또는 --subject" in _err_text(result)
+
+
 def test_gen_plain_string_input_passes_through(
     runner: CliRunner, base_url: str
 ) -> None:
