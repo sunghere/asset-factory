@@ -1,0 +1,70 @@
+# sprite/v36_pro_stage1 — V36 Pro 컨셉 디자인 (ControlNet 없음, 자유 layout).
+#
+# 워크플로우: Sprite_Illustrious_Pro_V36_api_stage1.json. ControlNet 없이 LoRA 만
+# 사용 — 캐릭터 디자인 탐색 단계용.
+schema_version: 1
+
+intent: |
+  [V36 Pro] Concept design exploration without ControlNet (free layout, 1280×896).
+  LoRA-only sprite style for character design iteration before V37/V38 pose-guided.
+
+use_cases:
+  - "캐릭터 컨셉 디자인 단계 — 자유 layout, 다양한 포즈 탐색"
+  - "ControlNet 강제 없이 LoRA 만으로 sprite 스타일 생성"
+  - "V37/V38 ControlNet 단계 전 디자인 iteration"
+  - "Single character image (multi-view 강제 없음)"
+
+not_for:
+  - "정확한 multi-view (1×3 layout) 필요 — use sprite/pixel_alpha or sprite/v37_pixel"
+  - "최종 게임 자산 — alpha 추출 / 픽셀 정렬 없음 (디자인 단계 only)"
+  - "single character non-pixel 일러스트 — use illustration/hyphoria_*"
+
+output_layout:
+  kind: single
+  rows: 1
+  cols: 1
+  per_cell_size: [1280, 896]
+  alpha: false
+  notes: |
+    1280×896 raw single image. ControlNet 없음 — 자유 layout, 단일 캐릭터 또는
+    여러 포즈 중 한 구도 (LoRA 가 sprite 스타일 유지). 결과를 V37/V38 의
+    sprite/pose_extract 로 stick figure 추출 후 ControlNet 단계로 chain 가능.
+
+tags:
+  - pixel-art
+  - sprite-style
+  - free-layout
+  - concept-design
+  - v36-pro
+  - illustrious
+  - 컨셉-디자인
+  - 캐릭터-디자인
+
+prompt_template:
+  base_positive: |
+    pixel_character_sprite, sprite art, (pixel art:1.5), white background,
+    chibi, sd character, full body,
+    masterpiece, best quality, very aesthetic
+  # base_negative: 컨셉 디자인 단계라 negative 가 V37/V38 보다 가벼움.
+  # 검 떠다님 negative 는 그대로 유지 (HANDOFF §5.4).
+  base_negative: |
+    (worst quality, low quality:1.4), blurry, jpeg artifacts, deformed, bad anatomy,
+    watermark, text, signature, photorealistic, 3d, realistic, photo,
+    smooth shading, anti-aliasing,
+    gradient background, complex background, scenery,
+    floating sword, detached weapon, levitating sword, separated weapon,
+    sword in air, weapon hovering
+  user_slot:
+    label: subject
+    description: |
+      캐릭터 묘사 (외형 / 복장 / 무기 / 액션 / 포즈). V37/V38 와 달리 ControlNet
+      없으므로 포즈/구도도 prompt 로 자유 묘사 가능. chibi 가중치 강조 금지 —
+      LoRA 가 약하게 비율 학습 (HANDOFF §5.5). "chibi, sd character" 정도만.
+    examples:
+      - "1girl, silver hair, blue dress, standing pose, smiling"
+      - "1boy, knight armor, holding sword, heroic pose"
+      - "1girl, magical girl, twirling, sparkles around"
+    required: true
+    min_chars: 8
+    max_chars: 400
+  injection_rule: "{base_positive}, {subject}"
