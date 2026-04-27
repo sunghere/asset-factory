@@ -18,9 +18,13 @@
 
 | 파일 | 작업 | 상태 | Spec 출처 |
 |---|---|---|---|
-| `01-A-catalog-enrichment.md` | §1.A — 카탈로그 API 풍부화 (P0) | OPEN | `docs/NEXT.md` §1.A (PR #21) |
+| `01-A-catalog-enrichment.md` | §1.A — 카탈로그 API 풍부화 (P0) | **SUPERSEDED by PR #28** | `docs/NEXT.md` §1.A (PR #21) |
 
 ## 발행 예정 (선행 작업 머지 후)
 
-- **§1.B** — 공통 prompt 강제 주입 (P0). §1.A 머지 *후* 작성 — 실제 yaml 결과 참조 필요.
-- **§1.C** — 변형 의도 기반 인덱스/자연어 검색 (P1). §1.A 머지 *후* 작성. §1.B 와 병렬 진행 가능.
+- **§1.B** — 공통 prompt 강제 주입 (P0). PR #28 + PR #29 머지 후 작성 — 데이터는 이미 노출 (`prompt_template.model_triggers/forbidden_tokens`).
+- **§1.C** — 변형 의도 기반 인덱스/자연어 검색 (P1). §1.B 와 병렬 진행 가능.
+
+> **§1.A 회고**: 핸드오프를 "1 변형 pilot" 으로 잡았는데 실제 구현 (PR #28) 은
+> 25 변형 풀 메타로 갔다. AI 보조에서 lake 단위 (변형 N개 한 번에) 가 marginal
+> cost 작아 자연스러움. §1.B / §1.C 핸드오프는 처음부터 lake 가정으로.
