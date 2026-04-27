@@ -129,7 +129,13 @@ def cmd_gen(
     target: str = typer.Argument(..., help="<category>/<variant>"),
     project: str = typer.Argument(..., help="자산 프로젝트."),
     asset_key: str = typer.Argument(..., help="자산 키."),
-    prompt: str = typer.Argument(..., help="positive prompt."),
+    prompt: str = typer.Argument(
+        "",
+        help=(
+            "positive prompt (legacy 모드). subject 모드 사용 시 빈 문자열로 두고 "
+            "--subject 로 캐릭터 묘사만 전달."
+        ),
+    ),
     negative: str | None = typer.Option(None, "--negative", help="negative prompt."),
     seed: int | None = typer.Option(None, "--seed"),
     candidates: int = typer.Option(1, "--candidates", "-n", min=1, max=16),
@@ -142,14 +148,39 @@ def cmd_gen(
         show_default=False,
     ),
     bypass_approval: bool = typer.Option(False, "--bypass-approval"),
+    # §1.B subject-injection
+    subject: str | None = typer.Option(
+        None,
+        "--subject",
+        help=(
+            "subject 모드 명시 — 캐릭터/객체 묘사만. 변형의 base_positive/"
+            "base_negative 로 합성. SKILL.md 의 변형 선택 4-step 권장 모드."
+        ),
+    ),
+    prompt_mode: str = typer.Option(
+        "auto",
+        "--prompt-mode",
+        help="auto | legacy | subject. legacy = prompt 통째 입력, subject = 강제 합성.",
+    ),
+    style_extra: str | None = typer.Option(
+        None, "--style-extra",
+        help="subject 모드의 base_positive 뒤에 추가될 사용자 prose (선택).",
+    ),
     wait: bool = typer.Option(False, "--wait", help="job 완료까지 폴링."),
     wait_timeout: float = typer.Option(300.0, "--wait-timeout"),
 ) -> None:
     """ComfyUI 워크플로우 변형을 호출한다.
 
+    SKILL.md 의 변형 선택 4-step 권장 — ``--subject "<캐릭터 묘사만>"`` 사용.
+    legacy 호출 (``prompt`` 통째 입력) 도 지원.
+
     ``--input <label>=<value>`` 는 반복 가능. 로컬 파일은 ``@`` prefix:
     ``--input pose_image=@./pose.png --input source_image=asset:<id>``
     """
+    if not prompt and not subject:
+        typer.echo("prompt 또는 --subject 중 하나는 필수입니다.", err=True)
+        raise typer.Exit(code=2)
+
     category, variant = _parse_category_variant(target)
 
     # 1) catalog 조회 — 라벨 검증.
@@ -187,10 +218,15 @@ def cmd_gen(
         "category": category,
         "workflow_category": category,
         "workflow_variant": variant,
-        "prompt": prompt,
+        "prompt": prompt or "",
         "candidates_total": candidates,
         "approval_mode": "bypass" if bypass_approval else "manual",
+        "prompt_mode": prompt_mode,
     }
+    if subject is not None:
+        body["subject"] = subject
+    if style_extra is not None:
+        body["style_extra"] = style_extra
     if negative is not None:
         body["negative_prompt"] = negative
     if seed is not None:

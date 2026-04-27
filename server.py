@@ -42,6 +42,11 @@ from sd_backend import (
     ComfyUIBackend,
     GenerationOutcome,
 )
+from prompt_resolution import (
+    PromptResolution,
+    PromptResolutionError,
+    resolve_prompt,
+)
 from validator import validate_asset
 from workflow_registry import WorkflowRegistry, WorkflowRegistryError
 
@@ -399,7 +404,9 @@ class WorkflowGenerateRequest(BaseModel):
     category: str = Field(default="sprite")  # asset 카테고리 (DB의 category 컬럼)
     workflow_category: str = Field(..., examples=["sprite"])
     workflow_variant: str = Field(..., examples=["pixel_alpha"])
-    prompt: str
+    # §1.B: prompt 가 default "" 로 변경 — subject 모드는 prompt 없이 호출 가능.
+    # legacy 호출은 그대로 prompt 통째 입력.
+    prompt: str = ""
     negative_prompt: str | None = None
     seed: int | None = None
     steps: int | None = Field(default=None, ge=1, le=200)
@@ -414,6 +421,28 @@ class WorkflowGenerateRequest(BaseModel):
     # bypass 후보는 cherry-pick UI 에 안 뜨고, export manifest 에서도 제외된다.
     # 임시 시뮬·sketch·체인 중간물 등 사람 검수 무의미한 케이스용.
     approval_mode: Literal["manual", "bypass"] = "manual"
+
+    # §1.B subject-injection — 사용자가 캐릭터 묘사만 보내면 변형 yaml 의
+    # prompt_template 으로 final prompt 합성. 자세한 모드 선택은
+    # `prompt_resolution.resolve_prompt` 참조.
+    subject: str | None = Field(
+        default=None,
+        description=(
+            "subject 모드 명시 입력 — 캐릭터/객체 묘사만. 변형의 base_positive/"
+            "base_negative 가 자동 합성. 미지정 시 prompt 가 user_input 으로 해석."
+        ),
+    )
+    prompt_mode: Literal["auto", "legacy", "subject"] = Field(
+        default="auto",
+        description=(
+            "auto: 자동 감지 (subject 명시 / prompt_template 부재 / 길이 휴리스틱). "
+            "legacy: prompt 통째 입력 그대로. subject: 강제 합성 모드."
+        ),
+    )
+    style_extra: str | None = Field(
+        default=None,
+        description="subject 모드의 base_positive 뒤에 추가될 사용자 prose (선택).",
+    )
 
 
 class EventBroker:
@@ -1436,6 +1465,23 @@ async def workflows_generate(request: WorkflowGenerateRequest) -> dict[str, Any]
             ),
         )
 
+    # §1.B prompt 합성. legacy 모드면 그대로 통과, subject 모드면 base_positive +
+    # injection_rule 합성. Validation 위반 시 PromptResolutionError → HTTP 400.
+    try:
+        resolution = resolve_prompt(
+            variant,
+            subject=request.subject,
+            prompt=request.prompt,
+            negative_prompt=request.negative_prompt,
+            prompt_mode=request.prompt_mode,
+            style_extra=request.style_extra,
+        )
+    except PromptResolutionError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+
     # P2.3 — 변형의 출력 수 × candidates_total 만큼 디스크 가드 상향
     outputs_per_task = max(1, len(variant.outputs))
     _ensure_disk_space_for_enqueue(
@@ -1451,6 +1497,7 @@ async def workflows_generate(request: WorkflowGenerateRequest) -> dict[str, Any]
         if request.workflow_params
         else None
     )
+    prompt_resolution_json = json.dumps(resolution.to_dict(), ensure_ascii=False)
     candidates_total = int(request.candidates_total)
     base_seed = request.seed
 
@@ -1476,8 +1523,10 @@ async def workflows_generate(request: WorkflowGenerateRequest) -> dict[str, Any]
                 "project": request.project,
                 "asset_key": request.asset_key,
                 "category": request.category,
-                "prompt": request.prompt,
-                "negative_prompt": request.negative_prompt,
+                # §1.B: ComfyUI 로 디스패치되는 실제 final_positive/final_negative.
+                # legacy 모드면 request.prompt 그대로 (resolution.final_positive 와 동일).
+                "prompt": resolution.final_positive,
+                "negative_prompt": resolution.final_negative or None,
                 "model_name": None,
                 "width": None,
                 "height": None,
@@ -1495,6 +1544,7 @@ async def workflows_generate(request: WorkflowGenerateRequest) -> dict[str, Any]
                 "workflow_variant": request.workflow_variant,
                 "workflow_params_json": workflow_params_json,
                 "approval_mode": request.approval_mode,
+                "prompt_resolution_json": prompt_resolution_json,
             }
         )
     await db.mark_job_running(job_id)
@@ -1508,6 +1558,7 @@ async def workflows_generate(request: WorkflowGenerateRequest) -> dict[str, Any]
             variant.primary_output.label if variant.primary_output else None
         ),
         "approval_mode": request.approval_mode,
+        "prompt_resolution": resolution.to_dict(),
     }
 
 
@@ -2159,10 +2210,15 @@ async def recent_jobs(limit: int = Query(default=10, ge=1, le=100)) -> list[dict
 
 @app.get("/api/jobs/{job_id}")
 async def get_job(job_id: str) -> dict[str, Any]:
-    """작업 상태 조회."""
+    """작업 상태 조회.
+
+    §1.B — workflow 호출 job 이면 ``prompt_resolution`` 필드에 첫 task 의 prompt
+    합성 결과 노출 (재현·디버깅용). legacy DB row 또는 workflow 외 job 은 None.
+    """
     job = await db.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="작업을 찾을 수 없습니다.")
+    prompt_resolution = await db.get_first_task_prompt_resolution(job_id)
     return {
         "id": job.id,
         "job_type": job.job_type,
@@ -2173,6 +2229,7 @@ async def get_job(job_id: str) -> dict[str, Any]:
         "error_message": job.error_message,
         "created_at": job.created_at,
         "updated_at": job.updated_at,
+        "prompt_resolution": prompt_resolution,
     }
 
 

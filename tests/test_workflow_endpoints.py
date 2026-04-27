@@ -31,19 +31,44 @@ class _DummyBroker:
 
 
 def _build_mini_registry(tmp_path: Path) -> WorkflowRegistry:
-    """sprite/v (available) + pixel_bg/sdxl (needs_conversion) 를 가진 미니 레지스트리."""
+    """sprite/v (template 있음, subject 모드) + sprite/legacy_var (template 없음,
+    legacy only) + pixel_bg/sdxl (needs_conversion).
+    """
     (tmp_path / "sprite").mkdir(parents=True)
-    (tmp_path / "sprite" / "v.json").write_text(
-        json.dumps({
-            "5": {"class_type": "CLIPTextEncode", "inputs": {"text": "OG"},
-                  "_meta": {"title": "Positive Prompt"}},
-            "11": {"class_type": "KSampler",
-                    "inputs": {"seed": 0, "steps": 30, "cfg": 6.5,
-                               "sampler_name": "dpmpp_2m", "scheduler": "karras"},
-                    "_meta": {"title": "KSampler #1"}},
-            "13": {"class_type": "SaveImage", "inputs": {"filename_prefix": "out"},
-                   "_meta": {"title": "Save PixelAlpha"}},
-        }),
+    sample_workflow = json.dumps({
+        "5": {"class_type": "CLIPTextEncode", "inputs": {"text": "OG"},
+              "_meta": {"title": "Positive Prompt"}},
+        "11": {"class_type": "KSampler",
+                "inputs": {"seed": 0, "steps": 30, "cfg": 6.5,
+                           "sampler_name": "dpmpp_2m", "scheduler": "karras"},
+                "_meta": {"title": "KSampler #1"}},
+        "13": {"class_type": "SaveImage", "inputs": {"filename_prefix": "out"},
+               "_meta": {"title": "Save PixelAlpha"}},
+    })
+    (tmp_path / "sprite" / "v.json").write_text(sample_workflow, encoding="utf-8")
+    (tmp_path / "sprite" / "legacy_var.json").write_text(sample_workflow, encoding="utf-8")
+    # §1.A 사이드카 — sprite/v 에만 prompt_template 부여 (subject 모드 가능).
+    (tmp_path / "sprite" / "v.meta.yaml").write_text(
+        """
+schema_version: 1
+intent: "test variant"
+output_layout:
+  kind: pose_grid
+  rows: 1
+  cols: 3
+  alpha: true
+tags: [pixel-art]
+prompt_template:
+  base_positive: "pixel art, sprite sheet"
+  base_negative: "blurry, low quality"
+  user_slot:
+    label: subject
+    description: "subject only"
+    required: true
+    min_chars: 8
+    max_chars: 400
+  injection_rule: "{base_positive}, {subject}"
+""",
         encoding="utf-8",
     )
     (tmp_path / "registry.yml").write_text(
@@ -54,9 +79,18 @@ categories:
     description: "테스트 스프라이트"
     variants:
       v:
-        description: "테스트 변형"
+        description: "subject 모드 변형 (template 있음)"
         file: sprite/v.json
         primary: true
+        outputs:
+          - { node_title: "Save PixelAlpha", label: pixel_alpha, primary: true }
+        defaults:
+          steps: 30
+          cfg: 6.5
+          sampler: dpmpp_2m
+      legacy_var:
+        description: "legacy 변형 (template 없음)"
+        file: sprite/legacy_var.json
         outputs:
           - { node_title: "Save PixelAlpha", label: pixel_alpha, primary: true }
         defaults:
@@ -128,10 +162,14 @@ def test_catalog_endpoint_returns_registry_shape(isolated) -> None:  # noqa: ANN
     assert v["available"] is True
     assert v["status"] == "ready"
     assert v["outputs"] == [{"label": "pixel_alpha", "primary": True}]
-    # 메타 사이드카 없는 변형은 빈 meta 객체 (forward-compat)
-    assert v["meta"]["intent"] == ""
-    assert v["meta"]["tags"] == []
-    assert v["meta"]["prompt_template"] is None
+    # 메타 사이드카 v.meta.yaml 로드 — intent / tags / prompt_template 채워짐
+    assert v["meta"]["intent"] == "test variant"
+    assert v["meta"]["tags"] == ["pixel-art"]
+    assert v["meta"]["prompt_template"]["base_positive"] == "pixel art, sprite sheet"
+    # legacy_var (사이드카 yaml 없음) 은 빈 meta — forward-compat
+    legacy = cats["sprite"]["variants"]["legacy_var"]
+    assert legacy["meta"]["intent"] == ""
+    assert legacy["meta"]["prompt_template"] is None
     # needs_conversion 도 보임
     assert cats["pixel_bg"]["primary_variant"] is None
     assert cats["pixel_bg"]["variants"]["sdxl"]["available"] is False
@@ -144,6 +182,7 @@ def test_catalog_endpoint_returns_registry_shape(isolated) -> None:  # noqa: ANN
 
 
 def test_generate_endpoint_enqueues_single_task(isolated) -> None:  # noqa: ANN001
+    """legacy 모드 — prompt 통째 입력. §1.B 도입 후 기존 호환성 유지 검증."""
     with TestClient(server.app) as client:
         r = client.post("/api/workflows/generate", json={
             "project": "proj",
@@ -151,6 +190,7 @@ def test_generate_endpoint_enqueues_single_task(isolated) -> None:  # noqa: ANN0
             "workflow_category": "sprite",
             "workflow_variant": "v",
             "prompt": "1girl, silver hair",
+            "prompt_mode": "legacy",
             "seed": 42,
         })
     assert r.status_code == 200, r.text
@@ -160,6 +200,9 @@ def test_generate_endpoint_enqueues_single_task(isolated) -> None:  # noqa: ANN0
     assert body["workflow_variant"] == "v"
     assert body["candidates_total"] == 1
     assert body["primary_output"] == "pixel_alpha"
+    # §1.B: 응답에 prompt_resolution 포함
+    assert body["prompt_resolution"]["mode"] == "legacy"
+    assert body["prompt_resolution"]["final_positive"] == "1girl, silver hair"
 
     # DB 검증 — task 1개 enqueue, backend=comfyui, workflow_* 채워짐
     rows = asyncio.run(_fetch_tasks(isolated, job_id))
@@ -169,6 +212,7 @@ def test_generate_endpoint_enqueues_single_task(isolated) -> None:  # noqa: ANN0
     assert t["workflow_category"] == "sprite"
     assert t["workflow_variant"] == "v"
     assert t["seed"] == 42
+    # legacy 모드 — DB prompt = request.prompt 그대로
     assert t["prompt"] == "1girl, silver hair"
     assert t["candidate_slot"] is None    # candidates_total=1 → slot 없음
     assert t["candidates_total"] == 1
@@ -186,6 +230,7 @@ def test_generate_endpoint_enqueues_n_candidates(isolated) -> None:  # noqa: ANN
             "workflow_category": "sprite",
             "workflow_variant": "v",
             "prompt": "x",
+            "prompt_mode": "legacy",
             "seed": 100,
             "candidates_total": 4,
         })
@@ -212,6 +257,7 @@ def test_generate_endpoint_passes_workflow_params_json(isolated) -> None:  # noq
             "workflow_category": "sprite",
             "workflow_variant": "v",
             "prompt": "x",
+            "prompt_mode": "legacy",
             "workflow_params": {
                 "pose_image": "custom_pose.png",
                 "controlnet_strength": 0.92,
@@ -264,6 +310,7 @@ def test_generate_endpoint_user_overrides_defaults(isolated) -> None:  # noqa: A
             "workflow_category": "sprite",
             "workflow_variant": "v",
             "prompt": "x",
+            "prompt_mode": "legacy",
             "steps": 22,
             "cfg": 8.0,
             "sampler": "euler_a",
@@ -369,6 +416,7 @@ def test_generate_default_approval_mode_is_manual(isolated) -> None:  # noqa: AN
             "workflow_category": "sprite",
             "workflow_variant": "v",
             "prompt": "p",
+            "prompt_mode": "legacy",
         })
     assert r.status_code == 200, r.text
     assert r.json()["approval_mode"] == "manual"
@@ -385,6 +433,7 @@ def test_generate_bypass_mode_persists_flag(isolated) -> None:  # noqa: ANN001
             "workflow_category": "sprite",
             "workflow_variant": "v",
             "prompt": "p",
+            "prompt_mode": "legacy",
             "approval_mode": "bypass",
         })
     assert r.status_code == 200, r.text
@@ -402,9 +451,165 @@ def test_generate_invalid_approval_mode_rejected(isolated) -> None:  # noqa: ANN
             "workflow_category": "sprite",
             "workflow_variant": "v",
             "prompt": "p",
+            "prompt_mode": "legacy",
             "approval_mode": "auto",
         })
     assert r.status_code == 422
+
+
+# ----------------------------------------------------------------------------
+# §1.B subject-injection — generate 응답 + DB + /api/jobs/{id}
+# ----------------------------------------------------------------------------
+
+
+def test_generate_subject_mode_returns_resolution(isolated) -> None:  # noqa: ANN001
+    """subject 모드 — 응답에 prompt_resolution 노출, DB prompt 가 final_positive."""
+    with TestClient(server.app) as client:
+        r = client.post("/api/workflows/generate", json={
+            "project": "p", "asset_key": "k",
+            "workflow_category": "sprite",
+            "workflow_variant": "v",
+            "prompt": "",     # legacy 통째 입력 안 함
+            "subject": "1girl, silver hair, blue dress, holding sword",
+        })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    pr = body["prompt_resolution"]
+    assert pr["mode"] == "subject"
+    assert pr["user_slot"] == "subject"
+    assert pr["user_input"] == "1girl, silver hair, blue dress, holding sword"
+    assert "pixel art, sprite sheet" in pr["final_positive"]
+    assert "1girl, silver hair" in pr["final_positive"]
+    assert pr["final_negative"] == "blurry, low quality"
+
+    # DB 의 prompt = final_positive (실제 ComfyUI 디스패치 값)
+    rows = asyncio.run(_fetch_tasks(isolated, body["job_id"]))
+    assert rows[0]["prompt"] == pr["final_positive"]
+    assert rows[0]["negative_prompt"] == pr["final_negative"]
+    # prompt_resolution_json 도 저장됨
+    saved = json.loads(rows[0]["prompt_resolution_json"])
+    assert saved["mode"] == "subject"
+
+
+def test_generate_subject_mode_too_short_returns_400(isolated) -> None:  # noqa: ANN001
+    """subject 모드 — min_chars=8 위반 시 HTTP 400 + code=subject_length_invalid."""
+    with TestClient(server.app) as client:
+        r = client.post("/api/workflows/generate", json={
+            "project": "p", "asset_key": "k",
+            "workflow_category": "sprite",
+            "workflow_variant": "v",
+            "subject": "short",   # < 8 chars
+        })
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert detail["code"] == "subject_length_invalid"
+
+
+def test_generate_subject_mode_empty_returns_400(isolated) -> None:  # noqa: ANN001
+    """subject 모드 — required=True 인데 빈 입력 → HTTP 400 + code=subject_required."""
+    with TestClient(server.app) as client:
+        r = client.post("/api/workflows/generate", json={
+            "project": "p", "asset_key": "k",
+            "workflow_category": "sprite",
+            "workflow_variant": "v",
+            "subject": "",
+            "prompt_mode": "subject",
+        })
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "subject_required"
+
+
+def test_generate_subject_mode_with_legacy_variant_returns_400(isolated) -> None:  # noqa: ANN001
+    """prompt_mode=subject 인데 변형에 prompt_template 없음 → HTTP 400."""
+    with TestClient(server.app) as client:
+        r = client.post("/api/workflows/generate", json={
+            "project": "p", "asset_key": "k",
+            "workflow_category": "sprite",
+            "workflow_variant": "legacy_var",   # template 없음
+            "prompt": "x",
+            "subject": "1girl, silver hair",
+            "prompt_mode": "subject",
+        })
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "prompt_template_missing_for_variant"
+
+
+def test_generate_subject_mode_negative_appended(isolated) -> None:  # noqa: ANN001
+    """subject 모드 — user negative 가 base_negative 뒤에 추가만 (override X)."""
+    with TestClient(server.app) as client:
+        r = client.post("/api/workflows/generate", json={
+            "project": "p", "asset_key": "k",
+            "workflow_category": "sprite",
+            "workflow_variant": "v",
+            "subject": "1girl, silver hair, blue dress",
+            "negative_prompt": "extra negative tokens",
+        })
+    assert r.status_code == 200
+    pr = r.json()["prompt_resolution"]
+    assert "blurry" in pr["final_negative"]      # base 유지
+    assert "extra negative tokens" in pr["final_negative"]    # user 추가
+
+
+def test_generate_subject_style_extra_appended(isolated) -> None:  # noqa: ANN001
+    with TestClient(server.app) as client:
+        r = client.post("/api/workflows/generate", json={
+            "project": "p", "asset_key": "k",
+            "workflow_category": "sprite",
+            "workflow_variant": "v",
+            "subject": "1girl, silver hair",
+            "style_extra": "cinematic lighting",
+        })
+    assert r.status_code == 200
+    pr = r.json()["prompt_resolution"]
+    assert pr["final_positive"].endswith("cinematic lighting")
+
+
+def test_generate_legacy_variant_falls_through(isolated) -> None:  # noqa: ANN001
+    """prompt_template 없는 변형 — 자동 legacy 모드 (mode='legacy')."""
+    with TestClient(server.app) as client:
+        r = client.post("/api/workflows/generate", json={
+            "project": "p", "asset_key": "k",
+            "workflow_category": "sprite",
+            "workflow_variant": "legacy_var",
+            "prompt": "user-written full prompt with all keywords",
+        })
+    assert r.status_code == 200
+    pr = r.json()["prompt_resolution"]
+    assert pr["mode"] == "legacy"
+    assert pr["final_positive"] == "user-written full prompt with all keywords"
+
+
+def test_get_job_returns_prompt_resolution(isolated) -> None:  # noqa: ANN001
+    """/api/jobs/{id} 응답에 prompt_resolution 노출 (DB 에서 재조회)."""
+    with TestClient(server.app) as client:
+        r = client.post("/api/workflows/generate", json={
+            "project": "p", "asset_key": "k",
+            "workflow_category": "sprite",
+            "workflow_variant": "v",
+            "subject": "1girl, silver hair, blue dress",
+        })
+        assert r.status_code == 200
+        job_id = r.json()["job_id"]
+        # GET /api/jobs/{id}
+        j = client.get(f"/api/jobs/{job_id}")
+    assert j.status_code == 200
+    body = j.json()
+    assert body["prompt_resolution"]["mode"] == "subject"
+    assert "pixel art" in body["prompt_resolution"]["final_positive"]
+
+
+def test_get_job_legacy_variant_prompt_resolution_legacy(isolated) -> None:  # noqa: ANN001
+    """legacy 변형 호출 시 /api/jobs/{id} 의 prompt_resolution.mode='legacy'."""
+    with TestClient(server.app) as client:
+        r = client.post("/api/workflows/generate", json={
+            "project": "p", "asset_key": "k",
+            "workflow_category": "sprite",
+            "workflow_variant": "legacy_var",
+            "prompt": "user prompt full",
+        })
+        job_id = r.json()["job_id"]
+        j = client.get(f"/api/jobs/{job_id}")
+    assert j.json()["prompt_resolution"]["mode"] == "legacy"
 
 
 def _insert_bypass_asset(db, project: str, asset_key: str) -> str:
