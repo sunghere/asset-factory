@@ -31,8 +31,11 @@ class _DummyBroker:
 
 
 def _build_mini_registry(tmp_path: Path) -> WorkflowRegistry:
-    """sprite/v (template 있음, subject 모드) + sprite/legacy_var (template 없음,
-    legacy only) + pixel_bg/sdxl (needs_conversion).
+    """sprite/v (template 있음, subject 모드, §1.C tags 포함) + sprite/legacy_var
+    (template 없음, legacy only, meta yaml 없음) + pixel_bg/sdxl (needs_conversion).
+
+    §1.B subject-injection + §1.C recommend/search 두 흐름 모두 검증 가능한 통합
+    fixture.
     """
     (tmp_path / "sprite").mkdir(parents=True)
     sample_workflow = json.dumps({
@@ -47,7 +50,7 @@ def _build_mini_registry(tmp_path: Path) -> WorkflowRegistry:
     })
     (tmp_path / "sprite" / "v.json").write_text(sample_workflow, encoding="utf-8")
     (tmp_path / "sprite" / "legacy_var.json").write_text(sample_workflow, encoding="utf-8")
-    # §1.A 사이드카 — sprite/v 에만 prompt_template 부여 (subject 모드 가능).
+    # §1.A 사이드카 — sprite/v 에 §1.B prompt_template + §1.C tags/use_cases 통합.
     (tmp_path / "sprite" / "v.meta.yaml").write_text(
         """
 schema_version: 1
@@ -57,7 +60,11 @@ output_layout:
   rows: 1
   cols: 3
   alpha: true
-tags: [pixel-art]
+tags: [pixel-art, character, sprite, rpg]
+use_cases:
+  - "RPG character with pose sheet"
+not_for:
+  - "scenery — use bg/*"
 prompt_template:
   base_positive: "pixel art, sprite sheet"
   base_negative: "blurry, low quality"
@@ -164,7 +171,8 @@ def test_catalog_endpoint_returns_registry_shape(isolated) -> None:  # noqa: ANN
     assert v["outputs"] == [{"label": "pixel_alpha", "primary": True}]
     # 메타 사이드카 v.meta.yaml 로드 — intent / tags / prompt_template 채워짐
     assert v["meta"]["intent"] == "test variant"
-    assert v["meta"]["tags"] == ["pixel-art"]
+    assert "pixel-art" in v["meta"]["tags"]
+    assert "character" in v["meta"]["tags"]
     assert v["meta"]["prompt_template"]["base_positive"] == "pixel art, sprite sheet"
     # legacy_var (사이드카 yaml 없음) 은 빈 meta — forward-compat
     legacy = cats["sprite"]["variants"]["legacy_var"]
@@ -174,6 +182,106 @@ def test_catalog_endpoint_returns_registry_shape(isolated) -> None:  # noqa: ANN
     assert cats["pixel_bg"]["primary_variant"] is None
     assert cats["pixel_bg"]["variants"]["sdxl"]["available"] is False
     assert cats["pixel_bg"]["variants"]["sdxl"]["status"] == "needs_api_conversion"
+
+
+# ----------------------------------------------------------------------------
+# §1.C /api/workflows/recommend (POST) + /search (GET)
+# ----------------------------------------------------------------------------
+
+
+def test_recommend_endpoint_returns_candidates(isolated) -> None:  # noqa: ANN001
+    """자연어 query → 후보 목록 + score + scoring_method='rule'."""
+    with TestClient(server.app) as client:
+        r = client.post("/api/workflows/recommend", json={
+            "query": "RPG character pixel sprite",
+            "top": 3,
+        })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["query"] == "RPG character pixel sprite"
+    assert body["scoring_method"] == "rule"
+    candidates = body["candidates"]
+    assert len(candidates) >= 1
+    top = candidates[0]
+    assert top["variant"] == "sprite/v"
+    assert top["score"] > 0.0
+    assert "intent" in top
+    assert "tags_hit" in top
+    # 'character' 가 tags 와 use_cases 양쪽 매칭
+    assert "character" in top["tags_hit"]
+
+
+def test_recommend_endpoint_empty_query_returns_empty(isolated) -> None:  # noqa: ANN001
+    with TestClient(server.app) as client:
+        r = client.post("/api/workflows/recommend", json={"query": "   ", "top": 5})
+    assert r.status_code == 200
+    assert r.json()["candidates"] == []
+
+
+def test_recommend_endpoint_top_truncates(isolated) -> None:  # noqa: ANN001
+    with TestClient(server.app) as client:
+        r = client.post("/api/workflows/recommend", json={
+            "query": "pixel character",
+            "top": 1,
+        })
+    assert r.status_code == 200
+    assert len(r.json()["candidates"]) == 1
+
+
+def test_recommend_endpoint_invalid_top_rejected(isolated) -> None:  # noqa: ANN001
+    """top=0 또는 top=100 같은 범위 위반 → 422."""
+    with TestClient(server.app) as client:
+        r = client.post("/api/workflows/recommend", json={"query": "x", "top": 100})
+    assert r.status_code == 422
+
+
+def test_search_endpoint_must_tag(isolated) -> None:  # noqa: ANN001
+    """``?tag=pixel-art`` → 매칭 변형 목록."""
+    with TestClient(server.app) as client:
+        r = client.get("/api/workflows/search?tag=pixel-art")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["filters"] == {"tag": ["pixel-art"], "not": []}
+    names = {m["variant"] for m in body["matches"]}
+    assert "sprite/v" in names
+
+
+def test_search_endpoint_multiple_must_tags_and(isolated) -> None:  # noqa: ANN001
+    """다중 ``?tag=`` → AND."""
+    with TestClient(server.app) as client:
+        r = client.get("/api/workflows/search?tag=pixel-art&tag=character")
+    assert r.status_code == 200
+    names = {m["variant"] for m in r.json()["matches"]}
+    assert names == {"sprite/v"}
+
+
+def test_search_endpoint_must_not_excludes(isolated) -> None:  # noqa: ANN001
+    """``?not=`` 가지면 제외."""
+    with TestClient(server.app) as client:
+        r = client.get("/api/workflows/search?tag=pixel-art&not=character")
+    assert r.status_code == 200
+    names = {m["variant"] for m in r.json()["matches"]}
+    # sprite/v 가 'character' 가져 제외됨
+    assert "sprite/v" not in names
+
+
+def test_search_endpoint_no_filter_returns_all(isolated) -> None:  # noqa: ANN001
+    """필터 미지정 → 모든 가용 변형 (sprite/v + sprite/legacy_var).
+
+    legacy_var 는 meta yaml 부재라 tags 는 빈 list — 그래도 available 이니 포함.
+    """
+    with TestClient(server.app) as client:
+        r = client.get("/api/workflows/search")
+    assert r.status_code == 200
+    names = {m["variant"] for m in r.json()["matches"]}
+    assert names == {"sprite/v", "sprite/legacy_var"}
+
+
+def test_search_endpoint_unknown_tag_returns_empty(isolated) -> None:  # noqa: ANN001
+    with TestClient(server.app) as client:
+        r = client.get("/api/workflows/search?tag=nonexistent-xyz")
+    assert r.status_code == 200
+    assert r.json()["matches"] == []
 
 
 # ----------------------------------------------------------------------------
