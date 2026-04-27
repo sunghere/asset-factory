@@ -1,0 +1,66 @@
+# pixel_bg/sdxl_hires — PixelDiffusionXL HiRes (1.5x upscale + refine).
+#
+# 워크플로우: C1_PixelDiffusionXL_V36_api_hires.json. ckpt: pixelArtDiffusionXL_spriteShaper.
+# stage1 + hires 두 출력 — 마케팅·홍보용 환경 자산.
+schema_version: 1
+
+intent: |
+  Pixel-art background / tile / environment with 1.5x upscale + refine
+  (PixelDiffusionXL base). Marketing-quality deliverable.
+
+use_cases:
+  - "Marketing key art for fantasy/retro game (high-res environment)"
+  - "Final tile / scene asset for in-game use (after stage1 design lock)"
+  - "Promo screenshot mockup with detailed pixel environment"
+
+not_for:
+  - "fast iteration / design exploration — use pixel_bg/sdxl_stage1"
+  - "Fnaf-style horror — use pixel_bg/pony_hires"
+  - "character — use sprite/pixel_alpha"
+
+output_layout:
+  kind: single
+  rows: 1
+  cols: 1
+  per_cell_size: [1536, 1536]
+  alpha: false
+  notes: |
+    Stage1 (1024×1024 raw) + HiRes (1536×1536 refined) 두 출력 동시. HiRes 가
+    primary, Stage1 은 비교/디버깅용.
+
+tags:
+  - pixel-art
+  - background
+  - environment
+  - tile
+  - sdxl-pixel
+  - hires
+  - marketing
+  - 픽셀-배경
+
+prompt_template:
+  base_positive: |
+    pixel art, retro game art, environment, scene,
+    sharp pixel edges, limited palette, 16-bit aesthetic, highly detailed,
+    masterpiece, best quality
+  base_negative: |
+    (worst quality, low quality:1.4), blurry, jpeg artifacts, deformed,
+    watermark, text, signature, photorealistic, 3d, realistic photo,
+    smooth shading, anti-aliasing, gradient,
+    1girl, 1boy, character, portrait, person, face,
+    close-up, headshot
+  user_slot:
+    label: subject
+    description: |
+      배경/환경 묘사만 (장소 / 분위기 / 시간대 / 디테일). 캐릭터 묘사 금지.
+      pixel_bg/sdxl_stage1 과 같은 user_slot — stage1 에서 검증한 prompt 그대로
+      hires 에서 재실행 가능.
+    examples:
+      - "fantasy forest, ancient ruins, sunset golden hour, highly detailed"
+      - "medieval town square, market stalls, torch light, evening mist"
+      - "underground cave, glowing crystals, mossy stones, atmospheric lighting"
+      - "desert oasis, palm trees, blue water, wide vista"
+    required: true
+    min_chars: 8
+    max_chars: 300
+  injection_rule: "{base_positive}, {subject}"
