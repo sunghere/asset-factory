@@ -16,7 +16,11 @@ import pytest
 
 from workflow_registry import (
     InputLabelSpec,
+    OutputLayoutSpec,
     OutputSpec,
+    PromptTemplateSpec,
+    UserSlotSpec,
+    VariantMetaSpec,
     VariantSpec,
     WorkflowRegistry,
     WorkflowRegistryError,
@@ -464,7 +468,8 @@ categories:
     )
     reg = WorkflowRegistry(root=tmp_path)
     cat = reg.to_catalog()
-    assert cat["version"] == 1
+    # spec §1.A.3: catalog 응답 schema bump 1 → 2
+    assert cat["version"] == 2
     sprite = cat["categories"]["sprite"]
     assert sprite["description"] == "스프라이트"
     assert sprite["primary_variant"] == "a"
@@ -679,6 +684,7 @@ categories:
             "required": False,
             "default": "default_pose.png",
             "description": "",
+            "alternatives": [],
         }
     ]
 
@@ -728,3 +734,356 @@ categories:
     with pytest.raises(Exception):
         v.name = "other"  # type: ignore[misc]
     assert isinstance(v, VariantSpec)
+
+
+# ----------------------------------------------------------------------------
+# 디스커버리 메타 — spec docs/NEXT.md §1.A 사이드카 yaml
+# ----------------------------------------------------------------------------
+
+
+def _write_meta_yaml(root: Path, category: str, variant: str, body: str) -> Path:
+    target = root / category / f"{variant}.meta.yaml"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(body, encoding="utf-8")
+    return target
+
+
+def test_meta_missing_returns_empty(tmp_path: Path) -> None:
+    """메타 사이드카 없는 변형 → 빈 VariantMetaSpec (forward-compat)."""
+    _write_workflow(tmp_path, "sprite/v.json")
+    _write_manifest(
+        tmp_path,
+        """
+version: 1
+categories:
+  sprite:
+    variants:
+      v:
+        file: sprite/v.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+""",
+    )
+    reg = WorkflowRegistry(root=tmp_path)
+    v = reg.variant("sprite", "v")
+    assert v.meta == VariantMetaSpec()
+    assert v.meta.intent == ""
+    assert v.meta.use_cases == ()
+    assert v.meta.output_layout == OutputLayoutSpec()
+    assert v.meta.prompt_template is None
+
+
+def test_meta_yaml_loaded(tmp_path: Path) -> None:
+    """spec §A.2 의 schema — 사이드카 yaml 로드 시 모든 필드 정확히 매핑."""
+    _write_workflow(tmp_path, "sprite/v.json")
+    _write_manifest(
+        tmp_path,
+        """
+version: 1
+categories:
+  sprite:
+    variants:
+      v:
+        file: sprite/v.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+""",
+    )
+    _write_meta_yaml(
+        tmp_path,
+        "sprite",
+        "v",
+        """
+schema_version: 1
+intent: |
+  3-pose character sheet.
+use_cases:
+  - "RPG character"
+not_for:
+  - "single portrait"
+output_layout:
+  kind: pose_grid
+  rows: 1
+  cols: 3
+  per_cell_size: [426, 640]
+  alpha: true
+  notes: "1×3 grid notes"
+tags:
+  - pixel-art
+  - pose-sheet
+prompt_template:
+  base_positive: "pixel art, sprite sheet"
+  base_negative: "blurry, low quality"
+  user_slot:
+    label: subject
+    description: "캐릭터 묘사만"
+    examples:
+      - "1girl, silver hair"
+    required: true
+    min_chars: 8
+    max_chars: 400
+  injection_rule: "{base_positive}, {subject}"
+""",
+    )
+    reg = WorkflowRegistry(root=tmp_path)
+    v = reg.variant("sprite", "v")
+    assert v.meta.intent.strip() == "3-pose character sheet."
+    assert v.meta.use_cases == ("RPG character",)
+    assert v.meta.not_for == ("single portrait",)
+    assert v.meta.output_layout == OutputLayoutSpec(
+        kind="pose_grid", rows=1, cols=3, per_cell_size=(426, 640), alpha=True,
+        notes="1×3 grid notes",
+    )
+    assert v.meta.tags == ("pixel-art", "pose-sheet")
+    assert v.meta.prompt_template == PromptTemplateSpec(
+        base_positive="pixel art, sprite sheet",
+        base_negative="blurry, low quality",
+        user_slot=UserSlotSpec(
+            label="subject", description="캐릭터 묘사만",
+            examples=("1girl, silver hair",),
+            required=True, min_chars=8, max_chars=400,
+        ),
+        injection_rule="{base_positive}, {subject}",
+    )
+
+
+def test_meta_schema_violation_raises(tmp_path: Path) -> None:
+    """``schema_version: 99`` 같은 미스매치는 즉시 raise (spec §A.4 Step 1.3)."""
+    _write_workflow(tmp_path, "sprite/v.json")
+    _write_manifest(
+        tmp_path,
+        """
+version: 1
+categories:
+  sprite:
+    variants:
+      v:
+        file: sprite/v.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+""",
+    )
+    _write_meta_yaml(
+        tmp_path, "sprite", "v",
+        "schema_version: 99\nintent: future schema\n",
+    )
+    with pytest.raises(WorkflowRegistryError, match="schema_version must be 1"):
+        WorkflowRegistry(root=tmp_path)
+
+
+def test_meta_invalid_output_layout_kind_raises(tmp_path: Path) -> None:
+    """output_layout.kind 가 spec enum 4종 외면 raise."""
+    _write_workflow(tmp_path, "sprite/v.json")
+    _write_manifest(
+        tmp_path,
+        """
+version: 1
+categories:
+  sprite:
+    variants:
+      v:
+        file: sprite/v.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+""",
+    )
+    _write_meta_yaml(
+        tmp_path, "sprite", "v",
+        """
+schema_version: 1
+output_layout: { kind: weird_layout }
+""",
+    )
+    with pytest.raises(WorkflowRegistryError, match="output_layout.kind"):
+        WorkflowRegistry(root=tmp_path)
+
+
+def test_meta_invalid_yaml_raises(tmp_path: Path) -> None:
+    _write_workflow(tmp_path, "sprite/v.json")
+    _write_manifest(
+        tmp_path,
+        """
+version: 1
+categories:
+  sprite:
+    variants:
+      v:
+        file: sprite/v.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+""",
+    )
+    _write_meta_yaml(tmp_path, "sprite", "v", "intent: [broken")
+    with pytest.raises(WorkflowRegistryError, match="meta yaml parse error"):
+        WorkflowRegistry(root=tmp_path)
+
+
+def test_meta_input_labels_alternatives_loaded(tmp_path: Path) -> None:
+    """사이드카 yaml 의 input_labels.<label>.description / alternatives 가 머지."""
+    payload = _workflow_with_load_images(("Pose grid", "default_pose.png"))
+    _write_workflow(tmp_path, "sprite/v.json", payload)
+    _write_manifest(
+        tmp_path,
+        """
+version: 1
+categories:
+  sprite:
+    variants:
+      v:
+        file: sprite/v.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+""",
+    )
+    _write_meta_yaml(
+        tmp_path, "sprite", "v",
+        """
+schema_version: 1
+input_labels:
+  pose_image:
+    description: "ControlNet 포즈 가이드 (1×3 그리드)"
+    alternatives:
+      - alt1.png
+      - alt2.png
+""",
+    )
+    reg = WorkflowRegistry(root=tmp_path)
+    il = reg.variant("sprite", "v").input_labels[0]
+    assert il.label == "pose_image"
+    assert il.description == "ControlNet 포즈 가이드 (1×3 그리드)"
+    assert il.alternatives == ("alt1.png", "alt2.png")
+    # default 는 워크플로우 JSON 추론값 그대로
+    assert il.default == "default_pose.png"
+
+
+def test_meta_input_labels_unknown_label_raises(tmp_path: Path) -> None:
+    payload = _workflow_with_load_images(("Pose grid", "default_pose.png"))
+    _write_workflow(tmp_path, "sprite/v.json", payload)
+    _write_manifest(
+        tmp_path,
+        """
+version: 1
+categories:
+  sprite:
+    variants:
+      v:
+        file: sprite/v.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+""",
+    )
+    _write_meta_yaml(
+        tmp_path, "sprite", "v",
+        """
+schema_version: 1
+input_labels:
+  unknown_label:
+    description: "should fail"
+""",
+    )
+    with pytest.raises(WorkflowRegistryError, match="unknown label"):
+        WorkflowRegistry(root=tmp_path)
+
+
+def test_catalog_v2_response_shape(tmp_path: Path) -> None:
+    """spec §A.3 — catalog 응답에 version: 2 + meta + input_labels.alternatives."""
+    payload = _workflow_with_load_images(("Pose grid", "default_pose.png"))
+    _write_workflow(tmp_path, "sprite/v.json", payload)
+    _write_manifest(
+        tmp_path,
+        """
+version: 1
+categories:
+  sprite:
+    variants:
+      v:
+        file: sprite/v.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+""",
+    )
+    _write_meta_yaml(
+        tmp_path, "sprite", "v",
+        """
+schema_version: 1
+intent: "test intent"
+use_cases: ["uc1"]
+output_layout:
+  kind: pose_grid
+  rows: 1
+  cols: 3
+  alpha: true
+tags: ["pixel-art"]
+prompt_template:
+  base_positive: "pixel art"
+  base_negative: "blurry"
+  user_slot:
+    label: subject
+    description: "subject only"
+input_labels:
+  pose_image:
+    description: "pose guide"
+    alternatives: [alt.png]
+""",
+    )
+    reg = WorkflowRegistry(root=tmp_path)
+    cat = reg.to_catalog()
+    assert cat["version"] == 2
+    v = cat["categories"]["sprite"]["variants"]["v"]
+    # meta 노출 확인
+    assert v["meta"]["intent"] == "test intent"
+    assert v["meta"]["use_cases"] == ["uc1"]
+    assert v["meta"]["output_layout"]["kind"] == "pose_grid"
+    assert v["meta"]["output_layout"]["rows"] == 1
+    assert v["meta"]["output_layout"]["cols"] == 3
+    assert v["meta"]["output_layout"]["alpha"] is True
+    assert v["meta"]["tags"] == ["pixel-art"]
+    assert v["meta"]["prompt_template"]["base_positive"] == "pixel art"
+    assert v["meta"]["prompt_template"]["user_slot"]["label"] == "subject"
+    # input_labels alternatives
+    assert v["input_labels"][0]["alternatives"] == ["alt.png"]
+
+
+def test_catalog_v2_legacy_variant_has_empty_meta(tmp_path: Path) -> None:
+    """메타 사이드카 없는 변형 — catalog 응답 `meta` 가 빈 객체 (intent='', tags=[]...)."""
+    _write_workflow(tmp_path, "sprite/v.json")
+    _write_manifest(
+        tmp_path,
+        """
+version: 1
+categories:
+  sprite:
+    variants:
+      v:
+        file: sprite/v.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+""",
+    )
+    reg = WorkflowRegistry(root=tmp_path)
+    cat = reg.to_catalog()
+    meta = cat["categories"]["sprite"]["variants"]["v"]["meta"]
+    assert meta["intent"] == ""
+    assert meta["use_cases"] == []
+    assert meta["not_for"] == []
+    assert meta["tags"] == []
+    assert meta["output_layout"] == {
+        "kind": "single", "rows": 1, "cols": 1,
+        "per_cell_size": None, "alpha": False, "notes": "",
+    }
+    assert meta["prompt_template"] is None
+
+
+def test_real_pixel_alpha_meta_loaded(tmp_path: Path) -> None:
+    """레포의 실 sprite/pixel_alpha.meta.yaml 이 정확히 로드되는지."""
+    repo_root = Path(__file__).resolve().parent.parent
+    registry_root = repo_root / "workflows"
+    if not (registry_root / "sprite" / "pixel_alpha.meta.yaml").exists():
+        pytest.skip("pixel_alpha.meta.yaml 미작성")
+    reg = WorkflowRegistry(root=registry_root)
+    v = reg.variant("sprite", "pixel_alpha")
+    assert v.meta.intent != ""
+    assert "pose_grid" == v.meta.output_layout.kind
+    assert v.meta.output_layout.cols == 3
+    assert v.meta.output_layout.alpha is True
+    assert "pixel-art" in v.meta.tags
+    assert v.meta.prompt_template is not None
+    assert "pixel art" in v.meta.prompt_template.base_positive
+    assert "floating sword" in v.meta.prompt_template.base_negative   # HANDOFF §5.4
+    assert v.meta.prompt_template.user_slot is not None
+    assert v.meta.prompt_template.user_slot.required is True
+    # pose_image alternatives 가 메타 yaml 에서 머지됨
+    by_label = {il.label: il for il in v.input_labels}
+    assert "pose_image" in by_label
+    assert by_label["pose_image"].alternatives != ()
