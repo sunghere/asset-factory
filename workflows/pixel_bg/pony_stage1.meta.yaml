@@ -1,0 +1,72 @@
+# pixel_bg/pony_stage1 — RDXL Pony Pixel + Fnaf LoRA (호러/오버월드 픽셀, stage1).
+#
+# 워크플로우: C2_RDXLPixelArt_V36_api_stage1.json. ckpt: rdxlPixelArt_pony2 +
+# Fnaf_into_the_Pit__Style LoRA. Pony 정통이라 score_9 prefix 필수.
+# trained_words: pixel art / game assets / overworld (sd_catalog).
+schema_version: 1
+
+intent: |
+  Fnaf-style / horror / dark pixel-art environment (RDXL Pony Pixel ckpt +
+  Fnaf LoRA). Pony 정통 score_9 prefix 자동 prepend.
+
+use_cases:
+  - "Horror game corridor / arcade / abandoned building (Fnaf vibe)"
+  - "Dark pixel overworld map (haunted forest, cursed ruins)"
+  - "Retro horror scene mockup (CRT scanlines, neon signs, fluorescent flicker)"
+
+not_for:
+  - "bright fantasy environment — use pixel_bg/sdxl_stage1"
+  - "character sprite — use sprite/pixel_alpha"
+  - "non-horror anime — use illustration/pony_*"
+  - "high-res deliverable — use pixel_bg/pony_hires"
+
+output_layout:
+  kind: single
+  rows: 1
+  cols: 1
+  per_cell_size: [1024, 1024]
+  alpha: false
+  notes: |
+    1024×1024 raw output. Stage1 만. 호러 톤 강제 (Fnaf LoRA + score_9 prefix).
+
+tags:
+  - pixel-art
+  - background
+  - horror
+  - fnaf-style
+  - dark
+  - pony-pixel
+  - overworld
+  - 호러-픽셀
+
+prompt_template:
+  # base_positive: Pony score_9 prefix + Fnaf LoRA trigger 3종 (pixel art /
+  # game assets / overworld — sd_catalog 의 trained_words 와 일치).
+  base_positive: |
+    score_9, score_8_up, score_7_up,
+    pixel art, game assets, overworld,
+    fnaf style, retro horror, dark atmosphere, dim lighting,
+    masterpiece, best quality
+  # base_negative: Pony 의 score_3~6 negative trigger + 캐릭터 차단.
+  base_negative: |
+    score_6, score_5, score_4, score_3,
+    (worst quality, low quality:1.4), blurry, jpeg artifacts, deformed,
+    watermark, text, signature, photorealistic, 3d, realistic photo,
+    smooth shading, anti-aliasing,
+    1girl, 1boy, character, animatronic, portrait, person, face,
+    bright sunlight, cheerful colors
+  user_slot:
+    label: subject
+    description: |
+      호러/다크 환경 묘사만 (장소 / 분위기 / 조명). 캐릭터 묘사 금지.
+      score_9 prefix 와 Fnaf LoRA trigger 는 base_positive 에 박혀있어 user 가
+      또 박을 필요 없음.
+    examples:
+      - "horror corridor, fluorescent lights flickering"
+      - "abandoned arcade, neon signs, debris"
+      - "haunted mansion interior, dust, old paintings"
+      - "cursed forest path, twisted trees, fog"
+    required: true
+    min_chars: 8
+    max_chars: 300
+  injection_rule: "{base_positive}, {subject}"

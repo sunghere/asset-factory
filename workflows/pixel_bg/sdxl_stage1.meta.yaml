@@ -1,0 +1,67 @@
+# pixel_bg/sdxl_stage1 — PixelDiffusionXL 베이스 픽셀 배경/타일 (stage1 only).
+#
+# 워크플로우: C1_PixelDiffusionXL_V36_api_stage1.json. ckpt: pixelArtDiffusionXL_spriteShaper.
+# pixel art 스타일 강제 SDXL — 환경/타일 자산 prototyping.
+schema_version: 1
+
+intent: |
+  Pixel-art background / tile / environment asset prototyping (PixelDiffusionXL
+  base, stage1 raw 1024×1024). Fast iteration before hires.
+
+use_cases:
+  - "RPG fantasy environment background (forest, ruins, town)"
+  - "Game tile prototyping (terrain, dungeon floor)"
+  - "Pixel-art scene mockup before final hires"
+
+not_for:
+  - "character sprite — use sprite/pixel_alpha"
+  - "Fnaf-style horror pixel — use pixel_bg/pony_stage1 (RDXL Pony pixel)"
+  - "high-resolution deliverable — use pixel_bg/sdxl_hires"
+  - "non-pixel anime illustration — use illustration/*"
+
+output_layout:
+  kind: single
+  rows: 1
+  cols: 1
+  per_cell_size: [1024, 1024]
+  alpha: false
+  notes: |
+    1024×1024 raw output. Stage1 만 — hires upscale 단계 없음. 빠른 반복용.
+
+tags:
+  - pixel-art
+  - background
+  - environment
+  - tile
+  - sdxl-pixel
+  - prototyping
+  - 픽셀-배경
+
+prompt_template:
+  base_positive: |
+    pixel art, retro game art, environment, scene,
+    sharp pixel edges, limited palette, 16-bit aesthetic,
+    masterpiece, best quality
+  # base_negative: pixel_bg 카테고리 — 캐릭터/portrait 차단해 환경 자산만 생성.
+  # SDXL pixel 모델 기본 negative 패턴.
+  base_negative: |
+    (worst quality, low quality:1.4), blurry, jpeg artifacts, deformed,
+    watermark, text, signature, photorealistic, 3d, realistic photo,
+    smooth shading, anti-aliasing, gradient,
+    1girl, 1boy, character, portrait, person, face,
+    close-up, headshot
+  user_slot:
+    label: subject
+    description: |
+      배경/환경의 묘사만 (장소 / 분위기 / 시간대 / 디테일). 캐릭터 묘사 금지 —
+      base_negative 가 차단. "pixel art" / "retro game" 단어도 base_positive 에
+      이미 박혀 있어 user 가 또 박을 필요 없음.
+    examples:
+      - "fantasy forest, ancient ruins, sunset golden hour"
+      - "medieval town square, market stalls, torch light"
+      - "underground cave, glowing crystals, mossy stones"
+      - "desert oasis, palm trees, blue water"
+    required: true
+    min_chars: 8
+    max_chars: 300
+  injection_rule: "{base_positive}, {subject}"
