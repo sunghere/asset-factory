@@ -771,6 +771,8 @@ categories:
 
 def test_meta_full_roundtrip(tmp_path: Path) -> None:
     _write_workflow(tmp_path, "sprite/v.json")
+    _write_workflow(tmp_path, "sprite/other.json")
+    _write_workflow(tmp_path, "sprite/upstream_one.json")
     _write_manifest(
         tmp_path,
         """
@@ -819,6 +821,12 @@ categories:
           sibling: [sprite/other]
           upstream: [sprite/upstream_one]
           downstream: []
+      other:
+        file: sprite/other.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+      upstream_one:
+        file: sprite/upstream_one.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
 """,
     )
     reg = WorkflowRegistry(root=tmp_path)
@@ -860,6 +868,7 @@ categories:
 def test_catalog_emits_full_meta(tmp_path: Path) -> None:
     """to_catalog 가 신규 메타 필드를 모두 직렬화."""
     _write_workflow(tmp_path, "sprite/v.json")
+    _write_workflow(tmp_path, "sprite/x.json")
     _write_manifest(
         tmp_path,
         """
@@ -885,6 +894,9 @@ categories:
         cost: { est_seconds: 10, vram_gb: 8 }
         pitfalls: ["pf"]
         related: { sibling: ["sprite/x"] }
+      x:
+        file: sprite/x.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
 """,
     )
     reg = WorkflowRegistry(root=tmp_path)
@@ -1086,6 +1098,80 @@ categories:
     )
     with pytest.raises(WorkflowRegistryError, match="unknown keys"):
         WorkflowRegistry(root=tmp_path)
+
+
+def test_related_dead_ref_rejected(tmp_path: Path) -> None:
+    """``related.sibling/upstream/downstream`` 가 존재하지 않는 변형 참조 시 startup 실패.
+
+    오타 (예: ``sprite/pixel_alpa``) 가 silent 통과해 런타임에 dead ref 로
+    깨지는 걸 방지.
+    """
+    _write_workflow(tmp_path, "sprite/v.json")
+    _write_manifest(
+        tmp_path,
+        """
+version: 1
+categories:
+  sprite:
+    variants:
+      v:
+        file: sprite/v.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+        related:
+          sibling: [sprite/does_not_exist]
+""",
+    )
+    with pytest.raises(WorkflowRegistryError, match="존재하지 않는 변형 참조"):
+        WorkflowRegistry(root=tmp_path)
+
+
+def test_related_dead_ref_in_upstream_rejected(tmp_path: Path) -> None:
+    """``related.upstream`` 의 dead ref 도 동일하게 startup 실패."""
+    _write_workflow(tmp_path, "sprite/v.json")
+    _write_manifest(
+        tmp_path,
+        """
+version: 1
+categories:
+  sprite:
+    variants:
+      v:
+        file: sprite/v.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+        related:
+          upstream: [illustration/typo_variant]
+""",
+    )
+    with pytest.raises(WorkflowRegistryError, match="related.upstream"):
+        WorkflowRegistry(root=tmp_path)
+
+
+def test_related_cross_category_ref_ok(tmp_path: Path) -> None:
+    """``related.sibling`` 가 다른 카테고리의 실제 변형을 참조하면 통과."""
+    _write_workflow(tmp_path, "sprite/v.json")
+    _write_workflow(tmp_path, "illustration/i.json")
+    _write_manifest(
+        tmp_path,
+        """
+version: 1
+categories:
+  sprite:
+    variants:
+      v:
+        file: sprite/v.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+        related:
+          sibling: [illustration/i]
+  illustration:
+    variants:
+      i:
+        file: illustration/i.json
+        outputs: [{ node_title: "Save", label: out, primary: true }]
+""",
+    )
+    reg = WorkflowRegistry(root=tmp_path)
+    assert reg.variant("sprite", "v").related is not None
+    assert reg.variant("sprite", "v").related.sibling == ("illustration/i",)
 
 
 def test_real_registry_all_variants_have_meta(tmp_path: Path) -> None:

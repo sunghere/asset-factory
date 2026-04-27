@@ -483,6 +483,39 @@ class WorkflowRegistry:
                 variants=variants,
             )
 
+        self._validate_related_refs()
+
+    def _validate_related_refs(self) -> None:
+        """매니페스트의 ``related.{sibling,upstream,downstream}`` 참조가 실제 변형
+        식별자인지 startup 시점에 검증.
+
+        오타 (예: ``sprite/pixel_alpa``) 가 silent 통과해 런타임에 dead ref 로
+        깨지는 걸 방지. 형식은 ``"<category>/<variant>"`` — registry 의 known
+        식별자 집합과 정확 일치해야 한다.
+        """
+        known = {
+            f"{cname}/{v.name}"
+            for cname, cat in self._categories.items()
+            for v in cat.variants.values()
+        }
+        for cname, cat in self._categories.items():
+            for v in cat.variants.values():
+                if v.related is None:
+                    continue
+                for axis, refs in (
+                    ("sibling", v.related.sibling),
+                    ("upstream", v.related.upstream),
+                    ("downstream", v.related.downstream),
+                ):
+                    for ref in refs:
+                        if ref not in known:
+                            raise WorkflowRegistryError(
+                                f"variant {cname}/{v.name} `related.{axis}` 가 "
+                                f"존재하지 않는 변형 참조: `{ref}` "
+                                f"(형식 `<category>/<variant>` — 가능: "
+                                f"{sorted(known)})"
+                            )
+
     def _parse_variant(self, category: str, name: str, data: dict[str, Any]) -> VariantSpec:
         if not isinstance(data, dict):
             raise WorkflowRegistryError(
