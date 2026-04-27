@@ -1,0 +1,73 @@
+# icon/flat — App/game UI 아이콘 (flat / vector 풍, alpha 추출).
+#
+# 워크플로우: D1_AppIcon_V36_api_default.json. animagineXL40Opt_clear ckpt +
+# WAS rembg 노드 (mode=foreground 로 흰배경을 alpha 처리 — HANDOFF §5.1).
+# 한 호출에 raw + alpha 두 출력.
+schema_version: 1
+
+intent: |
+  Flat/vector-style UI icon (single image, alpha BG, simple background) for
+  app/game inventory and UI buttons.
+
+use_cases:
+  - "RPG inventory icon (sword, shield, potion, key, scroll)"
+  - "App UI icon (settings gear, profile, calendar, bell)"
+  - "Game UI button (HP/MP/EXP, action shortcut)"
+
+not_for:
+  - "character sprite — use sprite/pixel_alpha or sprite/v36_pro_stage1"
+  - "complex anime illustration — use illustration/animagine_hires"
+  - "scene / background — use pixel_bg/*"
+  - "3D rendered icon — flat 스타일 강제 워크플로우라 사실적 광원 X"
+
+output_layout:
+  kind: single
+  rows: 1
+  cols: 1
+  per_cell_size: [1024, 1024]
+  alpha: true
+  notes: |
+    1024×1024 flat icon. Stage1 (raw 흰배경) + Alpha (WAS rembg, alpha
+    추출본) 두 출력 동시. 게임 엔진 인벤토리 슬롯에 alpha 그대로 사용.
+
+tags:
+  - icon
+  - flat
+  - vector
+  - alpha-bg
+  - ui
+  - inventory
+  - game-asset
+  - sdxl-anime
+  - 아이콘
+  - UI
+
+prompt_template:
+  # base_positive: flat icon 스타일 강제 + 단순 배경 강제 (alpha 추출 위해).
+  # animagineXL40Opt_clear ckpt 의 별도 trained_words 없음 — 일반 SDXL prompt 패턴.
+  base_positive: |
+    flat icon, vector style, clean lines, simple background, centered,
+    bold colors, game UI asset,
+    masterpiece, best quality, very aesthetic
+  # base_negative: registry.yml 의 NEG_ILLUSTRATION 동일 + flat 강제 negative.
+  # complex/scenery 는 alpha 추출 실패 원인 (HANDOFF §5.1).
+  base_negative: |
+    (worst quality, low quality:1.4), blurry, jpeg artifacts, deformed, bad anatomy,
+    watermark, text, signature, extra fingers, mutated hands,
+    complex background, scenery, landscape, photorealistic, 3d render,
+    realistic shading, gradient sky
+  user_slot:
+    label: subject
+    description: |
+      아이콘의 대상만 (오브젝트 / 색상 / 재질). 스타일·구도·배경 묘사 금지 —
+      base_positive 가 처리. "flat" / "vector" / "icon" 단어도 base 에 박혀
+      있어 user 가 또 박을 필요 없음.
+    examples:
+      - "shield icon, blue and silver"
+      - "sword icon, golden hilt, ruby gem"
+      - "potion bottle, red liquid, glass cork"
+      - "compass icon, brass, weathered"
+    required: true
+    min_chars: 5
+    max_chars: 200
+  injection_rule: "{base_positive}, {subject}"
