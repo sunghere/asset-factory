@@ -1,0 +1,76 @@
+# sprite/rembg_alpha — V38 Alpha AI rembg (반투명 디테일 보존).
+#
+# 워크플로우: Sprite_Illustrious_PoseGuided_Alpha_V38_api_rembg_alpha.json.
+# WAS_Remove_Background AI 기반 alpha — pixel_alpha 의 색상 alpha 와 다른 방식.
+schema_version: 1
+
+intent: |
+  1×3 character sheet with AI-rembg alpha (preserves semi-transparent details
+  like hair tips, cloth edges). Illustration/animation use vs pixel_alpha 의
+  game engine 픽셀 정렬.
+
+use_cases:
+  - "Animation frames with smooth alpha edges (머리카락 끝, 천 가장자리 보존)"
+  - "Illustration overlay on transparent canvas"
+  - "Marketing promo with soft alpha (vs game-ready hard pixel alpha)"
+
+not_for:
+  - "game engine sprite (픽셀 그리드 정렬 alpha) — use sprite/pixel_alpha"
+  - "white BG output — use sprite/hires"
+  - "fast iteration — use sprite/stage1"
+
+output_layout:
+  kind: pose_grid
+  rows: 1
+  cols: 3
+  per_cell_size: [426, 640]
+  alpha: true
+  notes: |
+    1280×640 PNG with AI rembg alpha. WAS_Remove_Background 의 mode=foreground
+    (HANDOFF §5.1 — 라벨 직관 반대). 픽셀 정렬 X, smooth alpha O.
+
+tags:
+  - pixel-art
+  - sprite-sheet
+  - 1x3-grid
+  - controlnet-pose
+  - alpha-rembg
+  - smooth-alpha
+  - illustration-use
+  - illustrious
+  - 게임-스프라이트
+
+prompt_template:
+  base_positive: |
+    pixel_character_sprite, sprite, sprite sheet, (pixel art:1.5), white background,
+    1x3 pose grid layout, same character three poses,
+    consistent character design, centered character,
+    no scenery, no background props,
+    masterpiece, best quality, very aesthetic
+  base_negative: |
+    (worst quality, low quality:1.4), blurry, jpeg artifacts, deformed, bad anatomy,
+    watermark, text, signature, photorealistic, 3d, realistic, photo,
+    smooth shading, anti-aliasing, smooth lines, blurred edges,
+    gradient background, complex background, scenery,
+    different sizes, varying scale, oversized character, height variation,
+    close-up, upper body, portrait, cropped character, headshot,
+    floating sword, detached weapon, levitating sword, separated weapon,
+    sword in air, weapon hovering, weapon next to character, disembodied weapon
+  user_slot:
+    label: subject
+    description: "pixel_alpha 와 같은 user_slot. chibi 가중치 강조 금지."
+    examples:
+      - "1girl, silver hair twin tails, navy school uniform, holding a notebook"
+      - "1boy, brown spiky hair, blue tunic, leather belt with sword"
+    required: true
+    min_chars: 8
+    max_chars: 400
+  injection_rule: "{base_positive}, {subject}"
+
+input_labels:
+  pose_image:
+    description: "ControlNet 포즈 가이드. pixel_alpha 와 같은 alternatives."
+    alternatives:
+      - pose_grid_1x3_5h_1280x640.png
+      - pose_grid_1x4_1280x640.png
+      - pose_grid_3x3_1280x896.png
