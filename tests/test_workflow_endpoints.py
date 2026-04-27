@@ -117,7 +117,8 @@ def test_catalog_endpoint_returns_registry_shape(isolated) -> None:  # noqa: ANN
         r = client.get("/api/workflows/catalog")
     assert r.status_code == 200, r.text
     data = r.json()
-    assert data["version"] == 1
+    # spec §1.A.3: version 1 → 2
+    assert data["version"] == 2
     cats = data["categories"]
     assert "sprite" in cats
     assert "pixel_bg" in cats
@@ -127,6 +128,10 @@ def test_catalog_endpoint_returns_registry_shape(isolated) -> None:  # noqa: ANN
     assert v["available"] is True
     assert v["status"] == "ready"
     assert v["outputs"] == [{"label": "pixel_alpha", "primary": True}]
+    # 메타 사이드카 없는 변형은 빈 meta 객체 (forward-compat)
+    assert v["meta"]["intent"] == ""
+    assert v["meta"]["tags"] == []
+    assert v["meta"]["prompt_template"] is None
     # needs_conversion 도 보임
     assert cats["pixel_bg"]["primary_variant"] is None
     assert cats["pixel_bg"]["variants"]["sdxl"]["available"] is False
