@@ -1,0 +1,52 @@
+# illustration/hyphoria_hires — Hyphoria HiRes.
+schema_version: 1
+
+intent: |
+  High-resolution Modern Illustrious anime (Hyphoria + 1.5x upscale + refine).
+
+use_cases:
+  - "Final Hyphoria illustration (after stage1 design lock)"
+  - "Marketing illustration with modern anime tone"
+  - "Promo image with soft-shaded Hyphoria style"
+
+not_for:
+  - "fast iteration — use illustration/hyphoria_stage1"
+  - "standard clean anime — use illustration/animagine_hires"
+  - "pixel art — use sprite/* (LoRA + ControlNet 적용된 pixel sprite)"
+
+output_layout:
+  kind: single
+  rows: 1
+  cols: 1
+  per_cell_size: [1536, 1536]
+  alpha: false
+  notes: "Stage1 (1024×1024) + HiRes (1536×1536). HiRes primary."
+
+tags:
+  - anime
+  - illustration
+  - illustrious
+  - hyphoria
+  - modern
+  - hires
+  - marketing
+  - 일러스트
+  - 고해상도
+
+prompt_template:
+  base_positive: |
+    masterpiece, best quality, very aesthetic, highres
+  base_negative: |
+    (worst quality, low quality:1.4), blurry, jpeg artifacts, deformed, bad anatomy,
+    watermark, text, signature, extra fingers, mutated hands
+  user_slot:
+    label: subject
+    description: "hyphoria_stage1 과 같은 user_slot."
+    examples:
+      - "1girl, modern outfit, soft shading, stylized, detailed"
+      - "fantasy landscape, mountains, dramatic clouds, cinematic"
+      - "1boy, urban setting, casual outfit, atmospheric lighting"
+    required: true
+    min_chars: 5
+    max_chars: 400
+  injection_rule: "{subject}, {base_positive}"

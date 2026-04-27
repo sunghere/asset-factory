@@ -1,0 +1,50 @@
+# illustration/anything_hires — AnythingXL HiRes.
+schema_version: 1
+
+intent: |
+  High-resolution general-purpose anime (AnythingXL + 1.5x upscale + refine).
+
+use_cases:
+  - "Final AnythingXL illustration (after stage1 design lock)"
+  - "Marketing illustration with versatile anime tone"
+
+not_for:
+  - "fast iteration — use illustration/anything_stage1"
+  - "Pony 정통 / Hyphoria 모던 톤은 별도 변형"
+
+output_layout:
+  kind: single
+  rows: 1
+  cols: 1
+  per_cell_size: [1536, 1536]
+  alpha: false
+  notes: "Stage1 (1024×1024) + HiRes (1536×1536). HiRes primary."
+
+tags:
+  - anime
+  - illustration
+  - sdxl-anime
+  - anythingxl
+  - versatile
+  - hires
+  - marketing
+  - 일러스트
+  - 고해상도
+
+prompt_template:
+  base_positive: |
+    masterpiece, best quality, highres
+  base_negative: |
+    (worst quality, low quality:1.4), blurry, jpeg artifacts, deformed, bad anatomy,
+    watermark, text, signature, extra fingers, mutated hands
+  user_slot:
+    label: subject
+    description: "anything_stage1 과 같은 user_slot."
+    examples:
+      - "1girl, casual outfit, smile, anime style, daily scene, detailed"
+      - "1boy, school uniform, walking, soft lighting, atmospheric"
+      - "fantasy character, detailed, vibrant"
+    required: true
+    min_chars: 5
+    max_chars: 400
+  injection_rule: "{subject}, {base_positive}"

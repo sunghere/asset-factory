@@ -1,0 +1,57 @@
+# illustration/animagine_hires — Animagine XL HiRes (1.5x upscale + refine).
+#
+# 워크플로우: B1_AnimagineXL_HiRes_V36_api_hires.json. ckpt: animagineXL40Opt_clear.
+# stage1 + 1.5x upscale 두 출력 — 마케팅/표지용 고해상도.
+schema_version: 1
+
+intent: |
+  High-resolution clean anime illustration (Animagine XL + 1.5x upscale +
+  refine). Marketing-quality deliverable.
+
+use_cases:
+  - "Marketing key art / cover illustration (high-res)"
+  - "Final character illustration after stage1 design lock"
+  - "Promo image with detailed anime character/scene"
+
+not_for:
+  - "fast iteration — use illustration/animagine_stage1"
+  - "Pony 정통 스타일 — use illustration/pony_hires"
+  - "pixel art — use sprite/* or pixel_bg/*"
+
+output_layout:
+  kind: single
+  rows: 1
+  cols: 1
+  per_cell_size: [1536, 1536]
+  alpha: false
+  notes: "Stage1 (1024×1024) + HiRes (1536×1536) 두 출력. HiRes primary."
+
+tags:
+  - anime
+  - illustration
+  - sdxl-anime
+  - animagine
+  - hires
+  - marketing
+  - 일러스트
+  - 고해상도
+
+prompt_template:
+  base_positive: |
+    masterpiece, best quality, very aesthetic, absurdres, highres
+  base_negative: |
+    (worst quality, low quality:1.4), blurry, jpeg artifacts, deformed, bad anatomy,
+    watermark, text, signature, extra fingers, mutated hands
+  user_slot:
+    label: subject
+    description: |
+      anime 캐릭터/장면 묘사. animagine_stage1 과 같은 user_slot —
+      stage1 에서 검증한 prompt 그대로 hires 에서 재실행 가능.
+    examples:
+      - "1girl, silver hair, blue dress, sitting on flower field, soft lighting, detailed"
+      - "1boy, black coat, holding sword, fantasy knight, cinematic, dramatic"
+      - "fantasy castle, sunset, dramatic lighting, anime style, vibrant colors"
+    required: true
+    min_chars: 5
+    max_chars: 400
+  injection_rule: "{subject}, {base_positive}"

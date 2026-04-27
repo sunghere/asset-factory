@@ -1,0 +1,54 @@
+# illustration/pony_hires — Prefect Pony XL HiRes.
+schema_version: 1
+
+intent: |
+  Pony-style anime illustration with 1.5x upscale + refine. High-quality
+  deliverable with strong character expression.
+
+use_cases:
+  - "Final Pony illustration deliverable (after stage1 design lock)"
+  - "Marketing key art with action / expressive Pony characters"
+  - "Promo image emphasizing character diversity"
+
+not_for:
+  - "fast iteration — use illustration/pony_stage1"
+  - "standard clean anime — use illustration/animagine_hires"
+  - "pixel art — use pixel_bg/pony_hires"
+
+output_layout:
+  kind: single
+  rows: 1
+  cols: 1
+  per_cell_size: [1536, 1536]
+  alpha: false
+  notes: "Stage1 (1024×1024) + HiRes (1536×1536). HiRes primary."
+
+tags:
+  - anime
+  - illustration
+  - pony
+  - hires
+  - marketing
+  - 일러스트
+  - score_9
+  - 고해상도
+
+prompt_template:
+  base_positive: |
+    score_9, score_8_up, score_7_up, score_6_up,
+    masterpiece, best quality, highres, absurdres
+  base_negative: |
+    score_5, score_4, score_3, score_2, score_1,
+    (worst quality, low quality:1.4), blurry, jpeg artifacts, deformed, bad anatomy,
+    watermark, text, signature, extra fingers, mutated hands
+  user_slot:
+    label: subject
+    description: "pony_stage1 과 같은 user_slot. stage1 에서 검증한 prompt 그대로 사용."
+    examples:
+      - "1girl, blue hair, school uniform, smiling, anime style, detailed"
+      - "1boy, dragon companion, fantasy warrior, action pose, cinematic"
+      - "1girl, magical girl, twirling pose, sparkles, dynamic"
+    required: true
+    min_chars: 5
+    max_chars: 400
+  injection_rule: "{base_positive}, {subject}"

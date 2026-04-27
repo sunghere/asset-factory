@@ -1,0 +1,58 @@
+# illustration/hyphoria_stage1 — Hyphoria (Modern Illustrious anime, stage1).
+#
+# 워크플로우: B4_Hyphoria_HiRes_V36_api_stage1.json. ckpt: hyphoria_v002 (Illustrious).
+# sprite/* 와 같은 ckpt 지만 LoRA 없이 일러스트용 — 모던/소프트 톤.
+schema_version: 1
+
+intent: |
+  Modern Illustrious anime illustration (Hyphoria base, soft shading) for
+  stylized character art. Different tone vs Animagine / Anything.
+
+use_cases:
+  - "Modern anime style with soft shading"
+  - "Character illustration with stylized atmosphere (vs flat Animagine)"
+  - "Quick Hyphoria iteration before hires"
+
+not_for:
+  - "high-resolution deliverable — use illustration/hyphoria_hires"
+  - "standard clean anime — use illustration/animagine_stage1"
+  - "Pony 정통 — use illustration/pony_stage1"
+  - "pixel art sprite (sprite/* 가 같은 ckpt 쓰지만 LoRA + ControlNet 적용)"
+
+output_layout:
+  kind: single
+  rows: 1
+  cols: 1
+  per_cell_size: [1024, 1024]
+  alpha: false
+  notes: "1024×1024 raw stage1."
+
+tags:
+  - anime
+  - illustration
+  - illustrious
+  - hyphoria
+  - modern
+  - 1024x1024
+  - stage1
+  - 일러스트
+
+prompt_template:
+  base_positive: |
+    masterpiece, best quality, very aesthetic
+  base_negative: |
+    (worst quality, low quality:1.4), blurry, jpeg artifacts, deformed, bad anatomy,
+    watermark, text, signature, extra fingers, mutated hands
+  user_slot:
+    label: subject
+    description: |
+      anime 캐릭터/장면 묘사. Hyphoria 는 별도 트리거 없어 일반 anime prompt
+      그대로. soft shading / modern illustration 톤이 자연스럽게 나옴.
+    examples:
+      - "1girl, modern outfit, soft shading, stylized"
+      - "fantasy landscape, mountains, dramatic clouds"
+      - "1boy, urban setting, casual outfit, cinematic atmosphere"
+    required: true
+    min_chars: 5
+    max_chars: 400
+  injection_rule: "{subject}, {base_positive}"
