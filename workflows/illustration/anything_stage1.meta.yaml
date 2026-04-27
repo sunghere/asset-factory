@@ -1,0 +1,57 @@
+# illustration/anything_stage1 — AnythingXL 범용 anime (stage1).
+#
+# 워크플로우: B5_AnythingXL_HiRes_V36_api_stage1.json. ckpt: AnythingXL_xl.
+# 범용 anime — Animagine 보다 부드러운 톤.
+schema_version: 1
+
+intent: |
+  General-purpose anime illustration (AnythingXL base) with softer tone vs
+  Animagine. Versatile fallback when other models don't fit.
+
+use_cases:
+  - "General anime illustration (versatile, soft tone)"
+  - "Fallback when Animagine / Pony / Hyphoria don't match style"
+  - "Quick AnythingXL iteration before hires"
+
+not_for:
+  - "high-resolution deliverable — use illustration/anything_hires"
+  - "Pony 정통 / Hyphoria 모던 톤은 별도 변형"
+  - "pixel art — use sprite/* or pixel_bg/*"
+
+output_layout:
+  kind: single
+  rows: 1
+  cols: 1
+  per_cell_size: [1024, 1024]
+  alpha: false
+  notes: "1024×1024 raw stage1."
+
+tags:
+  - anime
+  - illustration
+  - sdxl-anime
+  - anythingxl
+  - versatile
+  - 1024x1024
+  - stage1
+  - 일러스트
+
+prompt_template:
+  base_positive: |
+    masterpiece, best quality
+  base_negative: |
+    (worst quality, low quality:1.4), blurry, jpeg artifacts, deformed, bad anatomy,
+    watermark, text, signature, extra fingers, mutated hands
+  user_slot:
+    label: subject
+    description: |
+      anime 캐릭터/장면 묘사. AnythingXL 은 트리거 없어 일반 anime prompt 그대로.
+      Animagine 보다 soft 한 톤 — 캐주얼/일상 장면에 적합.
+    examples:
+      - "1girl, casual outfit, smile, anime style, daily scene"
+      - "1boy, school uniform, walking, soft lighting"
+      - "fantasy character, detailed, atmospheric"
+    required: true
+    min_chars: 5
+    max_chars: 400
+  injection_rule: "{subject}, {base_positive}"

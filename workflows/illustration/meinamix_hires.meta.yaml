@@ -1,0 +1,50 @@
+# illustration/meinamix_hires — MeinaMix SD1.5 HiRes.
+schema_version: 1
+
+intent: |
+  SD1.5 anime illustration with 1.5x upscale (MeinaMix base). Faster than
+  SDXL hires variants but lower max resolution.
+
+use_cases:
+  - "Low-VRAM environment with hires need"
+  - "Final SD1.5 anime deliverable (after stage1 design lock)"
+
+not_for:
+  - "1024×1024 이상 — SDXL hires 변형 (animagine/pony/hyphoria/anything)"
+  - "fast iteration — use illustration/meinamix_stage1"
+
+output_layout:
+  kind: single
+  rows: 1
+  cols: 1
+  per_cell_size: [768, 1152]
+  alpha: false
+  notes: "Stage1 (512×768) + HiRes (768×1152). SDXL 보다 작음."
+
+tags:
+  - anime
+  - illustration
+  - sd1.5
+  - meinamix
+  - low-vram
+  - fast
+  - hires
+  - 일러스트
+
+prompt_template:
+  base_positive: |
+    masterpiece, best quality
+  base_negative: |
+    (worst quality, low quality:1.4), blurry, jpeg artifacts, deformed, bad anatomy,
+    watermark, text, signature, extra fingers, mutated hands
+  user_slot:
+    label: subject
+    description: "meinamix_stage1 과 같은 user_slot."
+    examples:
+      - "1girl, anime style, portrait, soft lighting, detailed"
+      - "1boy, fantasy outfit, detailed eyes, atmospheric"
+      - "anime landscape, vibrant colors, cinematic"
+    required: true
+    min_chars: 5
+    max_chars: 300
+  injection_rule: "{subject}, {base_positive}"

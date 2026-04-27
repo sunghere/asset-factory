@@ -1,0 +1,57 @@
+# illustration/animagine_stage1 — Animagine XL anime (1024×1024, stage1 only).
+#
+# 워크플로우: B1_AnimagineXL_HiRes_V36_api_stage1.json. ckpt: animagineXL40Opt_clear.
+# 깔끔한 anime 표준 — 빠른 prompt iteration 용.
+schema_version: 1
+
+intent: |
+  Clean anime illustration (Animagine XL base, 1024×1024 raw). Standard anime
+  style for fast prompt iteration before hires.
+
+use_cases:
+  - "Anime character portrait / single character illustration"
+  - "Quick design iteration for marketing illustration"
+  - "Standard anime style (vs Pony / Hyphoria 의 표현 차이)"
+
+not_for:
+  - "high-resolution deliverable — use illustration/animagine_hires"
+  - "Pony 정통 스타일 (score_9 트리거 필요) — use illustration/pony_stage1"
+  - "Modern Illustrious / 다른 톤 — use illustration/hyphoria_stage1"
+  - "pixel art — use sprite/* or pixel_bg/*"
+
+output_layout:
+  kind: single
+  rows: 1
+  cols: 1
+  per_cell_size: [1024, 1024]
+  alpha: false
+  notes: "1024×1024 raw stage1. hires upscale 단계 없음."
+
+tags:
+  - anime
+  - illustration
+  - sdxl-anime
+  - animagine
+  - 1024x1024
+  - stage1
+  - 일러스트
+
+prompt_template:
+  base_positive: |
+    masterpiece, best quality, very aesthetic, absurdres
+  base_negative: |
+    (worst quality, low quality:1.4), blurry, jpeg artifacts, deformed, bad anatomy,
+    watermark, text, signature, extra fingers, mutated hands
+  user_slot:
+    label: subject
+    description: |
+      anime 캐릭터/장면 묘사 — 외형, 복장, 포즈, 분위기, 라이팅 자유. animagine
+      은 트리거 단어 없어 일반 anime prompt 패턴 그대로 사용.
+    examples:
+      - "1girl, silver hair, blue dress, sitting on flower field, soft lighting"
+      - "1boy, black coat, holding sword, fantasy knight, cinematic"
+      - "fantasy castle, sunset, dramatic lighting, anime style"
+    required: true
+    min_chars: 5
+    max_chars: 400
+  injection_rule: "{subject}, {base_positive}"
