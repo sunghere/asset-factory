@@ -1,0 +1,66 @@
+# pixel_bg/pony_hires — RDXL Pony Pixel + Fnaf LoRA HiRes (호러 픽셀, hires).
+#
+# 워크플로우: C2_RDXLPixelArt_V36_api_hires.json. stage1 + 1.5x upscale + refine.
+schema_version: 1
+
+intent: |
+  Fnaf-style / horror pixel environment with 1.5x upscale + refine (RDXL
+  Pony Pixel + Fnaf LoRA). Marketing-quality horror deliverable.
+
+use_cases:
+  - "Final horror game scene asset (after stage1 design lock)"
+  - "Marketing key art for horror/retro game (high-res)"
+  - "Promo screenshot of cursed/abandoned environment"
+
+not_for:
+  - "fast iteration — use pixel_bg/pony_stage1"
+  - "bright fantasy — use pixel_bg/sdxl_hires"
+  - "character — use sprite/pixel_alpha"
+
+output_layout:
+  kind: single
+  rows: 1
+  cols: 1
+  per_cell_size: [1536, 1536]
+  alpha: false
+  notes: |
+    Stage1 (1024×1024) + HiRes (1536×1536) 두 출력. HiRes primary.
+
+tags:
+  - pixel-art
+  - background
+  - horror
+  - fnaf-style
+  - dark
+  - pony-pixel
+  - overworld
+  - hires
+  - 호러-픽셀
+
+prompt_template:
+  base_positive: |
+    score_9, score_8_up, score_7_up,
+    pixel art, game assets, overworld,
+    fnaf style, retro horror, dark atmosphere, dim lighting, highly detailed,
+    masterpiece, best quality
+  base_negative: |
+    score_6, score_5, score_4, score_3,
+    (worst quality, low quality:1.4), blurry, jpeg artifacts, deformed,
+    watermark, text, signature, photorealistic, 3d, realistic photo,
+    smooth shading, anti-aliasing,
+    1girl, 1boy, character, animatronic, portrait, person, face,
+    bright sunlight, cheerful colors
+  user_slot:
+    label: subject
+    description: |
+      호러/다크 환경 묘사만. pixel_bg/pony_stage1 과 같은 user_slot — stage1
+      에서 검증한 prompt 그대로 hires 에서 재실행.
+    examples:
+      - "horror corridor, fluorescent lights flickering, atmospheric"
+      - "abandoned arcade, neon signs, debris, smoke"
+      - "haunted mansion interior, dust, old paintings, moonlight"
+      - "cursed forest path, twisted trees, fog, eerie silence"
+    required: true
+    min_chars: 8
+    max_chars: 300
+  injection_rule: "{base_positive}, {subject}"
