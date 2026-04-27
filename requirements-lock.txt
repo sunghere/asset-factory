@@ -15,7 +15,7 @@ idna==3.13
 multidict==6.7.1
 pillow==12.2.0
 propcache==0.4.1
-pydantic==2.13.2
+pydantic==2.13.3
 pydantic_core==2.46.3
 python-dotenv==1.2.2
 python-multipart==0.0.26
