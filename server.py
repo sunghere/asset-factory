@@ -42,6 +42,8 @@ from sd_backend import (
     ComfyUIBackend,
     GenerationOutcome,
 )
+from recommendations import recommend as recommend_variants
+from recommendations import search as search_variants
 from validator import validate_asset
 from workflow_registry import WorkflowRegistry, WorkflowRegistryError
 
@@ -1283,6 +1285,83 @@ async def workflows_catalog() -> dict[str, Any]:
     항상 200 (레지스트리는 로컬 파일이므로).
     """
     return workflow_registry.to_catalog()
+
+
+# ── §1.C 변형 의도 기반 인덱스 / 자연어 검색 ─────────────────────────────────
+# /recommend 는 자연어 query → 룰 점수 ranking, /search 는 tag 정확 매칭 필터.
+# 두 endpoint 모두 catalog 의 메타 (intent / use_cases / tags / not_for) 를 인덱싱.
+
+
+class WorkflowRecommendRequest(BaseModel):
+    """spec §1.C.3 — 자연어 query 기반 변형 추천."""
+
+    query: str = Field(..., examples=["RPG 캐릭터 정면/측면/뒷면 픽셀 스프라이트"])
+    top: int = Field(default=3, ge=1, le=50)
+    include_unavailable: bool = Field(
+        default=False,
+        description="status=needs_api_conversion 변형도 후보에 포함할지.",
+    )
+
+
+@app.post("/api/workflows/recommend")
+async def workflows_recommend(request: WorkflowRecommendRequest) -> dict[str, Any]:
+    """자연어 query → top-N 변형 후보 (룰 기반 weighted score).
+
+    스코어링 (spec §C.4):
+    - intent 매칭 +0.4
+    - use_cases 매칭마다 +0.15 (max +0.45)
+    - tags 매칭마다 +0.1 (max +0.3)
+    - not_for 매칭마다 -0.5 (페널티)
+    - 0.0–1.0 클램프
+
+    응답의 `not_for_warnings` 가 비어있지 않으면 클라이언트가 사용자에게 경고
+    표시 권장 (점수 높아도 오선택 가능성).
+
+    Phase 2 (변형 30+) 임베딩 매칭은 별도 PR — 이 응답의 ``scoring_method``
+    필드로 식별 (현재 ``"rule"``).
+    """
+    candidates = recommend_variants(
+        workflow_registry,
+        query=request.query,
+        top=request.top,
+        include_unavailable=request.include_unavailable,
+    )
+    return {
+        "query": request.query,
+        "candidates": [c.to_dict() for c in candidates],
+        "scoring_method": "rule",
+    }
+
+
+@app.get("/api/workflows/search")
+async def workflows_search(
+    tag: list[str] = Query(default_factory=list, description="포함해야 할 태그 (반복 가능, AND)"),  # noqa: B008
+    not_: list[str] = Query(  # noqa: B008
+        default_factory=list,
+        alias="not",
+        description="제외할 태그 (반복 가능, AND-NOT)",
+    ),
+    include_unavailable: bool = Query(default=False),
+) -> dict[str, Any]:
+    """tag 정확 매칭 필터.
+
+    예: ``/api/workflows/search?tag=pose-sheet&tag=transparent-bg&not=scenery``
+    → ``pose-sheet`` AND ``transparent-bg`` 둘 다 포함하고 ``scenery`` 미포함
+    하는 변형 매칭.
+
+    `recommend` 가 자연어 + 점수 매칭이라면, `search` 는 사용자가 정확한 tag
+    이름을 알고 있을 때의 빠른 색인 — 점수 없음.
+    """
+    matches = search_variants(
+        workflow_registry,
+        must_tags=tag,
+        must_not_tags=not_,
+        include_unavailable=include_unavailable,
+    )
+    return {
+        "filters": {"tag": list(tag), "not": list(not_)},
+        "matches": [m.to_dict() for m in matches],
+    }
 
 
 # ── ComfyUI 동적 입력 업로드 ──────────────────────────────────────────────
