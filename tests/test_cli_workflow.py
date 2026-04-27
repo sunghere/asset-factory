@@ -113,6 +113,130 @@ def test_catalog_command_emits_json(runner: CliRunner, base_url: str) -> None:
 
 
 # ----------------------------------------------------------------------------
+# §1.C recommend / search
+# ----------------------------------------------------------------------------
+
+
+def test_recommend_command_posts_query(runner: CliRunner, base_url: str) -> None:
+    """``af workflow recommend "<query>" --top 3`` → POST 호출."""
+    with respx.mock(base_url=base_url) as mock:
+        route = mock.post("/api/workflows/recommend").mock(
+            return_value=httpx.Response(200, json={
+                "query": "pixel character",
+                "scoring_method": "rule",
+                "candidates": [{
+                    "variant": "sprite/pixel_alpha",
+                    "score": 0.85,
+                    "intent": "Pixel-art character sprite",
+                    "use_cases_hit": ["RPG character"],
+                    "tags_hit": ["pixel-art", "character"],
+                    "not_for_warnings": [],
+                }],
+            })
+        )
+        result = runner.invoke(
+            app, ["workflow", "recommend", "pixel character", "--top", "3"],
+        )
+    assert result.exit_code == 0, _err_text(result)
+    body = json.loads(route.calls.last.request.content)
+    assert body == {
+        "query": "pixel character",
+        "top": 3,
+        "include_unavailable": False,
+    }
+    # 사람-친화 출력에 변형명 + score 포함
+    assert "sprite/pixel_alpha" in result.stdout
+    assert "0.85" in result.stdout
+
+
+def test_recommend_command_json_flag_emits_raw(runner: CliRunner, base_url: str) -> None:
+    """``--json`` 플래그 — 서버 응답 그대로 stdout."""
+    payload = {
+        "query": "x",
+        "scoring_method": "rule",
+        "candidates": [
+            {"variant": "sprite/v", "score": 0.5, "intent": "i",
+             "use_cases_hit": [], "tags_hit": [], "not_for_warnings": []}
+        ],
+    }
+    with respx.mock(base_url=base_url) as mock:
+        mock.post("/api/workflows/recommend").mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+        result = runner.invoke(
+            app, ["workflow", "recommend", "x", "--json"],
+        )
+    assert result.exit_code == 0
+    out = json.loads(result.stdout)
+    assert out == payload
+
+
+def test_recommend_command_shows_not_for_warnings(runner: CliRunner, base_url: str) -> None:
+    """not_for_warnings 가 있으면 ⚠ 마크 + 항목 출력."""
+    with respx.mock(base_url=base_url) as mock:
+        mock.post("/api/workflows/recommend").mock(
+            return_value=httpx.Response(200, json={
+                "query": "scenery",
+                "scoring_method": "rule",
+                "candidates": [{
+                    "variant": "sprite/pixel_alpha",
+                    "score": 0.4,
+                    "intent": "char",
+                    "use_cases_hit": [],
+                    "tags_hit": [],
+                    "not_for_warnings": ["scenery — use bg/*"],
+                }],
+            })
+        )
+        result = runner.invoke(app, ["workflow", "recommend", "scenery"])
+    assert result.exit_code == 0
+    assert "not_for warnings" in result.stdout
+    assert "scenery" in result.stdout
+
+
+def test_search_command_passes_tag_query(runner: CliRunner, base_url: str) -> None:
+    with respx.mock(base_url=base_url) as mock:
+        route = mock.get("/api/workflows/search").mock(
+            return_value=httpx.Response(200, json={
+                "filters": {"tag": ["pose-sheet", "pixel-art"], "not": ["scenery"]},
+                "matches": [{
+                    "variant": "sprite/pixel_alpha",
+                    "intent": "Pixel-art character",
+                    "tags_hit": ["pose-sheet", "pixel-art"],
+                }],
+            })
+        )
+        result = runner.invoke(
+            app,
+            ["workflow", "search",
+             "--tag", "pose-sheet", "--tag", "pixel-art", "--not", "scenery"],
+        )
+    assert result.exit_code == 0, _err_text(result)
+    sent = route.calls.last.request
+    # query string 검증
+    qs = str(sent.url)
+    assert "tag=pose-sheet" in qs
+    assert "tag=pixel-art" in qs
+    assert "not=scenery" in qs
+    # 출력에 변형명 표시
+    assert "sprite/pixel_alpha" in result.stdout
+
+
+def test_search_command_no_filter_passes_empty_arrays(runner: CliRunner, base_url: str) -> None:
+    """필터 미지정 — 빈 query 가 전송됨 (서버가 모든 변형 반환)."""
+    with respx.mock(base_url=base_url) as mock:
+        mock.get("/api/workflows/search").mock(
+            return_value=httpx.Response(200, json={
+                "filters": {"tag": [], "not": []},
+                "matches": [],
+            })
+        )
+        result = runner.invoke(app, ["workflow", "search"])
+    assert result.exit_code == 0
+    assert "(매칭된 변형 없음)" in result.stdout
+
+
+# ----------------------------------------------------------------------------
 # upload
 # ----------------------------------------------------------------------------
 

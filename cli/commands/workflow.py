@@ -57,6 +57,102 @@ def cmd_describe(target: str = typer.Argument(..., help="<category>/<variant>"))
 
 
 # ----------------------------------------------------------------------------
+# §1.C recommend / search
+# ----------------------------------------------------------------------------
+
+
+@workflow_app.command("recommend")
+def cmd_recommend(
+    query: str = typer.Argument(..., help='자연어 의도 (예: "RPG 캐릭터 픽셀 스프라이트")'),
+    top: int = typer.Option(3, "--top", "-n", min=1, max=50),
+    include_unavailable: bool = typer.Option(
+        False, "--include-unavailable",
+        help="status=needs_api_conversion 변형도 후보에 포함.",
+    ),
+    json_out: bool = typer.Option(
+        False, "--json", help="raw JSON 출력 (스크립트/파이프라인용).",
+    ),
+) -> None:
+    """자연어 query → 점수 매긴 변형 후보 top-N (spec §1.C).
+
+    SKILL.md 의 변형 선택 4-step 1단계 — 의도 한 줄로 후보 받기.
+    """
+    body = request(
+        "POST", "/api/workflows/recommend",
+        json={
+            "query": query,
+            "top": top,
+            "include_unavailable": include_unavailable,
+        },
+    )
+    if json_out:
+        typer.echo(json.dumps(body, ensure_ascii=False, indent=2))
+        return
+
+    # 사람 친화 출력 — table 형식.
+    candidates = body.get("candidates", [])
+    if not candidates:
+        typer.echo("(매칭된 변형 없음)")
+        return
+    typer.echo(f"# scoring_method: {body.get('scoring_method', 'rule')}")
+    typer.echo(f"# query: {body.get('query', '')}")
+    typer.echo("")
+    for i, c in enumerate(candidates, start=1):
+        intent = c.get("intent", "").split("\n")[0][:80]
+        typer.echo(f"{i:>2}. {c['variant']:<40} score={c['score']:.2f}")
+        typer.echo(f"    intent: {intent}")
+        if c.get("tags_hit"):
+            typer.echo(f"    tags_hit: {', '.join(c['tags_hit'])}")
+        if c.get("not_for_warnings"):
+            typer.echo("    ⚠ not_for warnings:")
+            for w in c["not_for_warnings"]:
+                typer.echo(f"      - {w}")
+
+
+@workflow_app.command("search")
+def cmd_search(
+    tag: list[str] = typer.Option(  # noqa: B008
+        None, "--tag",
+        metavar="TAG",
+        help="포함해야 할 태그 (반복 사용 = AND).",
+        show_default=False,
+    ),
+    not_: list[str] = typer.Option(  # noqa: B008
+        None, "--not",
+        metavar="TAG",
+        help="제외할 태그 (반복 사용 = AND-NOT).",
+        show_default=False,
+    ),
+    include_unavailable: bool = typer.Option(False, "--include-unavailable"),
+    json_out: bool = typer.Option(False, "--json"),
+) -> None:
+    """tag 정확 매칭 필터 — 사용자가 정확한 tag 이름을 알 때 빠른 색인.
+
+    예: ``af workflow search --tag pose-sheet --tag transparent-bg --not scenery``
+    """
+    params: dict[str, Any] = {
+        "tag": tag or [],
+        "not": not_ or [],
+        "include_unavailable": include_unavailable,
+    }
+    body = request("GET", "/api/workflows/search", params=params)
+    if json_out:
+        typer.echo(json.dumps(body, ensure_ascii=False, indent=2))
+        return
+    matches = body.get("matches", [])
+    if not matches:
+        typer.echo("(매칭된 변형 없음)")
+        return
+    for m in matches:
+        intent = m.get("intent", "").split("\n")[0][:80]
+        tags = ", ".join(m.get("tags_hit", []))
+        typer.echo(f"  {m['variant']:<40}")
+        typer.echo(f"    intent: {intent}")
+        if tags:
+            typer.echo(f"    tags: {tags}")
+
+
+# ----------------------------------------------------------------------------
 # upload
 # ----------------------------------------------------------------------------
 
