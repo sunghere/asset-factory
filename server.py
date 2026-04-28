@@ -43,7 +43,6 @@ from sd_backend import (
     GenerationOutcome,
 )
 from prompt_resolution import (
-    PromptResolution,
     PromptResolutionError,
     resolve_prompt,
 )
