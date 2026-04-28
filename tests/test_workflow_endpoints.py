@@ -1187,3 +1187,248 @@ def test_export_excludes_bypass_and_reports_count(isolated, tmp_path) -> None:  
     finally:
         if monkey_target is not None:
             _server._ensure_path_allowed = monkey_target  # type: ignore[assignment]
+
+
+# ── /api/comfyui/catalog ───────────────────────────────────────────────────
+# PLAN §3.1.2 — ComfyUI /object_info + WorkflowRegistry cross-ref → 통합 카탈로그.
+
+
+def test_comfyui_catalog_endpoint_returns_payload(isolated, monkeypatch) -> None:  # noqa: ANN001
+    """ComfyUI 정상 시 200 + checkpoints/workflows 등 schema 충족."""
+
+    import json as _json
+    from pathlib import Path as _Path
+
+    fixture = _json.loads(
+        (_Path(__file__).parent / "fixtures" / "comfyui_object_info.json").read_text(encoding="utf-8")
+    )
+
+    async def fake_object_info() -> dict:
+        return fixture
+
+    monkeypatch.setattr(server.comfyui_client, "object_info", fake_object_info, raising=False)
+    # 캐시 영향 제거 — endpoint 가 캐시를 들고 있으면 클리어
+    if hasattr(server, "_comfyui_catalog_cache_clear"):
+        server._comfyui_catalog_cache_clear()
+
+    with TestClient(server.app) as client:
+        r = client.get("/api/comfyui/catalog")
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["stale"] is False
+    assert body["fetched_at"]
+    # PLAN §3.1.2 schema
+    assert isinstance(body["checkpoints"], list)
+    assert any(c["name"] == "AnythingXL_xl.safetensors" for c in body["checkpoints"])
+    assert isinstance(body["loras"], list)
+    assert isinstance(body["vaes"], list)
+    assert isinstance(body["controlnets"], list)
+    assert isinstance(body["upscalers"], list)
+    assert isinstance(body["workflows"], list)
+    assert len(body["workflows"]) >= 1
+    # checkpoint row schema
+    sample = next(c for c in body["checkpoints"] if c["name"] == "AnythingXL_xl.safetensors")
+    assert set(sample.keys()) >= {"name", "family", "used_by_workflows"}
+    assert sample["family"] == "sdxl"
+
+
+def test_comfyui_catalog_endpoint_timeout_returns_stale_or_error(isolated, monkeypatch) -> None:  # noqa: ANN001
+    """ComfyUI hang → fail-fast (timeout cap), 200 + (stale 또는 ok=false).
+
+    캐시가 없는 첫 호출이면 `{"ok": false, "error": "timeout..."}` 반환.
+    """
+    import asyncio as _asyncio
+    import time as _time
+
+    async def hang() -> dict:
+        await _asyncio.sleep(60)
+        return {}
+
+    monkeypatch.setattr(server.comfyui_client, "object_info", hang, raising=False)
+    monkeypatch.setattr(server, "_COMFYUI_CATALOG_TIMEOUT_SECONDS", 0.1, raising=False)
+    if hasattr(server, "_comfyui_catalog_cache_clear"):
+        server._comfyui_catalog_cache_clear()
+
+    start = _time.monotonic()
+    with TestClient(server.app) as client:
+        r = client.get("/api/comfyui/catalog")
+    elapsed = _time.monotonic() - start
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body.get("ok") is False
+    assert "timeout" in body["error"].lower()
+    assert elapsed < 5.0, f"endpoint should fail fast, took {elapsed:.2f}s"
+
+
+def test_comfyui_catalog_endpoint_uses_cache_on_second_call(isolated, monkeypatch) -> None:  # noqa: ANN001
+    """60s 캐시 — 두 번째 호출은 백엔드 안 친다."""
+
+    import json as _json
+    from pathlib import Path as _Path
+
+    fixture = _json.loads(
+        (_Path(__file__).parent / "fixtures" / "comfyui_object_info.json").read_text(encoding="utf-8")
+    )
+
+    call_count = {"n": 0}
+
+    async def fake_object_info() -> dict:
+        call_count["n"] += 1
+        return fixture
+
+    monkeypatch.setattr(server.comfyui_client, "object_info", fake_object_info, raising=False)
+    if hasattr(server, "_comfyui_catalog_cache_clear"):
+        server._comfyui_catalog_cache_clear()
+
+    with TestClient(server.app) as client:
+        r1 = client.get("/api/comfyui/catalog")
+        r2 = client.get("/api/comfyui/catalog")
+
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+    # 캐시 적중 → 두 번째 호출에서 백엔드 추가 호출 없어야 함
+    assert call_count["n"] == 1, f"expected cache hit, got {call_count['n']} backend calls"
+
+
+# ── /api/comfyui/queue ─────────────────────────────────────────────────────
+# PLAN §3.1.3 — System 화면 부가 정보. 5초 timeout.
+
+
+def test_comfyui_queue_normal_returns_running_pending_counts(isolated, monkeypatch) -> None:  # noqa: ANN001
+    """ComfyUI 정상 시 200 + ok=true + running 리스트 + pending 카운트."""
+
+    async def fake_queue() -> dict:
+        return {
+            "queue_running": [
+                [0, "abc-123", {}, {}, []],
+                [1, "def-456", {}, {}, []],
+            ],
+            "queue_pending": [
+                [2, "ghi-789", {}, {}, []],
+            ],
+        }
+
+    monkeypatch.setattr(server.comfyui_client, "queue_state", fake_queue)
+
+    with TestClient(server.app) as client:
+        r = client.get("/api/comfyui/queue")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["pending"] == 1
+    assert isinstance(body["running"], list)
+    assert len(body["running"]) == 2
+    # running 원소는 prompt_id 를 포함하는 dict 로 정규화
+    assert all("prompt_id" in entry for entry in body["running"])
+    assert {entry["prompt_id"] for entry in body["running"]} == {"abc-123", "def-456"}
+    assert body["fetched_at"]
+
+
+def test_comfyui_queue_timeout_returns_200_with_ok_false(isolated, monkeypatch) -> None:  # noqa: ANN001
+    """ComfyUI hang → 5초(여기선 0.1s cap) 안에 200 + ok=false + error."""
+    import asyncio as _asyncio
+    import time as _time
+
+    async def hang() -> dict:
+        await _asyncio.sleep(60)
+        return {}
+
+    monkeypatch.setattr(server.comfyui_client, "queue_state", hang)
+    monkeypatch.setattr(server, "_COMFYUI_QUEUE_TIMEOUT_SECONDS", 0.1, raising=False)
+
+    start = _time.monotonic()
+    with TestClient(server.app) as client:
+        r = client.get("/api/comfyui/queue")
+    elapsed = _time.monotonic() - start
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert "timeout" in body["error"].lower()
+    assert elapsed < 5.0
+
+
+def test_comfyui_queue_exception_returns_200_with_ok_false(isolated, monkeypatch) -> None:  # noqa: ANN001
+    """RuntimeError 등 예외 → 200 + ok=false + error 메시지."""
+
+    async def boom() -> dict:
+        raise RuntimeError("comfyui 502")
+
+    monkeypatch.setattr(server.comfyui_client, "queue_state", boom)
+
+    with TestClient(server.app) as client:
+        r = client.get("/api/comfyui/queue")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert "comfyui 502" in body["error"]
+
+
+# ── /api/health/sd primary / deprecated_backends 필드 ──────────────────────
+# Task 4 — 호환성 유지 (backends 구조 그대로) + 두 필드 추가.
+
+
+def test_health_sd_includes_primary_and_deprecated_backends(isolated, monkeypatch) -> None:  # noqa: ANN001
+    """응답 dict 에 primary='comfyui', deprecated_backends=['a1111'] 두 필드 포함.
+
+    기존 backends 구조 (a1111/comfyui dict) 는 그대로 유지 (legacy client 호환).
+    """
+
+    async def ok_health() -> dict:
+        return {"ok": True}
+
+    monkeypatch.setattr(server.sd_client, "health_check", ok_health)
+    monkeypatch.setattr(server.comfyui_client, "health_check", ok_health)
+
+    with TestClient(server.app) as client:
+        r = client.get("/api/health/sd")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["primary"] == "comfyui"
+    assert body["deprecated_backends"] == ["a1111"]
+    # 기존 구조 유지 (호환성)
+    assert "backends" in body
+    assert "a1111" in body["backends"]
+    assert "comfyui" in body["backends"]
+
+
+# ── A1111 catalog deprecation (Task 8) ─────────────────────────────────────
+
+
+def test_sd_catalog_models_response_includes_deprecation_marker(isolated, monkeypatch) -> None:  # noqa: ANN001
+    """/api/sd/catalog/models 응답 본문에 deprecated=true + 헤더에 Deprecation/Sunset."""
+
+    async def fake_list_models() -> list[dict]:
+        return [{"name": "AnythingXL_xl.safetensors"}]
+
+    monkeypatch.setattr(server.sd_client, "list_models", fake_list_models)
+
+    with TestClient(server.app) as client:
+        r = client.get("/api/sd/catalog/models")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["deprecated"] is True
+    # 헤더
+    assert r.headers.get("Deprecation") == "true"
+    sunset = r.headers.get("Sunset")
+    assert sunset, "Sunset 헤더가 비어있음"
+    # RFC 8594 권고: HTTP-date. 단순 ISO 도 허용 (실용 우선).
+
+
+def test_sd_catalog_loras_response_includes_deprecation_marker(isolated, monkeypatch) -> None:  # noqa: ANN001
+    """/api/sd/catalog/loras 도 동일."""
+
+    async def fake_list_loras() -> list[dict]:
+        return []
+
+    monkeypatch.setattr(server.sd_client, "list_loras", fake_list_loras)
+
+    with TestClient(server.app) as client:
+        r = client.get("/api/sd/catalog/loras")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["deprecated"] is True
+    assert r.headers.get("Deprecation") == "true"
+    assert r.headers.get("Sunset")

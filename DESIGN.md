@@ -148,6 +148,17 @@ asset-factory/
 - `POST /api/export` — 승인된 에셋만 프로젝트 디렉토리에 복사
 - `GET  /api/export/manifest` — asset-manifest.json 생성
 
+### SD 백엔드 (ComfyUI primary, A1111 deprecated)
+
+**ComfyUI** (`192.168.50.225:8188`) 가 1차 데이터 소스. PLAN_comfyui_catalog.md
+참조. A1111 (`192.168.50.225:7860`) 은 deprecated — 다음 메이저(v0.4.0)에서 제거.
+
+- `GET  /api/comfyui/health`  — system_stats + queue 합본 (5s timeout, 항상 200)
+- `GET  /api/comfyui/catalog` — checkpoints/loras/vaes/controlnets/upscalers + workflows 합본 (60s in-memory cache)
+- `GET  /api/comfyui/queue`   — running list + pending count (5s timeout)
+- `GET  /api/health/sd`       — 두 백엔드 합본 + `primary="comfyui"`, `deprecated_backends=["a1111"]`
+- `GET  /api/sd/catalog/{models,loras}` — **deprecated** (Deprecation/Sunset 헤더 + body `deprecated:true`). `/api/comfyui/catalog` 사용.
+
 ## 디렉토리 자동 인식 로직 (scanner.py)
 
 아무 디렉토리를 던져도 에셋으로 인식:

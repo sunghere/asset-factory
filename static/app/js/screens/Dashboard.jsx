@@ -1,6 +1,6 @@
 /* Dashboard — project-grouped today board.
    Sources: /api/cherry-pick/queue (per-batch pending), /api/jobs/recent,
-   /api/assets/summary, /api/health, /api/health/sd. */
+   /api/assets/summary, /api/health, /api/comfyui/health (PLAN Task 7). */
 
 const { useMemo } = React;
 
@@ -15,12 +15,12 @@ function Dashboard() {
   const queue = window.useAsync(() => window.api.cherryPickQueue({ limit: 200 }), []);
   const summary = window.useAsync(() => window.api.assetSummary(), []);
   const recentJobs = window.useAsync(() => window.api.recentJobs(8), []);
-  const healthSd = window.useAsync(
-    () => window.api.healthSd().catch((err) => ({ ok: false, error: String(err?.body?.detail || err?.message || err) })),
+  const comfyuiHealth = window.useAsync(
+    () => window.api.comfyuiHealth().catch((err) => ({ ok: false, error: String(err?.body?.detail || err?.message || err) })),
     [],
   );
-  // SD health 는 SSE 로 안 날아오니 천천히 폴링한다 (UI 의 "언제 확인?" 에 답).
-  window.useInterval?.(() => { healthSd.reload(); }, 20000);
+  // ComfyUI health 는 SSE 로 안 날아오니 천천히 폴링한다 (UI 의 "언제 확인?" 에 답).
+  window.useInterval?.(() => { comfyuiHealth.reload(); }, 20000);
 
   // SSE — 실시간 큐/써머리 업데이트. 폴링 제거.
   window.useSSE((batch) => {
@@ -141,7 +141,7 @@ function Dashboard() {
       </div>
 
       <div style={{ marginTop: 20, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-        <SdHealthCard data={healthSd.data} loading={healthSd.loading} reload={healthSd.reload} onOpenSystem={() => window.navigate('/system')}/>
+        <SdHealthCard data={comfyuiHealth.data} loading={comfyuiHealth.loading} reload={comfyuiHealth.reload} onOpenSystem={() => window.navigate('/system')}/>
         <CategoryBarChart data={summary.data} loading={summary.loading}/>
       </div>
 
@@ -293,7 +293,9 @@ function SdHealthCard({ data, loading, reload, onOpenSystem }) {
   return (
     <div className="panel-card row-link" style={{ padding: 16 }} onClick={onOpenSystem}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-        <h3 style={{ margin: 0 }}>SD · A1111</h3>
+        <h3 style={{ margin: 0 }}>
+          SD · ComfyUI <span className="pill pill-ok" style={{ fontSize: 9, marginLeft: 6 }}>primary</span>
+        </h3>
         <button
           className="btn"
           onClick={(e) => {
@@ -306,16 +308,19 @@ function SdHealthCard({ data, loading, reload, onOpenSystem }) {
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <span style={{ width: 10, height: 10, borderRadius: '50%', background: color }}/>
         <span style={{ fontFamily: 'var(--font-mono)', fontSize: 20, fontWeight: 600, color }}>{label}</span>
-        {ok && typeof data.model_count === 'number' && (
+        {ok && typeof data.workflows_available === 'number' && (
           <span style={{ color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>
-            · {data.model_count} models
+            · {data.workflows_available} workflows
           </span>
         )}
       </div>
       <div style={{ marginTop: 8, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)', wordBreak: 'break-all' }}>
         {ok
-          ? (Array.isArray(data.models) && data.models.length > 0 ? data.models.slice(0, 3).join(', ') + (data.models.length > 3 ? ' …' : '') : 'A1111 /sdapi/v1/sd-models')
-          : (err || 'A1111 서버 응답 대기 중')}
+          ? (
+            `v${data.comfyui_version || '?'} · queue ${data.queue?.running ?? 0}/${data.queue?.pending ?? 0}` +
+            (Array.isArray(data.device_names) && data.device_names.length > 0 ? ` · ${data.device_names[0]}` : '')
+          )
+          : (err || 'ComfyUI 응답 대기 중')}
       </div>
     </div>
   );
@@ -373,7 +378,7 @@ function CurlCheatsheet() {
     {
       id: 'health',
       label: 'health / SD 체크',
-      cmd: `curl -s ${base}/api/health && echo && curl -s ${base}/api/health/sd`,
+        cmd: `curl -s ${base}/api/health && echo && curl -s ${base}/api/comfyui/health`,
     },
     {
       id: 'summary',

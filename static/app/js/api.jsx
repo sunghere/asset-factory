@@ -57,11 +57,18 @@ const api = {
 
   // System / health
   health: () => request('GET', '/api/health'),
+  /** @deprecated Use comfyuiHealth() — A1111 backend is being phased out. */
   healthSd: () => request('GET', '/api/health/sd'),
+  // ComfyUI primary backend (PLAN_comfyui_catalog.md §3.1)
+  comfyuiHealth: () => request('GET', '/api/comfyui/health'),
+  comfyuiCatalog: () => request('GET', '/api/comfyui/catalog'),
+  comfyuiQueue: () => request('GET', '/api/comfyui/queue'),
   gcStatus: () => request('GET', '/api/system/gc/status'),
 
-  // Catalog
+  // Catalog (legacy A1111 — deprecated, kept for backwards compat)
+  /** @deprecated Use comfyuiCatalog().checkpoints — A1111 endpoint will be removed. */
   models: () => request('GET', '/api/sd/catalog/models'),
+  /** @deprecated Use comfyuiCatalog().loras — A1111 endpoint will be removed. */
   loras: () => request('GET', '/api/sd/catalog/loras'),
   catalogUsage: () => request('GET', '/api/sd/catalog/usage'),
   catalogUsageBatches: ({ model, lora, limit = 20 } = {}) => {
