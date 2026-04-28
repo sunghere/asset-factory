@@ -1230,6 +1230,13 @@ async def comfyui_health() -> dict[str, Any]:
         payload["error"] = f"{exc.__class__.__name__}: {exc}"
         return payload
 
+    if not isinstance(stats, dict):
+        payload["error"] = f"unexpected /system_stats response type: {type(stats).__name__}"
+        return payload
+    if not isinstance(queue, dict):
+        payload["error"] = f"unexpected /queue response type: {type(queue).__name__}"
+        return payload
+
     payload["ok"] = True
     payload["comfyui_version"] = stats.get("comfyui_version")
     payload["python_version"] = stats.get("python_version")
@@ -1349,7 +1356,7 @@ async def comfyui_catalog_endpoint() -> dict[str, Any]:
             stale=False,
         )
         _comfyui_catalog_cache["payload"] = payload
-        _comfyui_catalog_cache["fetched_at"] = now
+        _comfyui_catalog_cache["fetched_at"] = _time.time()
         return payload
 
 
@@ -1529,11 +1536,18 @@ def _a1111_deprecation_sunset_date() -> str:
     return format_datetime(datetime.now(timezone.utc) + timedelta(days=90))
 
 
-def _mark_a1111_deprecated(response: Response, endpoint_path: str) -> None:
-    """응답 헤더 (Deprecation/Sunset/Link) 추가 + 모듈 레벨 1회 로그."""
-    response.headers["Deprecation"] = "true"
-    response.headers["Sunset"] = _a1111_deprecation_sunset_date()
-    response.headers["Link"] = '</api/comfyui/catalog>; rel="successor-version"'
+def _mark_a1111_deprecated(response: Response, endpoint_path: str) -> dict[str, str]:
+    """응답 헤더 (Deprecation/Sunset/Link) 추가 + 모듈 레벨 1회 로그.
+
+    헤더 dict 를 반환 — HTTPException 에도 동일 헤더를 실어 503 등 오류 응답에서도
+    deprecation 메타데이터가 클라이언트에 전달되도록 한다.
+    """
+    headers = {
+        "Deprecation": "true",
+        "Sunset": _a1111_deprecation_sunset_date(),
+        "Link": '</api/comfyui/catalog>; rel="successor-version"',
+    }
+    response.headers.update(headers)
     if not _a1111_deprecation_warned["flag"]:
         _a1111_deprecation_logger.warning(
             "A1111 catalog endpoint accessed — deprecated, will be removed in next major. "
@@ -1541,6 +1555,7 @@ def _mark_a1111_deprecated(response: Response, endpoint_path: str) -> None:
             endpoint_path,
         )
         _a1111_deprecation_warned["flag"] = True
+    return headers
 
 
 @app.get("/api/sd/catalog/models")
@@ -1555,7 +1570,7 @@ async def sd_catalog_models(response: Response) -> dict[str, Any]:
     ``SD_CATALOG_TIMEOUT_SECONDS`` (기본 5초) 안에 응답하지 않으면 timeout 으로
     503 — sd_client 자체 retries(45s×3=141s) 를 기다리지 않아 화면이 빠르게 실패.
     """
-    _mark_a1111_deprecated(response, "/api/sd/catalog/models")
+    dep_headers = _mark_a1111_deprecated(response, "/api/sd/catalog/models")
     try:
         async with asyncio.timeout(_SD_CATALOG_TIMEOUT_SECONDS):
             sd_models = await sd_client.list_models()
@@ -1563,9 +1578,14 @@ async def sd_catalog_models(response: Response) -> dict[str, Any]:
         raise HTTPException(
             status_code=503,
             detail=f"SD 모델 목록 조회 timeout ({_SD_CATALOG_TIMEOUT_SECONDS}s)",
+            headers=dep_headers,
         ) from exc
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=503, detail=f"SD 모델 목록 조회 실패: {exc}") from exc
+        raise HTTPException(
+            status_code=503,
+            detail=f"SD 모델 목록 조회 실패: {exc}",
+            headers=dep_headers,
+        ) from exc
     catalog = load_catalog_yaml(CATALOG_YAML_PATH)
     merged = merge_models(sd_models, catalog)
     return {
@@ -1586,7 +1606,7 @@ async def sd_catalog_loras(response: Response) -> dict[str, Any]:
 
     SD 서버 미연결/timeout 시 503 (``SD_CATALOG_TIMEOUT_SECONDS`` 기준).
     """
-    _mark_a1111_deprecated(response, "/api/sd/catalog/loras")
+    dep_headers = _mark_a1111_deprecated(response, "/api/sd/catalog/loras")
     try:
         async with asyncio.timeout(_SD_CATALOG_TIMEOUT_SECONDS):
             sd_loras = await sd_client.list_loras()
@@ -1594,9 +1614,14 @@ async def sd_catalog_loras(response: Response) -> dict[str, Any]:
         raise HTTPException(
             status_code=503,
             detail=f"SD LoRA 목록 조회 timeout ({_SD_CATALOG_TIMEOUT_SECONDS}s)",
+            headers=dep_headers,
         ) from exc
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=503, detail=f"SD LoRA 목록 조회 실패: {exc}") from exc
+        raise HTTPException(
+            status_code=503,
+            detail=f"SD LoRA 목록 조회 실패: {exc}",
+            headers=dep_headers,
+        ) from exc
     catalog = load_catalog_yaml(CATALOG_YAML_PATH)
     merged = merge_loras(sd_loras, catalog)
     return {
