@@ -1325,7 +1325,11 @@ async def comfyui_catalog_endpoint() -> dict[str, Any]:
                 "fetched_at": fetched_at_iso,
             }
         except Exception as exc:  # noqa: BLE001
-            error = f"{exc.__class__.__name__}: {exc}"
+            print(
+                "[comfyui_catalog] unexpected error while fetching object info: "
+                f"{exc.__class__.__name__}: {exc}"
+            )
+            error = "internal error while fetching ComfyUI catalog"
             if cached_payload is not None:
                 stale_payload = dict(cached_payload)
                 stale_payload["stale"] = True
