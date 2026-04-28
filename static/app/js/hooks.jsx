@@ -291,9 +291,10 @@ function ErrorPanel({ error, onRetry, compact }) {
 
 // ─── PersistentBanners ─────────────────────────────────────────────
 // AppShell 상단에 전역 알림을 노출한다:
-//  - SD offline  : /api/health/sd 실패
+//  - ComfyUI offline : /api/comfyui/health 의 ok=false (PLAN Task 7)
 //  - API key 없음 : localStorage('af_api_key') 비어있음
 // 각 배너는 '숨김' 상태를 sessionStorage 에 저장해 세션 동안만 닫힌 상태를 유지.
+// A1111 가 죽어도 배너 띄우지 않는다 — deprecated, ComfyUI 만 평가.
 function PersistentBanners() {
   const [sdOk, setSdOk] = useState(null);
   const [apiKeyMissing, setApiKeyMissing] = useState(() => {
@@ -306,13 +307,14 @@ function PersistentBanners() {
     try { return sessionStorage.getItem('banner_apikey_dismissed') === '1'; } catch { return false; }
   });
 
-  // Poll SD health — same cadence (15s) as AppSideNav so the two agree.
+  // Poll ComfyUI health — same cadence (15s). 응답 본문의 ok 필드만 평가.
+  // /api/comfyui/health 는 항상 200 + ok 분기 (PLAN §3.1.1).
   useEffect(() => {
     let cancelled = false;
     async function tick() {
       try {
-        await window.api.healthSd();
-        if (!cancelled) setSdOk(true);
+        const data = await window.api.comfyuiHealth();
+        if (!cancelled) setSdOk(data?.ok === true);
       } catch { if (!cancelled) setSdOk(false); }
     }
     tick();
@@ -361,7 +363,7 @@ function PersistentBanners() {
         >
           <span>●</span>
           <span style={{ flex: 1 }}>
-            <b>SD 서버 오프라인</b> — /api/health/sd 응답 없음. 새 배치는 큐에만 쌓이고 생성이 멈춥니다.
+            <b>ComfyUI 오프라인</b> — /api/comfyui/health 가 ok=false. 새 배치는 큐에만 쌓이고 생성이 멈춥니다.
           </span>
           <a
             href="/system"
