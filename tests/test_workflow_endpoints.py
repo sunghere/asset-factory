@@ -1187,3 +1187,106 @@ def test_export_excludes_bypass_and_reports_count(isolated, tmp_path) -> None:  
     finally:
         if monkey_target is not None:
             _server._ensure_path_allowed = monkey_target  # type: ignore[assignment]
+
+
+# ── /api/comfyui/catalog ───────────────────────────────────────────────────
+# PLAN §3.1.2 — ComfyUI /object_info + WorkflowRegistry cross-ref → 통합 카탈로그.
+
+
+def test_comfyui_catalog_endpoint_returns_payload(isolated, monkeypatch) -> None:  # noqa: ANN001
+    """ComfyUI 정상 시 200 + checkpoints/workflows 등 schema 충족."""
+
+    import json as _json
+    from pathlib import Path as _Path
+
+    fixture = _json.loads(
+        (_Path(__file__).parent / "fixtures" / "comfyui_object_info.json").read_text(encoding="utf-8")
+    )
+
+    async def fake_object_info() -> dict:
+        return fixture
+
+    monkeypatch.setattr(server.comfyui_client, "object_info", fake_object_info, raising=False)
+    # 캐시 영향 제거 — endpoint 가 캐시를 들고 있으면 클리어
+    if hasattr(server, "_comfyui_catalog_cache_clear"):
+        server._comfyui_catalog_cache_clear()
+
+    with TestClient(server.app) as client:
+        r = client.get("/api/comfyui/catalog")
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["stale"] is False
+    assert body["fetched_at"]
+    # PLAN §3.1.2 schema
+    assert isinstance(body["checkpoints"], list)
+    assert any(c["name"] == "AnythingXL_xl.safetensors" for c in body["checkpoints"])
+    assert isinstance(body["loras"], list)
+    assert isinstance(body["vaes"], list)
+    assert isinstance(body["controlnets"], list)
+    assert isinstance(body["upscalers"], list)
+    assert isinstance(body["workflows"], list)
+    assert len(body["workflows"]) >= 1
+    # checkpoint row schema
+    sample = next(c for c in body["checkpoints"] if c["name"] == "AnythingXL_xl.safetensors")
+    assert set(sample.keys()) >= {"name", "family", "used_by_workflows"}
+    assert sample["family"] == "sdxl"
+
+
+def test_comfyui_catalog_endpoint_timeout_returns_stale_or_error(isolated, monkeypatch) -> None:  # noqa: ANN001
+    """ComfyUI hang → fail-fast (timeout cap), 200 + (stale 또는 ok=false).
+
+    캐시가 없는 첫 호출이면 `{"ok": false, "error": "timeout..."}` 반환.
+    """
+    import asyncio as _asyncio
+    import time as _time
+
+    async def hang() -> dict:
+        await _asyncio.sleep(60)
+        return {}
+
+    monkeypatch.setattr(server.comfyui_client, "object_info", hang, raising=False)
+    monkeypatch.setattr(server, "_COMFYUI_CATALOG_TIMEOUT_SECONDS", 0.1, raising=False)
+    if hasattr(server, "_comfyui_catalog_cache_clear"):
+        server._comfyui_catalog_cache_clear()
+
+    start = _time.monotonic()
+    with TestClient(server.app) as client:
+        r = client.get("/api/comfyui/catalog")
+    elapsed = _time.monotonic() - start
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body.get("ok") is False
+    assert "timeout" in body["error"].lower()
+    assert elapsed < 5.0, f"endpoint should fail fast, took {elapsed:.2f}s"
+
+
+def test_comfyui_catalog_endpoint_uses_cache_on_second_call(isolated, monkeypatch) -> None:  # noqa: ANN001
+    """60s 캐시 — 두 번째 호출은 백엔드 안 친다."""
+
+    import json as _json
+    from pathlib import Path as _Path
+
+    fixture = _json.loads(
+        (_Path(__file__).parent / "fixtures" / "comfyui_object_info.json").read_text(encoding="utf-8")
+    )
+
+    call_count = {"n": 0}
+
+    async def fake_object_info() -> dict:
+        call_count["n"] += 1
+        return fixture
+
+    monkeypatch.setattr(server.comfyui_client, "object_info", fake_object_info, raising=False)
+    if hasattr(server, "_comfyui_catalog_cache_clear"):
+        server._comfyui_catalog_cache_clear()
+
+    with TestClient(server.app) as client:
+        r1 = client.get("/api/comfyui/catalog")
+        r2 = client.get("/api/comfyui/catalog")
+
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+    # 캐시 적중 → 두 번째 호출에서 백엔드 추가 호출 없어야 함
+    assert call_count["n"] == 1, f"expected cache hit, got {call_count['n']} backend calls"
