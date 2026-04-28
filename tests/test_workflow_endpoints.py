@@ -1290,3 +1290,77 @@ def test_comfyui_catalog_endpoint_uses_cache_on_second_call(isolated, monkeypatc
     assert r2.status_code == 200
     # 캐시 적중 → 두 번째 호출에서 백엔드 추가 호출 없어야 함
     assert call_count["n"] == 1, f"expected cache hit, got {call_count['n']} backend calls"
+
+
+# ── /api/comfyui/queue ─────────────────────────────────────────────────────
+# PLAN §3.1.3 — System 화면 부가 정보. 5초 timeout.
+
+
+def test_comfyui_queue_normal_returns_running_pending_counts(isolated, monkeypatch) -> None:  # noqa: ANN001
+    """ComfyUI 정상 시 200 + ok=true + running 리스트 + pending 카운트."""
+
+    async def fake_queue() -> dict:
+        return {
+            "queue_running": [
+                [0, "abc-123", {}, {}, []],
+                [1, "def-456", {}, {}, []],
+            ],
+            "queue_pending": [
+                [2, "ghi-789", {}, {}, []],
+            ],
+        }
+
+    monkeypatch.setattr(server.comfyui_client, "queue_state", fake_queue)
+
+    with TestClient(server.app) as client:
+        r = client.get("/api/comfyui/queue")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["pending"] == 1
+    assert isinstance(body["running"], list)
+    assert len(body["running"]) == 2
+    # running 원소는 prompt_id 를 포함하는 dict 로 정규화
+    assert all("prompt_id" in entry for entry in body["running"])
+    assert {entry["prompt_id"] for entry in body["running"]} == {"abc-123", "def-456"}
+    assert body["fetched_at"]
+
+
+def test_comfyui_queue_timeout_returns_200_with_ok_false(isolated, monkeypatch) -> None:  # noqa: ANN001
+    """ComfyUI hang → 5초(여기선 0.1s cap) 안에 200 + ok=false + error."""
+    import asyncio as _asyncio
+    import time as _time
+
+    async def hang() -> dict:
+        await _asyncio.sleep(60)
+        return {}
+
+    monkeypatch.setattr(server.comfyui_client, "queue_state", hang)
+    monkeypatch.setattr(server, "_COMFYUI_QUEUE_TIMEOUT_SECONDS", 0.1, raising=False)
+
+    start = _time.monotonic()
+    with TestClient(server.app) as client:
+        r = client.get("/api/comfyui/queue")
+    elapsed = _time.monotonic() - start
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert "timeout" in body["error"].lower()
+    assert elapsed < 5.0
+
+
+def test_comfyui_queue_exception_returns_200_with_ok_false(isolated, monkeypatch) -> None:  # noqa: ANN001
+    """RuntimeError 등 예외 → 200 + ok=false + error 메시지."""
+
+    async def boom() -> dict:
+        raise RuntimeError("comfyui 502")
+
+    monkeypatch.setattr(server.comfyui_client, "queue_state", boom)
+
+    with TestClient(server.app) as client:
+        r = client.get("/api/comfyui/queue")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert "comfyui 502" in body["error"]

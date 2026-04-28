@@ -539,6 +539,7 @@ _SD_HEALTH_TIMEOUT_SECONDS = float(os.getenv("SD_HEALTH_TIMEOUT_SECONDS", "5"))
 _SD_CATALOG_TIMEOUT_SECONDS = float(os.getenv("SD_CATALOG_TIMEOUT_SECONDS", "5"))
 _COMFYUI_HEALTH_TIMEOUT_SECONDS = float(os.getenv("COMFYUI_HEALTH_TIMEOUT_SECONDS", "5"))
 _COMFYUI_CATALOG_TIMEOUT_SECONDS = float(os.getenv("COMFYUI_CATALOG_TIMEOUT_SECONDS", "10"))
+_COMFYUI_QUEUE_TIMEOUT_SECONDS = float(os.getenv("COMFYUI_QUEUE_TIMEOUT_SECONDS", "5"))
 _log_ring: list[dict[str, Any]] = []
 
 
@@ -1340,6 +1341,67 @@ async def comfyui_catalog_endpoint() -> dict[str, Any]:
         _comfyui_catalog_cache["payload"] = payload
         _comfyui_catalog_cache["fetched_at"] = now
         return payload
+
+
+# ── /api/comfyui/queue ─────────────────────────────────────────────────────
+# PLAN §3.1.3 — System 화면 부가 정보. 5초 timeout, 항상 200.
+
+
+def _normalize_queue_running(raw: Any) -> list[dict[str, Any]]:
+    """ComfyUI ``/queue`` 의 ``queue_running`` 을 정규화.
+
+    ComfyUI 응답 구조: ``[number, prompt_id, prompt_dict, extra_data, outputs]``.
+    프론트가 dict 로 다루기 쉽게 ``{prompt_id, number}`` 형태로 변환.
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for entry in raw:
+        if isinstance(entry, list) and len(entry) >= 2:
+            out.append({"number": entry[0], "prompt_id": str(entry[1])})
+        elif isinstance(entry, dict) and "prompt_id" in entry:
+            out.append({"prompt_id": str(entry["prompt_id"]), "number": entry.get("number")})
+    return out
+
+
+@app.get("/api/comfyui/queue")
+async def comfyui_queue_endpoint() -> dict[str, Any]:
+    """ComfyUI 큐 상태 — running list + pending count.
+
+    응답 schema:
+        {ok: bool, running: [{prompt_id, number}, ...], pending: int, fetched_at, host, error?}
+
+    실패해도 항상 200 (PLAN §3.1.1 정책 준수).
+    """
+    payload: dict[str, Any] = {
+        "ok": False,
+        "running": [],
+        "pending": 0,
+        "host": comfyui_client.base_url,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        async with asyncio.timeout(_COMFYUI_QUEUE_TIMEOUT_SECONDS):
+            queue = await comfyui_client.queue_state()
+    except asyncio.TimeoutError:
+        payload["error"] = (
+            f"timeout: ComfyUI queue did not respond within "
+            f"{_COMFYUI_QUEUE_TIMEOUT_SECONDS}s"
+        )
+        return payload
+    except Exception as exc:  # noqa: BLE001
+        payload["error"] = f"{exc.__class__.__name__}: {exc}"
+        return payload
+
+    if not isinstance(queue, dict):
+        payload["error"] = f"unexpected /queue response type: {type(queue).__name__}"
+        return payload
+
+    payload["ok"] = True
+    payload["running"] = _normalize_queue_running(queue.get("queue_running"))
+    pending = queue.get("queue_pending") or []
+    payload["pending"] = len(pending) if isinstance(pending, list) else 0
+    return payload
 
 
 @app.get("/api/system/gc/status")
