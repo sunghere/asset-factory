@@ -538,6 +538,7 @@ _LOG_RING_MAX = 500
 _SD_HEALTH_TIMEOUT_SECONDS = float(os.getenv("SD_HEALTH_TIMEOUT_SECONDS", "5"))
 _SD_CATALOG_TIMEOUT_SECONDS = float(os.getenv("SD_CATALOG_TIMEOUT_SECONDS", "5"))
 _COMFYUI_HEALTH_TIMEOUT_SECONDS = float(os.getenv("COMFYUI_HEALTH_TIMEOUT_SECONDS", "5"))
+_COMFYUI_CATALOG_TIMEOUT_SECONDS = float(os.getenv("COMFYUI_CATALOG_TIMEOUT_SECONDS", "10"))
 _log_ring: list[dict[str, Any]] = []
 
 
@@ -1233,6 +1234,112 @@ async def comfyui_health() -> dict[str, Any]:
     }
     payload["workflows_available"] = len(workflow_registry.available_variants())
     return payload
+
+
+# ── /api/comfyui/catalog ───────────────────────────────────────────────────
+# PLAN_comfyui_catalog.md §3.1.2.
+#
+# /object_info (≈1.94MB) + WorkflowRegistry cross-ref → Catalog 화면 데이터.
+# 60s in-memory 캐시 (asyncio lock) — ComfyUI 재시작이 잦지 않은 환경에서 충분.
+# 실패해도 항상 200 — `ok=false` + `error` 또는 `stale=true` + 마지막 성공 페이로드.
+
+from lib import comfyui_catalog as _catalog_lib  # noqa: E402
+
+_comfyui_catalog_cache: dict[str, Any] = {
+    "payload": None,        # 마지막 성공 페이로드 (stale fallback 용)
+    "fetched_at": None,     # 캐시 시각 (epoch seconds)
+    "ttl_seconds": float(os.getenv("COMFYUI_CATALOG_TTL_SECONDS", "60")),
+}
+_comfyui_catalog_lock = asyncio.Lock()
+
+
+def _comfyui_catalog_cache_clear() -> None:
+    """테스트/관리용 캐시 클리어."""
+    _comfyui_catalog_cache["payload"] = None
+    _comfyui_catalog_cache["fetched_at"] = None
+
+
+@app.get("/api/comfyui/catalog")
+async def comfyui_catalog_endpoint() -> dict[str, Any]:
+    """ComfyUI 기반 모델 / LoRA / VAE / ControlNet / Workflow 카탈로그.
+
+    응답 schema (PLAN §3.1.2):
+        {
+          fetched_at: ISO8601,
+          stale: bool,
+          checkpoints: [{name, family, used_by_workflows}],
+          loras: [{name, used_by_workflows}],
+          vaes: [...], controlnets: [...], upscalers: [...],
+          workflows: [{id, category, label, variants, uses_models, uses_loras}]
+        }
+
+    실패 시 (캐시 없음): ``{ok: false, error, host, fetched_at}``.
+    실패 시 (캐시 있음): 마지막 성공 페이로드 + ``stale=true``.
+
+    ``COMFYUI_CATALOG_TIMEOUT_SECONDS`` (기본 10초) 안에 ``/object_info`` 가
+    응답해야 한다 — 1.94MB / 200ms 가 정상이지만 LAN 지연을 감안.
+    """
+    import time as _time
+
+    now = _time.time()
+    ttl = float(_comfyui_catalog_cache["ttl_seconds"])
+    cached_at = _comfyui_catalog_cache["fetched_at"]
+    cached_payload = _comfyui_catalog_cache["payload"]
+
+    # 캐시 hit 판단 (lock 밖에서 빠르게)
+    if cached_payload is not None and cached_at is not None and (now - cached_at) < ttl:
+        return cached_payload
+
+    async with _comfyui_catalog_lock:
+        # double-check (다른 코루틴이 채웠을 수 있음)
+        cached_at = _comfyui_catalog_cache["fetched_at"]
+        cached_payload = _comfyui_catalog_cache["payload"]
+        if cached_payload is not None and cached_at is not None and (now - cached_at) < ttl:
+            return cached_payload
+
+        fetched_at_iso = datetime.now(timezone.utc).isoformat()
+        try:
+            async with asyncio.timeout(_COMFYUI_CATALOG_TIMEOUT_SECONDS):
+                object_info = await comfyui_client.object_info()
+        except asyncio.TimeoutError:
+            error = (
+                f"timeout: ComfyUI did not respond within "
+                f"{_COMFYUI_CATALOG_TIMEOUT_SECONDS}s"
+            )
+            if cached_payload is not None:
+                stale_payload = dict(cached_payload)
+                stale_payload["stale"] = True
+                stale_payload["error"] = error
+                return stale_payload
+            return {
+                "ok": False,
+                "error": error,
+                "host": comfyui_client.base_url,
+                "fetched_at": fetched_at_iso,
+            }
+        except Exception as exc:  # noqa: BLE001
+            error = f"{exc.__class__.__name__}: {exc}"
+            if cached_payload is not None:
+                stale_payload = dict(cached_payload)
+                stale_payload["stale"] = True
+                stale_payload["error"] = error
+                return stale_payload
+            return {
+                "ok": False,
+                "error": error,
+                "host": comfyui_client.base_url,
+                "fetched_at": fetched_at_iso,
+            }
+
+        payload = _catalog_lib.build_full_payload(
+            object_info=object_info,
+            registry=workflow_registry,
+            fetched_at=fetched_at_iso,
+            stale=False,
+        )
+        _comfyui_catalog_cache["payload"] = payload
+        _comfyui_catalog_cache["fetched_at"] = now
+        return payload
 
 
 @app.get("/api/system/gc/status")

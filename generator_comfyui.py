@@ -158,6 +158,19 @@ class ComfyUIClient:
     async def queue_state(self) -> dict[str, Any]:
         return await self._request_json("GET", "/queue")
 
+    async def object_info(self) -> dict[str, Any]:
+        """``/object_info`` — 사용 가능한 모든 노드 type + 모델 목록 (≈1.94MB).
+
+        Catalog endpoint 에서 60s 캐시와 함께 호출. 응답이 크므로 잦은 호출 금물.
+        """
+        result = await self._request_json("GET", "/object_info")
+        if not isinstance(result, dict):
+            raise SDError(
+                f"unexpected /object_info response type: {type(result).__name__}",
+                code="sd_server_error",
+            )
+        return result
+
     # ---- submit + wait ----------------------------------------------------
 
     async def submit(self, api_json: dict[str, Any]) -> str:

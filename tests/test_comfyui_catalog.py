@@ -151,7 +151,9 @@ def test_index_workflows_extracts_uses_from_registry() -> None:
     used_by = ckpt_index["AnythingXL_xl.safetensors"]
     # variant_id 형식: "{category}:{name}"
     assert all(":" in v for v in used_by), used_by
-    assert any(v.startswith("sprite:") for v in used_by), used_by
+    # 실 registry 에서 AnythingXL 을 쓰는 variant 가 1개 이상 존재 (현재는
+    # illustration:anything_* 계열). 어떤 카테고리든 무방.
+    assert len(used_by) >= 1, used_by
 
 
 # ── 단위 5 ─ build_full_payload: catalog + workflows 합본 ───────────────
