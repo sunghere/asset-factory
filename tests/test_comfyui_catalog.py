@@ -48,7 +48,7 @@ def test_extracts_checkpoints_loras_vaes_controlnets_upscalers(object_info: dict
     assert "animagineXL40Opt_clear.safetensors" in ckpt_names
     assert len(ckpt_names) >= 5
 
-    lora_names = [l["name"] for l in catalog["loras"]]
+    lora_names = [lo["name"] for lo in catalog["loras"]]
     # fixture 의 LoraLoader 노드에 어떤 lora 가 들어있는지는 fixture 본문에 의존
     assert isinstance(lora_names, list)
 
