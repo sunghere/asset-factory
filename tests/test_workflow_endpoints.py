@@ -1392,3 +1392,43 @@ def test_health_sd_includes_primary_and_deprecated_backends(isolated, monkeypatc
     assert "backends" in body
     assert "a1111" in body["backends"]
     assert "comfyui" in body["backends"]
+
+
+# ── A1111 catalog deprecation (Task 8) ─────────────────────────────────────
+
+
+def test_sd_catalog_models_response_includes_deprecation_marker(isolated, monkeypatch) -> None:  # noqa: ANN001
+    """/api/sd/catalog/models 응답 본문에 deprecated=true + 헤더에 Deprecation/Sunset."""
+
+    async def fake_list_models() -> list[dict]:
+        return [{"name": "AnythingXL_xl.safetensors"}]
+
+    monkeypatch.setattr(server.sd_client, "list_models", fake_list_models)
+
+    with TestClient(server.app) as client:
+        r = client.get("/api/sd/catalog/models")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["deprecated"] is True
+    # 헤더
+    assert r.headers.get("Deprecation") == "true"
+    sunset = r.headers.get("Sunset")
+    assert sunset, "Sunset 헤더가 비어있음"
+    # RFC 8594 권고: HTTP-date. 단순 ISO 도 허용 (실용 우선).
+
+
+def test_sd_catalog_loras_response_includes_deprecation_marker(isolated, monkeypatch) -> None:  # noqa: ANN001
+    """/api/sd/catalog/loras 도 동일."""
+
+    async def fake_list_loras() -> list[dict]:
+        return []
+
+    monkeypatch.setattr(server.sd_client, "list_loras", fake_list_loras)
+
+    with TestClient(server.app) as client:
+        r = client.get("/api/sd/catalog/loras")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["deprecated"] is True
+    assert r.headers.get("Deprecation") == "true"
+    assert r.headers.get("Sunset")

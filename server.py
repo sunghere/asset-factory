@@ -1510,14 +1510,48 @@ async def system_logs_recent(
     return {"count": len(items[-limit:]), "items": list(reversed(items[-limit:]))}
 
 
+# ── A1111 catalog endpoints — deprecated (Task 8) ──────────────────────────
+# 다음 메이저에서 410 Gone 으로 전환. 그 전까지: 응답 헤더 + 본문에 마커, 로그 1회.
+
+import logging as _logging  # noqa: E402
+
+_a1111_deprecation_logger = _logging.getLogger("asset_factory.a1111_deprecated")
+_a1111_deprecation_warned = {"flag": False}
+
+
+def _a1111_deprecation_sunset_date() -> str:
+    """현재 시각 + 90일 (RFC 8594 권장 형식 — 단순 RFC 1123 HTTP-date)."""
+    from email.utils import format_datetime
+    return format_datetime(datetime.now(timezone.utc) + timedelta(days=90))
+
+
+def _mark_a1111_deprecated(response: Response, endpoint_path: str) -> None:
+    """응답 헤더 (Deprecation/Sunset/Link) 추가 + 모듈 레벨 1회 로그."""
+    response.headers["Deprecation"] = "true"
+    response.headers["Sunset"] = _a1111_deprecation_sunset_date()
+    response.headers["Link"] = '</api/comfyui/catalog>; rel="successor-version"'
+    if not _a1111_deprecation_warned["flag"]:
+        _a1111_deprecation_logger.warning(
+            "A1111 catalog endpoint accessed — deprecated, will be removed in next major. "
+            "Path=%s · Use /api/comfyui/catalog instead.",
+            endpoint_path,
+        )
+        _a1111_deprecation_warned["flag"] = True
+
+
 @app.get("/api/sd/catalog/models")
-async def sd_catalog_models() -> dict[str, Any]:
+async def sd_catalog_models(response: Response) -> dict[str, Any]:
     """A1111 모델 목록 + ``config/sd_catalog.yml`` 메타데이터 병합 반환.
+
+    .. deprecated::
+        ComfyUI primary 전환 후 deprecated. ``/api/comfyui/catalog`` 사용 권장.
+        다음 메이저(v0.4.0)에서 410 Gone 전환 예정. PLAN_comfyui_catalog.md §4 Task 8.
 
     SD 서버 미연결 시 503, YAML 누락 시 메타데이터 비어있는 채로 200을 반환한다.
     ``SD_CATALOG_TIMEOUT_SECONDS`` (기본 5초) 안에 응답하지 않으면 timeout 으로
     503 — sd_client 자체 retries(45s×3=141s) 를 기다리지 않아 화면이 빠르게 실패.
     """
+    _mark_a1111_deprecated(response, "/api/sd/catalog/models")
     try:
         async with asyncio.timeout(_SD_CATALOG_TIMEOUT_SECONDS):
             sd_models = await sd_client.list_models()
@@ -1535,15 +1569,20 @@ async def sd_catalog_models() -> dict[str, Any]:
         "items": merged,
         "catalog_path": str(CATALOG_YAML_PATH),
         "catalog_present": CATALOG_YAML_PATH.exists(),
+        "deprecated": True,
     }
 
 
 @app.get("/api/sd/catalog/loras")
-async def sd_catalog_loras() -> dict[str, Any]:
+async def sd_catalog_loras(response: Response) -> dict[str, Any]:
     """A1111 LoRA 목록 + ``config/sd_catalog.yml`` 메타데이터 병합 반환.
+
+    .. deprecated::
+        ``/api/comfyui/catalog`` 사용 권장. 다음 메이저에서 제거.
 
     SD 서버 미연결/timeout 시 503 (``SD_CATALOG_TIMEOUT_SECONDS`` 기준).
     """
+    _mark_a1111_deprecated(response, "/api/sd/catalog/loras")
     try:
         async with asyncio.timeout(_SD_CATALOG_TIMEOUT_SECONDS):
             sd_loras = await sd_client.list_loras()
@@ -1561,6 +1600,7 @@ async def sd_catalog_loras() -> dict[str, Any]:
         "items": merged,
         "catalog_path": str(CATALOG_YAML_PATH),
         "catalog_present": CATALOG_YAML_PATH.exists(),
+        "deprecated": True,
     }
 
 
