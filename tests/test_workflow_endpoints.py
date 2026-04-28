@@ -492,6 +492,86 @@ def test_health_sd_both_dead_returns_503(isolated, monkeypatch) -> None:  # noqa
     assert r.status_code == 503
 
 
+def test_health_sd_timeout_treated_as_dead_backend(isolated, monkeypatch) -> None:  # noqa: ANN001
+    """백엔드 health_check 가 timeout 만큼 hang 해도 endpoint 가 빠르게 timeout error 로 마감.
+
+    실 사고 시나리오: SD WebUI 가 죽은 채 SYN_SENT 가 30초 이상 hang →
+    sd_client retries 까지 합치면 단일 요청에 141초가 묶인다. 이걸 endpoint
+    레벨에서 짧게 잘라내서 /system, /catalog 화면이 무한 로딩되지 않도록 한다.
+    """
+    import asyncio as _asyncio
+
+    async def hang() -> dict:
+        await _asyncio.sleep(60)  # 절대 끝나지 않을 만큼
+        return {"ok": True}
+
+    async def fake_comfy_health() -> dict:
+        return {"ok": True, "comfyui_version": "x"}
+
+    monkeypatch.setattr(server.sd_client, "health_check", hang)
+    monkeypatch.setattr(server.comfyui_client, "health_check", fake_comfy_health)
+    # 테스트가 빠르게 끝나도록 0.1s 로 cap
+    monkeypatch.setattr(server, "_SD_HEALTH_TIMEOUT_SECONDS", 0.1)
+
+    import time as _time
+    start = _time.monotonic()
+    with TestClient(server.app) as client:
+        r = client.get("/api/health/sd")
+    elapsed = _time.monotonic() - start
+
+    # ComfyUI 살아있으니 200 (한쪽만 죽었어도 200 정책)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["backends"]["a1111"]["ok"] is False
+    assert "timeout" in body["backends"]["a1111"]["error"].lower()
+    # 진짜 60초 안 기다리고 빨리 끝나야 한다 (cap 0.1s + overhead)
+    assert elapsed < 5.0, f"endpoint should fail fast, took {elapsed:.2f}s"
+
+
+def test_sd_catalog_models_timeout_returns_503_fast(isolated, monkeypatch) -> None:  # noqa: ANN001
+    """list_models 가 hang 해도 endpoint 가 빠르게 503 으로 마감."""
+    import asyncio as _asyncio
+    import time as _time
+
+    async def hang() -> list:
+        await _asyncio.sleep(60)
+        return []
+
+    monkeypatch.setattr(server.sd_client, "list_models", hang)
+    monkeypatch.setattr(server, "_SD_CATALOG_TIMEOUT_SECONDS", 0.1)
+
+    start = _time.monotonic()
+    with TestClient(server.app) as client:
+        r = client.get("/api/sd/catalog/models")
+    elapsed = _time.monotonic() - start
+
+    assert r.status_code == 503
+    assert "timeout" in r.json()["detail"].lower()
+    assert elapsed < 5.0, f"endpoint should fail fast, took {elapsed:.2f}s"
+
+
+def test_sd_catalog_loras_timeout_returns_503_fast(isolated, monkeypatch) -> None:  # noqa: ANN001
+    """list_loras 가 hang 해도 endpoint 가 빠르게 503 으로 마감."""
+    import asyncio as _asyncio
+    import time as _time
+
+    async def hang() -> list:
+        await _asyncio.sleep(60)
+        return []
+
+    monkeypatch.setattr(server.sd_client, "list_loras", hang)
+    monkeypatch.setattr(server, "_SD_CATALOG_TIMEOUT_SECONDS", 0.1)
+
+    start = _time.monotonic()
+    with TestClient(server.app) as client:
+        r = client.get("/api/sd/catalog/loras")
+    elapsed = _time.monotonic() - start
+
+    assert r.status_code == 503
+    assert "timeout" in r.json()["detail"].lower()
+    assert elapsed < 5.0, f"endpoint should fail fast, took {elapsed:.2f}s"
+
+
 # ----------------------------------------------------------------------------
 # helpers
 # ----------------------------------------------------------------------------

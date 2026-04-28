@@ -528,6 +528,15 @@ def _worker_tick_done() -> None:
 # System.jsx Logs 블록용 in-memory ring buffer.
 # 파일 로그를 재해석 하기보다는, 서버 내부에서 발생한 error/warn 을 직접 수집한다.
 _LOG_RING_MAX = 500
+
+# ── SD/A1111 endpoint timeouts ─────────────────────────────────────────────
+# sd_client 의 기본 ClientTimeout(45s) × retries(3) = 141s 가 단일 요청에
+# 묶이면 동시 요청도 멈춘 듯 보인다. /system, /catalog 화면이 죽은 SD 서버를
+# 기다리며 무한 로딩되는 사고를 막기 위해 endpoint 레벨에서 짧은 hard cap.
+# - SD_HEALTH_TIMEOUT_SECONDS: /api/health/sd 백엔드별 health_check
+# - SD_CATALOG_TIMEOUT_SECONDS: /api/sd/catalog/{models,loras} list 호출
+_SD_HEALTH_TIMEOUT_SECONDS = float(os.getenv("SD_HEALTH_TIMEOUT_SECONDS", "5"))
+_SD_CATALOG_TIMEOUT_SECONDS = float(os.getenv("SD_CATALOG_TIMEOUT_SECONDS", "5"))
 _log_ring: list[dict[str, Any]] = []
 
 
@@ -1154,13 +1163,24 @@ async def health_sd() -> dict[str, Any]:
     A1111 + ComfyUI 양 백엔드를 동시에 점검한다. 한쪽만 살아있어도 200 으로
     응답하고, 두 쪽 모두 죽었을 때만 503. 응답 본문에 backend 별 ok/에러를
     모두 담아 운영자가 어느 쪽이 죽었는지 식별 가능하게 한다.
+
+    각 백엔드 health_check 는 ``SD_HEALTH_TIMEOUT_SECONDS`` (기본 5초) 안에
+    응답하지 않으면 timeout 으로 처리한다. /system, /catalog 화면이 죽은 SD 를
+    기다리며 무한 로딩되는 것을 방지하기 위함 (기본 client timeout 45s × 3 retry
+    = 141s 가 단일 요청에 걸리면 다른 동시 요청도 사실상 멈춘 듯 보임).
     """
     results: dict[str, Any] = {}
     any_ok = False
     for name in backends.names:
         try:
-            results[name] = await backends.get(name).health_check()
+            async with asyncio.timeout(_SD_HEALTH_TIMEOUT_SECONDS):
+                results[name] = await backends.get(name).health_check()
             any_ok = True
+        except asyncio.TimeoutError:
+            results[name] = {
+                "ok": False,
+                "error": f"timeout: backend did not respond within {_SD_HEALTH_TIMEOUT_SECONDS}s",
+            }
         except Exception as exc:  # noqa: BLE001
             results[name] = {"ok": False, "error": f"{exc.__class__.__name__}: {exc}"}
     if not any_ok:
@@ -1273,9 +1293,17 @@ async def sd_catalog_models() -> dict[str, Any]:
     """A1111 모델 목록 + ``config/sd_catalog.yml`` 메타데이터 병합 반환.
 
     SD 서버 미연결 시 503, YAML 누락 시 메타데이터 비어있는 채로 200을 반환한다.
+    ``SD_CATALOG_TIMEOUT_SECONDS`` (기본 5초) 안에 응답하지 않으면 timeout 으로
+    503 — sd_client 자체 retries(45s×3=141s) 를 기다리지 않아 화면이 빠르게 실패.
     """
     try:
-        sd_models = await sd_client.list_models()
+        async with asyncio.timeout(_SD_CATALOG_TIMEOUT_SECONDS):
+            sd_models = await sd_client.list_models()
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"SD 모델 목록 조회 timeout ({_SD_CATALOG_TIMEOUT_SECONDS}s)",
+        ) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"SD 모델 목록 조회 실패: {exc}") from exc
     catalog = load_catalog_yaml(CATALOG_YAML_PATH)
@@ -1290,9 +1318,18 @@ async def sd_catalog_models() -> dict[str, Any]:
 
 @app.get("/api/sd/catalog/loras")
 async def sd_catalog_loras() -> dict[str, Any]:
-    """A1111 LoRA 목록 + ``config/sd_catalog.yml`` 메타데이터 병합 반환."""
+    """A1111 LoRA 목록 + ``config/sd_catalog.yml`` 메타데이터 병합 반환.
+
+    SD 서버 미연결/timeout 시 503 (``SD_CATALOG_TIMEOUT_SECONDS`` 기준).
+    """
     try:
-        sd_loras = await sd_client.list_loras()
+        async with asyncio.timeout(_SD_CATALOG_TIMEOUT_SECONDS):
+            sd_loras = await sd_client.list_loras()
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"SD LoRA 목록 조회 timeout ({_SD_CATALOG_TIMEOUT_SECONDS}s)",
+        ) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"SD LoRA 목록 조회 실패: {exc}") from exc
     catalog = load_catalog_yaml(CATALOG_YAML_PATH)
