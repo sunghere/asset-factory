@@ -572,6 +572,115 @@ def test_sd_catalog_loras_timeout_returns_503_fast(isolated, monkeypatch) -> Non
     assert elapsed < 5.0, f"endpoint should fail fast, took {elapsed:.2f}s"
 
 
+# ── /api/comfyui/health ────────────────────────────────────────────────────
+# A1111 deprecated 후 Catalog/System 이 1차 데이터로 사용. 항상 200 + ok 분기.
+
+
+def test_comfyui_health_ok_returns_full_payload(isolated, monkeypatch) -> None:  # noqa: ANN001
+    """ComfyUI 정상 시 200 + ok=true + system/queue/workflows 필드 포함."""
+
+    async def fake_health() -> dict:
+        return {
+            "ok": True,
+            "comfyui_version": "0.19.3",
+            "python_version": "3.10.11",
+            "device_count": 1,
+            "device_names": ["cuda:0 NVIDIA GeForce RTX 4080 SUPER"],
+        }
+
+    async def fake_queue() -> dict:
+        return {"queue_running": [{"prompt_id": "abc"}], "queue_pending": []}
+
+    monkeypatch.setattr(server.comfyui_client, "health_check", fake_health)
+    monkeypatch.setattr(server.comfyui_client, "queue_state", fake_queue)
+
+    with TestClient(server.app) as client:
+        r = client.get("/api/comfyui/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["comfyui_version"] == "0.19.3"
+    assert body["python_version"] == "3.10.11"
+    assert body["device_count"] == 1
+    assert body["device_names"] == ["cuda:0 NVIDIA GeForce RTX 4080 SUPER"]
+    assert body["queue"] == {"running": 1, "pending": 0}
+    assert body["host"].startswith("http://")
+    assert body["fetched_at"]  # ISO timestamp 비어있지 않음
+    # workflow_registry 가 fixture 환경에서도 0 이상은 로드함
+    assert isinstance(body["workflows_available"], int)
+    assert body["workflows_available"] >= 0
+
+
+def test_comfyui_health_timeout_returns_200_with_ok_false(isolated, monkeypatch) -> None:  # noqa: ANN001
+    """ComfyUI hang → 5초(여기선 0.1s cap) 안에 200 + ok=false + error 필드.
+
+    /api/health/sd 와 달리 503 을 안 낸다. 프론트가 status code 분기 없이
+    단일 응답으로 판단하도록 하기 위함 (PLAN_comfyui_catalog.md §3.1.1 정책).
+    """
+    import asyncio as _asyncio
+    import time as _time
+
+    async def hang() -> dict:
+        await _asyncio.sleep(60)
+        return {}
+
+    monkeypatch.setattr(server.comfyui_client, "health_check", hang)
+    monkeypatch.setattr(server, "_COMFYUI_HEALTH_TIMEOUT_SECONDS", 0.1)
+
+    start = _time.monotonic()
+    with TestClient(server.app) as client:
+        r = client.get("/api/comfyui/health")
+    elapsed = _time.monotonic() - start
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert "timeout" in body["error"].lower()
+    assert body["host"].startswith("http://")
+    assert elapsed < 5.0, f"endpoint should fail fast, took {elapsed:.2f}s"
+
+
+def test_comfyui_health_exception_returns_200_with_ok_false(isolated, monkeypatch) -> None:  # noqa: ANN001
+    """ComfyUI 가 RuntimeError 등 raise 해도 200 + ok=false + error 메시지 보존."""
+
+    async def boom() -> dict:
+        raise RuntimeError("ComfyUI process gone")
+
+    monkeypatch.setattr(server.comfyui_client, "health_check", boom)
+
+    with TestClient(server.app) as client:
+        r = client.get("/api/comfyui/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert "RuntimeError" in body["error"]
+    assert "ComfyUI process gone" in body["error"]
+
+
+def test_comfyui_health_queue_failure_propagates_as_ok_false(isolated, monkeypatch) -> None:  # noqa: ANN001
+    """system_stats 는 OK 인데 /queue 호출이 실패해도 ok=false 로 마감.
+
+    health 와 queue 가 한 timeout block 안에서 순차 호출되므로, 둘 중 하나라도
+    실패하면 전체 ok=false. (부분 성공 응답을 허용하면 프론트 로직이 복잡해짐.)
+    """
+
+    async def fake_health() -> dict:
+        return {"ok": True, "comfyui_version": "0.19.3"}
+
+    async def boom_queue() -> dict:
+        raise RuntimeError("queue endpoint flaky")
+
+    monkeypatch.setattr(server.comfyui_client, "health_check", fake_health)
+    monkeypatch.setattr(server.comfyui_client, "queue_state", boom_queue)
+
+    with TestClient(server.app) as client:
+        r = client.get("/api/comfyui/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert "queue endpoint flaky" in body["error"]
+
+
 # ----------------------------------------------------------------------------
 # helpers
 # ----------------------------------------------------------------------------

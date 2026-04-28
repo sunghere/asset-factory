@@ -534,8 +534,10 @@ _LOG_RING_MAX = 500
 # 기다리며 무한 로딩되는 사고를 막기 위해 endpoint 레벨에서 짧은 hard cap.
 # - SD_HEALTH_TIMEOUT_SECONDS: /api/health/sd 백엔드별 health_check
 # - SD_CATALOG_TIMEOUT_SECONDS: /api/sd/catalog/{models,loras} list 호출
+# - COMFYUI_HEALTH_TIMEOUT_SECONDS: /api/comfyui/health (system_stats + queue)
 _SD_HEALTH_TIMEOUT_SECONDS = float(os.getenv("SD_HEALTH_TIMEOUT_SECONDS", "5"))
 _SD_CATALOG_TIMEOUT_SECONDS = float(os.getenv("SD_CATALOG_TIMEOUT_SECONDS", "5"))
+_COMFYUI_HEALTH_TIMEOUT_SECONDS = float(os.getenv("COMFYUI_HEALTH_TIMEOUT_SECONDS", "5"))
 _log_ring: list[dict[str, Any]] = []
 
 
@@ -1185,6 +1187,52 @@ async def health_sd() -> dict[str, Any]:
     if not any_ok:
         raise HTTPException(status_code=503, detail={"sd_backends": results})
     return {"backends": results}
+
+
+@app.get("/api/comfyui/health")
+async def comfyui_health() -> dict[str, Any]:
+    """ComfyUI 백엔드 단독 헬스 + 큐 상태.
+
+    `/api/health/sd` 가 a1111+comfyui 합본인 반면, 본 endpoint 는 ComfyUI 만 본다.
+    A1111 deprecated 후 Catalog/System 화면이 1차 데이터 소스로 사용한다.
+
+    실패해도 항상 200 + ``ok=false`` — 프론트가 status code 분기를 안 타고 단일
+    응답으로 판단하도록 한다 (SD health 가 200/503 다 내서 배너 로직이 복잡해진
+    선례를 답습하지 않음).
+
+    ``COMFYUI_HEALTH_TIMEOUT_SECONDS`` (기본 5초) 안에 응답이 없으면 timeout 으로
+    마감한다 — system_stats + queue 두 호출을 합쳐도 수백 ms 안 걸리는 게 정상.
+    """
+    payload: dict[str, Any] = {
+        "ok": False,
+        "host": comfyui_client.base_url,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        async with asyncio.timeout(_COMFYUI_HEALTH_TIMEOUT_SECONDS):
+            stats = await comfyui_client.health_check()
+            queue = await comfyui_client.queue_state()
+    except asyncio.TimeoutError:
+        payload["error"] = (
+            f"timeout: ComfyUI did not respond within "
+            f"{_COMFYUI_HEALTH_TIMEOUT_SECONDS}s"
+        )
+        return payload
+    except Exception as exc:  # noqa: BLE001
+        payload["error"] = f"{exc.__class__.__name__}: {exc}"
+        return payload
+
+    payload["ok"] = True
+    payload["comfyui_version"] = stats.get("comfyui_version")
+    payload["python_version"] = stats.get("python_version")
+    payload["device_count"] = stats.get("device_count")
+    payload["device_names"] = stats.get("device_names", [])
+    payload["queue"] = {
+        "running": len(queue.get("queue_running", []) or []),
+        "pending": len(queue.get("queue_pending", []) or []),
+    }
+    payload["workflows_available"] = len(workflow_registry.available_variants())
+    return payload
 
 
 @app.get("/api/system/gc/status")
