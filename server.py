@@ -1188,7 +1188,13 @@ async def health_sd() -> dict[str, Any]:
             results[name] = {"ok": False, "error": f"{exc.__class__.__name__}: {exc}"}
     if not any_ok:
         raise HTTPException(status_code=503, detail={"sd_backends": results})
-    return {"backends": results}
+    # PLAN_comfyui_catalog.md Task 4 — A1111 deprecated, ComfyUI primary.
+    # 기존 backends 구조는 호환성 위해 유지. 프론트는 primary 만 보면 충분.
+    return {
+        "backends": results,
+        "primary": "comfyui",
+        "deprecated_backends": ["a1111"],
+    }
 
 
 @app.get("/api/comfyui/health")

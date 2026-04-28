@@ -1364,3 +1364,31 @@ def test_comfyui_queue_exception_returns_200_with_ok_false(isolated, monkeypatch
     body = r.json()
     assert body["ok"] is False
     assert "comfyui 502" in body["error"]
+
+
+# ── /api/health/sd primary / deprecated_backends 필드 ──────────────────────
+# Task 4 — 호환성 유지 (backends 구조 그대로) + 두 필드 추가.
+
+
+def test_health_sd_includes_primary_and_deprecated_backends(isolated, monkeypatch) -> None:  # noqa: ANN001
+    """응답 dict 에 primary='comfyui', deprecated_backends=['a1111'] 두 필드 포함.
+
+    기존 backends 구조 (a1111/comfyui dict) 는 그대로 유지 (legacy client 호환).
+    """
+
+    async def ok_health() -> dict:
+        return {"ok": True}
+
+    monkeypatch.setattr(server.sd_client, "health_check", ok_health)
+    monkeypatch.setattr(server.comfyui_client, "health_check", ok_health)
+
+    with TestClient(server.app) as client:
+        r = client.get("/api/health/sd")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["primary"] == "comfyui"
+    assert body["deprecated_backends"] == ["a1111"]
+    # 기존 구조 유지 (호환성)
+    assert "backends" in body
+    assert "a1111" in body["backends"]
+    assert "comfyui" in body["backends"]
