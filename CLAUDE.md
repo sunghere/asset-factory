@@ -56,3 +56,13 @@
 - `REVIEW.md` — 설계 리뷰 보완사항
 - `docs/SCREEN_SPEC_v0.2.md` — 11화면 기획 스펙
 - `docs/asset-factory-redesign-followups.md` — 리디자인 후속 이슈 추적
+
+## 백엔드 데이터 소스 (Catalog / System)
+
+`/app/catalog`, `/app/system` 화면은 **ComfyUI** (`192.168.50.225:8188`) 를
+1차 데이터 소스로 사용한다. A1111 백엔드는 deprecated — 코드는 호환성 위해
+유지 중이지만 다음 메이저(v0.4.0)에서 제거 예정. PLAN_comfyui_catalog.md 참조.
+
+- Catalog 화면: `api.comfyuiCatalog()` 1회 호출 + `api.catalogUsage()` (DB 통계).
+- System / Dashboard / 글로벌 배너: `api.comfyuiHealth()` 의 `ok` 필드만 평가.
+  A1111 다운 단독으로는 배너/경고 발생 안 됨.

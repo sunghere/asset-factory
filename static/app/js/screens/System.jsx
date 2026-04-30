@@ -28,6 +28,12 @@ function System() {
   const [running, setRunning] = useState(false);
 
   const health = window.useAsync(() => window.api.health(), []);
+  // PLAN_comfyui_catalog.md Task 7 — ComfyUI 가 primary backend.
+  // healthSd 는 a1111 deprecated 표시용으로만 유지.
+  const comfyuiHealth = window.useAsync(
+    () => window.api.comfyuiHealth().catch((err) => ({ ok: false, error: String(err) })),
+    [],
+  );
   const healthSd = window.useAsync(
     () => window.api.healthSd().catch((err) => ({ ok: false, error: String(err) })),
     [],
@@ -40,7 +46,7 @@ function System() {
   // Light-weight polling — 큰 이벤트가 아닌 스냅샷 류 (worker heartbeat/DB 카운트)
   // 이므로 SSE 보다 폴링이 맞다.
   window.useInterval(() => {
-    health.reload(); healthSd.reload(); gc.reload();
+    health.reload(); comfyuiHealth.reload(); healthSd.reload(); gc.reload();
     dbStat.reload(); worker.reload(); logs.reload();
   }, 8000);
 
@@ -58,7 +64,10 @@ function System() {
   }
 
   const appOk = health.data?.ok === true;
-  const sdOk = healthSd.data?.ok === true;
+  const comfyuiOk = comfyuiHealth.data?.ok === true;
+  // a1111 backend 가 살아있는지 — deprecated 칩 색깔에만 사용.
+  const a1111Backend = healthSd.data?.backends?.a1111;
+  const a1111Ok = a1111Backend?.ok === true;
   const gcState = gc.data || {};
   const gcResult = gcState.last_result || {};
   const dbSize = dbStat.data?.size_bytes;
@@ -70,14 +79,14 @@ function System() {
         left={
           <>
             <span className={`chip ${appOk ? '' : 'fail'}`}>app · {appOk ? 'OK' : 'DOWN'}</span>
-            <span className={`chip ${sdOk ? '' : 'fail'}`}>sd · {sdOk ? 'OK' : 'DOWN'}</span>
+            <span className={`chip ${comfyuiOk ? '' : 'fail'}`}>comfyui · {comfyuiOk ? 'OK' : 'DOWN'}</span>
             <span className="chip">gc · <b>{gcState.run_count ?? 0}</b> runs</span>
           </>
         }
-        right={<button className="btn" onClick={() => { health.reload(); healthSd.reload(); gc.reload(); }} title="새로고침">↻</button>}
+        right={<button className="btn" onClick={() => { health.reload(); comfyuiHealth.reload(); healthSd.reload(); gc.reload(); }} title="새로고침">↻</button>}
         info={{
           title: 'system',
-          text: 'app/SD 헬스체크, 후보 이미지 GC 상태, 수동 트리거. 8초마다 자동 폴링. 조용히 성공하고 에러만 시끄럽게 알립니다.',
+          text: 'app/ComfyUI 헬스체크, 후보 이미지 GC 상태, 수동 트리거. 8초마다 자동 폴링. A1111 backend 는 deprecated.',
         }}
       />
 
@@ -93,15 +102,21 @@ function System() {
         </div>
 
         <div className="panel-card">
-          <h3>Health · SD</h3>
+          <h3>Health · ComfyUI <span className="pill pill-ok" style={{ fontSize: 9, marginLeft: 6 }}>primary</span></h3>
           <div style={{ fontSize: 24, fontWeight: 600, fontFamily: 'var(--font-mono)' }}>
-            <span className={`pill ${sdOk ? 'pill-ok' : 'pill-fail'}`}>
-              {sdOk ? 'OK' : (healthSd.data?.error ? 'ERROR' : 'CHECKING')}
+            <span className={`pill ${comfyuiOk ? 'pill-ok' : 'pill-fail'}`}>
+              {comfyuiOk ? 'OK' : (comfyuiHealth.data?.error ? 'ERROR' : 'CHECKING')}
             </span>
           </div>
           <p style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 8, wordBreak: 'break-word' }}>
-            {healthSd.data?.base_url || healthSd.data?.error || 'A1111 /sdapi/v1/options'}
+            {comfyuiHealth.data?.host || comfyuiHealth.data?.error || 'ComfyUI /system_stats + /queue'}
           </p>
+          {comfyuiOk && comfyuiHealth.data && (
+            <p style={{ color: 'var(--text-faint)', fontSize: 10, marginTop: 4, fontFamily: 'var(--font-mono)' }}>
+              v{comfyuiHealth.data.comfyui_version || '?'} · queue {comfyuiHealth.data.queue?.running ?? 0}/{comfyuiHealth.data.queue?.pending ?? 0}
+              {' · '}wf {comfyuiHealth.data.workflows_available ?? 0}
+            </p>
+          )}
         </div>
 
         <div className="panel-card">
@@ -122,6 +137,23 @@ function System() {
             q {queue.queued_total ?? 0} · run {queue.processing ?? 0} · fail {queue.failed ?? 0}
           </p>
         </div>
+      </div>
+
+      {/* A1111 deprecated backend — 작은 박스로 축소. */}
+      <div className="panel-card" style={{
+        padding: '8px 12px', marginBottom: 16,
+        display: 'flex', alignItems: 'center', gap: 10,
+        background: 'var(--bg-elev-1)',
+        borderColor: 'var(--border-soft)',
+      }}>
+        <span className="pill" style={{ fontSize: 10 }}>deprecated</span>
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>
+          a1111 backend · {a1111Ok ? 'OK' : (a1111Backend?.error || 'DOWN')}
+        </span>
+        <div style={{ flex: 1 }}/>
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)' }}>
+          다음 메이저에서 제거 예정 (PLAN_comfyui_catalog.md §10)
+        </span>
       </div>
 
       <div className="panel-card">

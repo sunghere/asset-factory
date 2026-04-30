@@ -534,8 +534,12 @@ _LOG_RING_MAX = 500
 # 기다리며 무한 로딩되는 사고를 막기 위해 endpoint 레벨에서 짧은 hard cap.
 # - SD_HEALTH_TIMEOUT_SECONDS: /api/health/sd 백엔드별 health_check
 # - SD_CATALOG_TIMEOUT_SECONDS: /api/sd/catalog/{models,loras} list 호출
+# - COMFYUI_HEALTH_TIMEOUT_SECONDS: /api/comfyui/health (system_stats + queue)
 _SD_HEALTH_TIMEOUT_SECONDS = float(os.getenv("SD_HEALTH_TIMEOUT_SECONDS", "5"))
 _SD_CATALOG_TIMEOUT_SECONDS = float(os.getenv("SD_CATALOG_TIMEOUT_SECONDS", "5"))
+_COMFYUI_HEALTH_TIMEOUT_SECONDS = float(os.getenv("COMFYUI_HEALTH_TIMEOUT_SECONDS", "5"))
+_COMFYUI_CATALOG_TIMEOUT_SECONDS = float(os.getenv("COMFYUI_CATALOG_TIMEOUT_SECONDS", "10"))
+_COMFYUI_QUEUE_TIMEOUT_SECONDS = float(os.getenv("COMFYUI_QUEUE_TIMEOUT_SECONDS", "5"))
 _log_ring: list[dict[str, Any]] = []
 
 
@@ -1184,7 +1188,237 @@ async def health_sd() -> dict[str, Any]:
             results[name] = {"ok": False, "error": f"{exc.__class__.__name__}: {exc}"}
     if not any_ok:
         raise HTTPException(status_code=503, detail={"sd_backends": results})
-    return {"backends": results}
+    # PLAN_comfyui_catalog.md Task 4 — A1111 deprecated, ComfyUI primary.
+    # 기존 backends 구조는 호환성 위해 유지. 프론트는 primary 만 보면 충분.
+    return {
+        "backends": results,
+        "primary": "comfyui",
+        "deprecated_backends": ["a1111"],
+    }
+
+
+@app.get("/api/comfyui/health")
+async def comfyui_health() -> dict[str, Any]:
+    """ComfyUI 백엔드 단독 헬스 + 큐 상태.
+
+    `/api/health/sd` 가 a1111+comfyui 합본인 반면, 본 endpoint 는 ComfyUI 만 본다.
+    A1111 deprecated 후 Catalog/System 화면이 1차 데이터 소스로 사용한다.
+
+    실패해도 항상 200 + ``ok=false`` — 프론트가 status code 분기를 안 타고 단일
+    응답으로 판단하도록 한다 (SD health 가 200/503 다 내서 배너 로직이 복잡해진
+    선례를 답습하지 않음).
+
+    ``COMFYUI_HEALTH_TIMEOUT_SECONDS`` (기본 5초) 안에 응답이 없으면 timeout 으로
+    마감한다 — system_stats + queue 두 호출을 합쳐도 수백 ms 안 걸리는 게 정상.
+    """
+    payload: dict[str, Any] = {
+        "ok": False,
+        "host": comfyui_client.base_url,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        async with asyncio.timeout(_COMFYUI_HEALTH_TIMEOUT_SECONDS):
+            stats = await comfyui_client.health_check()
+            queue = await comfyui_client.queue_state()
+    except asyncio.TimeoutError:
+        payload["error"] = (
+            f"timeout: ComfyUI did not respond within "
+            f"{_COMFYUI_HEALTH_TIMEOUT_SECONDS}s"
+        )
+        return payload
+    except Exception as exc:  # noqa: BLE001
+        payload["error"] = f"{exc.__class__.__name__}: {exc}"
+        return payload
+
+    if not isinstance(stats, dict):
+        payload["error"] = f"unexpected /system_stats response type: {type(stats).__name__}"
+        return payload
+    if not isinstance(queue, dict):
+        payload["error"] = f"unexpected /queue response type: {type(queue).__name__}"
+        return payload
+
+    payload["ok"] = True
+    payload["comfyui_version"] = stats.get("comfyui_version")
+    payload["python_version"] = stats.get("python_version")
+    payload["device_count"] = stats.get("device_count")
+    payload["device_names"] = stats.get("device_names", [])
+    payload["queue"] = {
+        "running": len(queue.get("queue_running", []) or []),
+        "pending": len(queue.get("queue_pending", []) or []),
+    }
+    payload["workflows_available"] = len(workflow_registry.available_variants())
+    return payload
+
+
+# ── /api/comfyui/catalog ───────────────────────────────────────────────────
+# PLAN_comfyui_catalog.md §3.1.2.
+#
+# /object_info (≈1.94MB) + WorkflowRegistry cross-ref → Catalog 화면 데이터.
+# 60s in-memory 캐시 (asyncio lock) — ComfyUI 재시작이 잦지 않은 환경에서 충분.
+# 실패해도 항상 200 — `ok=false` + `error` 또는 `stale=true` + 마지막 성공 페이로드.
+
+from lib import comfyui_catalog as _catalog_lib  # noqa: E402
+
+_comfyui_catalog_cache: dict[str, Any] = {
+    "payload": None,        # 마지막 성공 페이로드 (stale fallback 용)
+    "fetched_at": None,     # 캐시 시각 (epoch seconds)
+    "ttl_seconds": float(os.getenv("COMFYUI_CATALOG_TTL_SECONDS", "60")),
+}
+_comfyui_catalog_lock = asyncio.Lock()
+
+
+def _comfyui_catalog_cache_clear() -> None:
+    """테스트/관리용 캐시 클리어."""
+    _comfyui_catalog_cache["payload"] = None
+    _comfyui_catalog_cache["fetched_at"] = None
+
+
+@app.get("/api/comfyui/catalog")
+async def comfyui_catalog_endpoint() -> dict[str, Any]:
+    """ComfyUI 기반 모델 / LoRA / VAE / ControlNet / Workflow 카탈로그.
+
+    응답 schema (PLAN §3.1.2):
+        {
+          fetched_at: ISO8601,
+          stale: bool,
+          checkpoints: [{name, family, used_by_workflows}],
+          loras: [{name, used_by_workflows}],
+          vaes: [...], controlnets: [...], upscalers: [...],
+          workflows: [{id, category, label, variants, uses_models, uses_loras}]
+        }
+
+    실패 시 (캐시 없음): ``{ok: false, error, host, fetched_at}``.
+    실패 시 (캐시 있음): 마지막 성공 페이로드 + ``stale=true``.
+
+    ``COMFYUI_CATALOG_TIMEOUT_SECONDS`` (기본 10초) 안에 ``/object_info`` 가
+    응답해야 한다 — 1.94MB / 200ms 가 정상이지만 LAN 지연을 감안.
+    """
+    import time as _time
+
+    now = _time.time()
+    ttl = float(_comfyui_catalog_cache["ttl_seconds"])
+    cached_at = _comfyui_catalog_cache["fetched_at"]
+    cached_payload = _comfyui_catalog_cache["payload"]
+
+    # 캐시 hit 판단 (lock 밖에서 빠르게)
+    if cached_payload is not None and cached_at is not None and (now - cached_at) < ttl:
+        return cached_payload
+
+    async with _comfyui_catalog_lock:
+        # double-check (다른 코루틴이 채웠을 수 있음)
+        cached_at = _comfyui_catalog_cache["fetched_at"]
+        cached_payload = _comfyui_catalog_cache["payload"]
+        if cached_payload is not None and cached_at is not None and (now - cached_at) < ttl:
+            return cached_payload
+
+        fetched_at_iso = datetime.now(timezone.utc).isoformat()
+        try:
+            async with asyncio.timeout(_COMFYUI_CATALOG_TIMEOUT_SECONDS):
+                object_info = await comfyui_client.object_info()
+        except asyncio.TimeoutError:
+            error = (
+                f"timeout: ComfyUI did not respond within "
+                f"{_COMFYUI_CATALOG_TIMEOUT_SECONDS}s"
+            )
+            if cached_payload is not None:
+                stale_payload = dict(cached_payload)
+                stale_payload["stale"] = True
+                stale_payload["error"] = error
+                return stale_payload
+            return {
+                "ok": False,
+                "error": error,
+                "host": comfyui_client.base_url,
+                "fetched_at": fetched_at_iso,
+            }
+        except Exception as exc:  # noqa: BLE001
+            print(
+                "[comfyui_catalog] unexpected error while fetching object info: "
+                f"{exc.__class__.__name__}: {exc}"
+            )
+            error = "internal error while fetching ComfyUI catalog"
+            if cached_payload is not None:
+                stale_payload = dict(cached_payload)
+                stale_payload["stale"] = True
+                stale_payload["error"] = error
+                return stale_payload
+            return {
+                "ok": False,
+                "error": error,
+                "host": comfyui_client.base_url,
+                "fetched_at": fetched_at_iso,
+            }
+
+        payload = _catalog_lib.build_full_payload(
+            object_info=object_info,
+            registry=workflow_registry,
+            fetched_at=fetched_at_iso,
+            stale=False,
+        )
+        _comfyui_catalog_cache["payload"] = payload
+        _comfyui_catalog_cache["fetched_at"] = _time.time()
+        return payload
+
+
+# ── /api/comfyui/queue ─────────────────────────────────────────────────────
+# PLAN §3.1.3 — System 화면 부가 정보. 5초 timeout, 항상 200.
+
+
+def _normalize_queue_running(raw: Any) -> list[dict[str, Any]]:
+    """ComfyUI ``/queue`` 의 ``queue_running`` 을 정규화.
+
+    ComfyUI 응답 구조: ``[number, prompt_id, prompt_dict, extra_data, outputs]``.
+    프론트가 dict 로 다루기 쉽게 ``{prompt_id, number}`` 형태로 변환.
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for entry in raw:
+        if isinstance(entry, list) and len(entry) >= 2:
+            out.append({"number": entry[0], "prompt_id": str(entry[1])})
+        elif isinstance(entry, dict) and "prompt_id" in entry:
+            out.append({"prompt_id": str(entry["prompt_id"]), "number": entry.get("number")})
+    return out
+
+
+@app.get("/api/comfyui/queue")
+async def comfyui_queue_endpoint() -> dict[str, Any]:
+    """ComfyUI 큐 상태 — running list + pending count.
+
+    응답 schema:
+        {ok: bool, running: [{prompt_id, number}, ...], pending: int, fetched_at, host, error?}
+
+    실패해도 항상 200 (PLAN §3.1.1 정책 준수).
+    """
+    payload: dict[str, Any] = {
+        "ok": False,
+        "running": [],
+        "pending": 0,
+        "host": comfyui_client.base_url,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        async with asyncio.timeout(_COMFYUI_QUEUE_TIMEOUT_SECONDS):
+            queue = await comfyui_client.queue_state()
+    except asyncio.TimeoutError:
+        payload["error"] = (
+            f"timeout: ComfyUI queue did not respond within "
+            f"{_COMFYUI_QUEUE_TIMEOUT_SECONDS}s"
+        )
+        return payload
+    except Exception as exc:  # noqa: BLE001
+        payload["error"] = f"{exc.__class__.__name__}: {exc}"
+        return payload
+
+    if not isinstance(queue, dict):
+        payload["error"] = f"unexpected /queue response type: {type(queue).__name__}"
+        return payload
+
+    payload["ok"] = True
+    payload["running"] = _normalize_queue_running(queue.get("queue_running"))
+    pending = queue.get("queue_pending") or []
+    payload["pending"] = len(pending) if isinstance(pending, list) else 0
+    return payload
 
 
 @app.get("/api/system/gc/status")
@@ -1287,14 +1521,56 @@ async def system_logs_recent(
     return {"count": len(items[-limit:]), "items": list(reversed(items[-limit:]))}
 
 
+# ── A1111 catalog endpoints — deprecated (Task 8) ──────────────────────────
+# 다음 메이저에서 410 Gone 으로 전환. 그 전까지: 응답 헤더 + 본문에 마커, 로그 1회.
+
+import logging as _logging  # noqa: E402
+
+_a1111_deprecation_logger = _logging.getLogger("asset_factory.a1111_deprecated")
+_a1111_deprecation_warned = {"flag": False}
+
+
+def _a1111_deprecation_sunset_date() -> str:
+    """현재 시각 + 90일 (RFC 8594 권장 형식 — 단순 RFC 1123 HTTP-date)."""
+    from email.utils import format_datetime
+    return format_datetime(datetime.now(timezone.utc) + timedelta(days=90))
+
+
+def _mark_a1111_deprecated(response: Response, endpoint_path: str) -> dict[str, str]:
+    """응답 헤더 (Deprecation/Sunset/Link) 추가 + 모듈 레벨 1회 로그.
+
+    헤더 dict 를 반환 — HTTPException 에도 동일 헤더를 실어 503 등 오류 응답에서도
+    deprecation 메타데이터가 클라이언트에 전달되도록 한다.
+    """
+    headers = {
+        "Deprecation": "true",
+        "Sunset": _a1111_deprecation_sunset_date(),
+        "Link": '</api/comfyui/catalog>; rel="successor-version"',
+    }
+    response.headers.update(headers)
+    if not _a1111_deprecation_warned["flag"]:
+        _a1111_deprecation_logger.warning(
+            "A1111 catalog endpoint accessed — deprecated, will be removed in next major. "
+            "Path=%s · Use /api/comfyui/catalog instead.",
+            endpoint_path,
+        )
+        _a1111_deprecation_warned["flag"] = True
+    return headers
+
+
 @app.get("/api/sd/catalog/models")
-async def sd_catalog_models() -> dict[str, Any]:
+async def sd_catalog_models(response: Response) -> dict[str, Any]:
     """A1111 모델 목록 + ``config/sd_catalog.yml`` 메타데이터 병합 반환.
+
+    .. deprecated::
+        ComfyUI primary 전환 후 deprecated. ``/api/comfyui/catalog`` 사용 권장.
+        다음 메이저(v0.4.0)에서 410 Gone 전환 예정. PLAN_comfyui_catalog.md §4 Task 8.
 
     SD 서버 미연결 시 503, YAML 누락 시 메타데이터 비어있는 채로 200을 반환한다.
     ``SD_CATALOG_TIMEOUT_SECONDS`` (기본 5초) 안에 응답하지 않으면 timeout 으로
     503 — sd_client 자체 retries(45s×3=141s) 를 기다리지 않아 화면이 빠르게 실패.
     """
+    dep_headers = _mark_a1111_deprecated(response, "/api/sd/catalog/models")
     try:
         async with asyncio.timeout(_SD_CATALOG_TIMEOUT_SECONDS):
             sd_models = await sd_client.list_models()
@@ -1302,9 +1578,14 @@ async def sd_catalog_models() -> dict[str, Any]:
         raise HTTPException(
             status_code=503,
             detail=f"SD 모델 목록 조회 timeout ({_SD_CATALOG_TIMEOUT_SECONDS}s)",
+            headers=dep_headers,
         ) from exc
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=503, detail=f"SD 모델 목록 조회 실패: {exc}") from exc
+        raise HTTPException(
+            status_code=503,
+            detail=f"SD 모델 목록 조회 실패: {exc}",
+            headers=dep_headers,
+        ) from exc
     catalog = load_catalog_yaml(CATALOG_YAML_PATH)
     merged = merge_models(sd_models, catalog)
     return {
@@ -1312,15 +1593,20 @@ async def sd_catalog_models() -> dict[str, Any]:
         "items": merged,
         "catalog_path": str(CATALOG_YAML_PATH),
         "catalog_present": CATALOG_YAML_PATH.exists(),
+        "deprecated": True,
     }
 
 
 @app.get("/api/sd/catalog/loras")
-async def sd_catalog_loras() -> dict[str, Any]:
+async def sd_catalog_loras(response: Response) -> dict[str, Any]:
     """A1111 LoRA 목록 + ``config/sd_catalog.yml`` 메타데이터 병합 반환.
+
+    .. deprecated::
+        ``/api/comfyui/catalog`` 사용 권장. 다음 메이저에서 제거.
 
     SD 서버 미연결/timeout 시 503 (``SD_CATALOG_TIMEOUT_SECONDS`` 기준).
     """
+    dep_headers = _mark_a1111_deprecated(response, "/api/sd/catalog/loras")
     try:
         async with asyncio.timeout(_SD_CATALOG_TIMEOUT_SECONDS):
             sd_loras = await sd_client.list_loras()
@@ -1328,9 +1614,14 @@ async def sd_catalog_loras() -> dict[str, Any]:
         raise HTTPException(
             status_code=503,
             detail=f"SD LoRA 목록 조회 timeout ({_SD_CATALOG_TIMEOUT_SECONDS}s)",
+            headers=dep_headers,
         ) from exc
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=503, detail=f"SD LoRA 목록 조회 실패: {exc}") from exc
+        raise HTTPException(
+            status_code=503,
+            detail=f"SD LoRA 목록 조회 실패: {exc}",
+            headers=dep_headers,
+        ) from exc
     catalog = load_catalog_yaml(CATALOG_YAML_PATH)
     merged = merge_loras(sd_loras, catalog)
     return {
@@ -1338,6 +1629,7 @@ async def sd_catalog_loras() -> dict[str, Any]:
         "items": merged,
         "catalog_path": str(CATALOG_YAML_PATH),
         "catalog_present": CATALOG_YAML_PATH.exists(),
+        "deprecated": True,
     }
 
 

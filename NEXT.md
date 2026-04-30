@@ -2,118 +2,99 @@
 
 > Transient 문서. 작성/삭제 규칙은 [`CLAUDE.md`](./CLAUDE.md#세션-핸드오프-nextmd) 참조.
 
-_작성: 2026-04-27 · 세션 종료 시점_
+_작성: 2026-04-29 · 세션 종료 시점_
 
 ---
 
 ## 최근작업
 
-### `feat/skill-p0-gaps` 브랜치 — `docs/TODOS_for_SKILL.md` P0 3개 완료 (2026-04-27)
+### `feat/comfyui-catalog-system` 브랜치 — PLAN_comfyui_catalog Task 2-9 일괄 (2026-04-29)
 
-세 커밋 독립 (각각 별 PR 가능), 회귀 `pytest -q --ignore=tests/test_generator_comfyui.py`
-263 → 294 통과. P0 가 머지되면 `~/workspace/sincerity-skills/asset-factory-api/SKILL.md`
-한 장으로 asset-relay-agent 등이 별도 변경 없이 모든 에셋 파이프라인을 실행 가능.
+선행 PR: `#46` (feat/comfyui-health-endpoint, Task 1) base.
+본 PR: ComfyUI 가 1차 데이터 소스가 되도록 백엔드/프론트 일괄 전환.
+A1111 backend 는 deprecated 표시 (제거는 다음 메이저).
 
-- **`c371620`** — P0-2: `input_labels` 자동 추론 + catalog 노출.
-  - `workflow_patcher.find_load_image_label()` public helper.
-  - `workflow_registry.InputLabelSpec`, `infer_input_labels()`,
-    `VariantSpec.input_labels`, `_build_input_labels()` 머지 로직.
-  - 워크플로우 JSON 의 LoadImage 노드를 `_LOAD_IMAGE_RULES` 와 매칭해 자동 추출.
-    YAML `input_labels:` 섹션 있으면 description/required/default override —
-    추론에 없는 라벨 선언 시 startup 에러 (오타 방지).
-  - 실 registry 확인: sprite/pixel_alpha/hires/rembg_alpha/stage1/full/v37_*
-    → `pose_image`, sprite/pose_extract → `source_image`. illustration/icon/
-    pixel_bg 는 LoadImage 없어 빈 배열.
+**커밋 stack** (Task 1 = PR #46 별도):
 
-- **`550b7c5`** — P0-1: bypass(승인 우회) 모드.
-  - 스키마: `assets`/`asset_candidates`/`generation_tasks` 에 `approval_mode`
-    TEXT NOT NULL DEFAULT 'manual' 컬럼 + ALTER 마이그레이션
-    (`models.py:_migrate_legacy_schema`). `idx_assets_approval` 인덱스.
-  - API: `WorkflowGenerateRequest.approval_mode: Literal['manual','bypass']`.
-    `list_project_assets`/`list_assets` 에 `include_bypassed=False` 기본.
-    `list_batch_candidates` 항상 bypass 제외 (cherry-pick 큐 오염 방지).
-    `export_assets`/`list_approved_assets` bypass 제외 + 응답에
-    `excluded_bypassed`. `/api/health` 에 `bypass_retention_days`.
-  - GC: `candidate_gc.run_gc_candidates(bypass_max_age_seconds)` +
-    `AF_BYPASS_RETENTION_DAYS` env (default 7). bypass 후보만 짧게 별도 청소,
-    bypass 로 promote 된 asset 은 GC 대상 아님 (chain 안전성).
+- **Task 2** — `/api/comfyui/catalog`
+  - `lib/comfyui_catalog.py` 순수 변환: `build_catalog`, `index_workflows`,
+    `build_full_payload` + family 추론 (sdxl/pony/unknown).
+  - `ComfyUIClient.object_info()` 추가 (≈1.94MB 응답 dict 검증).
+  - 60s in-memory 캐시 (`COMFYUI_CATALOG_TTL_SECONDS`) + asyncio.Lock
+    (double-check). timeout/예외 시: 캐시 있으면 stale=true + error,
+    없으면 ok=false. 항상 200.
+  - 단위 테스트 6 + endpoint 통합 3 (fixture: `tests/fixtures/comfyui_object_info.json` 6.5KB).
 
-- **`192d45a`** — P0-3: `af` CLI 부트스트랩.
-  - typer 기반 `cli/` 패키지 (`cli/main.py`, `cli/http.py`,
-    `cli/commands/workflow.py`). `python -m cli` 또는 `scripts/af` 셔임.
-  - `af workflow catalog | describe | upload | gen`. `--input LABEL=VALUE`:
-    `@<path>` → 자동 upload, `asset:<id>`/UUID → from-asset upload, plain →
-    그대로. catalog 의 `input_labels` 와 대조해 unknown 라벨 시 가능 라벨
-    알려주며 친절 에러. `--bypass-approval` → request body 의
-    `approval_mode='bypass'`.
-  - 환경변수: `AF_API_KEY` > `API_KEY` 폴백, `AF_BASE_URL` (default
-    `http://localhost:8000`).
-  - requirements.txt: `typer==0.25.0`, `respx==0.23.1` 추가.
+- **Task 3** — `/api/comfyui/queue` (5s timeout, 항상 200, 정규화된 running list).
+
+- **Task 4** — `/api/health/sd` 응답에 `primary='comfyui'` +
+  `deprecated_backends=['a1111']` 두 필드 추가 (기존 backends 구조 유지).
+
+- **Task 5** — `static/app/js/api.jsx` 에 `comfyuiHealth/Catalog/Queue` 추가.
+  `healthSd/models/loras` 는 `@deprecated` JSDoc 마킹.
+
+- **Task 6** — `Catalog.jsx` 재작성 (workflows/Checkpoints/LoRAs/VAEs/ControlNets/
+  Upscalers 6 섹션 stack, family pill, used_by_workflows). 데이터 소스 1회
+  `api.comfyuiCatalog()` + DB usage 통계 (model/lora 한정).
+
+- **Task 7** — `System.jsx` Health · ComfyUI primary 카드, A1111 deprecated 박스로 축소.
+  `hooks.jsx` PersistentBanners 가 `comfyuiHealth.ok` 만 평가 (a1111 무시).
+  `Dashboard.jsx` SdHealthCard 가 ComfyUI 정보 (workflows_available / queue / device).
+
+- **Task 8** — `/api/sd/catalog/{models,loras}` deprecation:
+  body `deprecated:true`, headers `Deprecation: true` + `Sunset: <today+90d>` +
+  `Link: </api/comfyui/catalog>; rel="successor-version"`. 모듈 레벨 1회 logger.warning.
+
+- **Task 9** — Docs (본 항목, CLAUDE.md catalog/system 섹션, DESIGN.md a1111 deprecated 마킹,
+  `~/workspace/sincerity-skills/asset-factory-api/SKILL.md` 별도 PR).
+
+**검증** (commit 시점):
+
+```
+pytest -q tests/test_workflow_endpoints.py tests/test_comfyui_catalog.py  → 65 passed
+pytest -q (전체)                                                            → 회귀 0
+```
 
 ---
 
 ## 핸드오프
 
-### PR 분리 + 머지 결정
+### sincerity-skills `asset-factory-api` 스킬 갱신 (별도 PR)
 
-세 커밋 모두 독립이라 다음 중 택일:
+본 PR 머지 후 별도로 `~/workspace/sincerity-skills/asset-factory-api/SKILL.md` 에:
 
-1. **한 PR (`feat/skill-p0-gaps` 그대로)** — 빠르지만 리뷰가 무거움.
-2. **3 PR (P0-2 → P0-1 → P0-3 순)** — `docs/TODOS_for_SKILL.md` 권장 형태.
-   P0-2 가 가장 작아 워밍업.
+- `/api/comfyui/health`, `/api/comfyui/catalog`, `/api/comfyui/queue` 사용 예시 추가.
+- 기존 `/api/sd/catalog/{models,loras}` 는 "deprecated, sunset YYYY-MM-DD" 표기.
+- `api.comfyuiCatalog()` 응답 schema 한 블록 (frontend 통합 가이드).
 
-```bash
-# 옵션 2 의 첫 PR (P0-2 만):
-git checkout main
-git checkout -b feat/skill-p0-2-input-labels
-git cherry-pick c371620
-git push -u origin feat/skill-p0-2-input-labels
-gh pr create --title "feat(registry): catalog 응답에 input_labels 자동 추론 노출 (P0-2)"
-```
+PR 분리 사유: skill 은 별도 repo, 본 asset-factory PR 의 머지 가시성을 흐리지 않게.
 
-### 통합 smoke (사용자 외부, ~10min)
-
-실 ComfyUI 로 end-to-end (현재 머지 안 됨 — 브랜치 위에서):
+### 통합 smoke (사용자 외부, ~5min)
 
 ```bash
-af workflow catalog | jq '.categories.sprite.variants.pixel_alpha.input_labels'
-af workflow upload ./pose.png   # → 이름 한 줄
-af workflow gen sprite/pixel_alpha tmp_test demo_001 "test prompt" \
-    --input pose_image=@./pose.png --bypass-approval --candidates 2 --wait
-af list tmp_test                          # bypass 안 보임 (OK)
-af list tmp_test --include-bypassed       # 보임
-af export tmp_test --manifest             # excluded_bypassed > 0 확인
-curl -s localhost:8000/api/health | jq .bypass_retention_days  # 7
+# 백엔드
+curl -s localhost:8000/api/comfyui/health | jq .ok          # true
+curl -s localhost:8000/api/comfyui/catalog | jq '{
+  checkpoints: (.checkpoints | length),
+  loras: (.loras | length),
+  vaes: (.vaes | length),
+  controlnets: (.controlnets | length),
+  upscalers: (.upscalers | length),
+  workflows: (.workflows | length),
+  fetched_at, stale
+}'                                                          # checkpoints>=1, workflows>=1
+curl -s localhost:8000/api/comfyui/queue | jq .ok           # true
+curl -s localhost:8000/api/health/sd | jq .primary          # "comfyui"
+curl -I localhost:8000/api/sd/catalog/models                # Deprecation: true 헤더
+
+# 프론트 (브라우저)
+# /app/catalog       → 6 섹션 (workflows/checkpoints/loras/vaes/controlnets/upscalers) 5초 안 렌더
+# /app/system        → Health · ComfyUI [primary] 카드 + 작은 a1111 deprecated 박스
+# /app/dashboard     → SdHealthCard 가 ComfyUI 정보 표시
+# ComfyUI 죽이고 새로고침 → 글로벌 배너 "ComfyUI 오프라인" 표시
 ```
-
-`af list`/`af get`/`af export` 는 본 PR 범위 밖 — REST 직접 호출 또는 Web UI
-사용. 추가가 필요하면 별도 PR.
-
-### `~/workspace/sincerity-skills/asset-factory-api/SKILL.md` 갱신
-
-P0 머지 후 SKILL.md 를 `docs/TODOS_for_SKILL.md` "최종 호출 인터페이스 (요약)"
-섹션 그대로 풀어쓰면 됨. 별도 코드 변경 불필요.
-
-### 미반영 P1/P2 (별도 트래커 유지)
-
-[`docs/TODOS_for_SKILL.md`](./docs/TODOS_for_SKILL.md) §P1/§P2 그대로. 특히:
-
-- **P1-5** `/api/workflows/generate` 응답 정형화 (`run_id`, `expected_outputs`,
-  `poll_url`) — `--wait` 의 폴링 의미가 명확해짐.
-- **P1-6** `from-asset` 엔드포인트에 `run_id + output_label` 추가. CLI 의
-  `--from-run <run_id> --output <label>` 시그니처는 P0-3 에서 예약 — 서버만
-  채우면 동작.
-- **P1-4** preset 이 catalog 에서 이미 resolve 된 형태로 노출되는데, 변형별
-  어떤 preset 이 적용됐는지 `recommended_negative_preset_name` 메타를 별도로
-  노출하면 사용자가 알기 쉬움.
-- **P2-9** `dry_run=true` — `workflow_patcher.PatchReport` 그대로 반환.
-- **워크플로우 이슈** (사용자 통합 smoke 에서 발견, 본 PR 범위 외): sprite/
-  pixel_alpha 출력이 픽셀화 안 됨 (`palette: 4864색`, primary 가 픽셀화 전
-  단계인 듯). `validation_status: fail`. 워크플로우 노드 그래프의 출력 라벨
-  매핑 또는 Pixelize/Quantize 노드 결선 검토 필요.
 
 ### 환경 이슈
 
-`tests/test_generator_comfyui.py` 는 `aioresponses` 미설치로 collect 에러 —
-본 세션과 무관하게 기존부터 있던 환경 문제. `.venv/bin/pip install aioresponses`
-또는 `requirements.txt` 의 `aioresponses==0.7.8` 를 통해 설치.
+- `tests/test_generator_comfyui.py` 는 `aioresponses` 미설치로 collect 에러 —
+  기존 환경 문제, 본 PR 무관. `.venv/bin/pip install aioresponses==0.7.8`.
