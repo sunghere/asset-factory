@@ -304,6 +304,21 @@ categories:
           height: 1024
           negative_prompt: ${preset:NEG_ILLUSTRATION}
 
+      hyphoria_single_alpha:
+        description: "Hyphoria — single object + alpha (warm-paper / hero illustration)"
+        file: illustration/B4_Hyphoria_V36_api_single_alpha.json
+        outputs:
+          - { node_title: "Save Stage1", label: stage1 }
+          - { node_title: "Save Alpha",  label: alpha, primary: true }
+        defaults:
+          steps: 30
+          cfg: 6.5
+          sampler: dpmpp_2m
+          scheduler: karras
+          width: 1024
+          height: 1024
+          negative_prompt: ${preset:NEG_ILLUSTRATION}
+
       anything_hires:
         description: "AnythingXL — 범용"
         file: illustration/B5_AnythingXL_HiRes_V36_api_hires.json

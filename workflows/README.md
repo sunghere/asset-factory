@@ -187,6 +187,24 @@ curl -X POST http://localhost:8000/api/workflows/generate \
        "seed": 200,
        "candidates_total": 1
      }'
+
+# illustration/hyphoria_single_alpha → warm-paper hero illustration + alpha
+# (예: timecapsule 시리즈, wax seal 등 painterly hero 자산)
+curl -X POST http://localhost:8000/api/workflows/generate \
+     -H "X-API-Key: $AF_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "workflow_category": "illustration",
+       "workflow_variant": "hyphoria_single_alpha",
+       "project": "myproj",
+       "asset_key": "timecapsule_seal_stamp_rose",
+       "category": "illustration",
+       "prompt": "wax seal stamp, deep rose, embossed flower motif",
+       "seed": 300,
+       "candidates_total": 1
+     }'
+# → primary 출력은 alpha (Save Alpha, WAS rembg foreground extraction).
+# Stage1 raw 도 동일 호출에서 함께 저장.
 ```
 
 ### 5. spec 추가/변경하고 싶을 때
