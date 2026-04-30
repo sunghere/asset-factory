@@ -263,6 +263,25 @@ def _validate_comfy_upload_response(result: object) -> dict[str, str]:
     return result
 
 
+def _read_max_colors(meta: dict[str, Any], default: int = 32) -> int | None:
+    """metadata dict 에서 max_colors 를 읽는다.
+    key 없음 → default(레거시 호환), null → None(제한 없음), 정수 → int 변환."""
+    if "max_colors" not in meta:
+        return default
+    val = meta["max_colors"]
+    return None if val is None else int(val)
+
+
+def _resolve_max_colors(workflow_category: str, caller_override: int | None) -> int | None:
+    """workflow_category 기반 max_colors 기본값 분기.
+    illustration/* → None(팔레트 무제한), 그 외 → 32."""
+    if caller_override is not None:
+        return caller_override
+    if workflow_category.startswith("illustration"):
+        return None
+    return 32
+
+
 def _approved_dir(project: str) -> Path:
     """승격된 메인 이미지가 들어가는 디렉토리.
 
@@ -416,7 +435,7 @@ class WorkflowGenerateRequest(BaseModel):
     candidates_total: int = Field(default=1, ge=1, le=16)
     workflow_params: dict[str, Any] = Field(default_factory=dict)
     expected_size: int | None = None
-    max_colors: int = Field(default=32, ge=1, le=256)
+    max_colors: int | None = None  # None → workflow_category 기반 자동 분기 (_resolve_max_colors)
     max_retries: int = Field(default=3, ge=0, le=10)
     # Bypass 모드 — 사람 cherry-pick 큐 우회. 'manual' (default) 또는 'bypass'.
     # bypass 후보는 cherry-pick UI 에 안 뜨고, export manifest 에서도 제외된다.
@@ -858,7 +877,7 @@ async def handle_task(task: dict[str, Any]) -> None:
         validation = validate_asset(
             image_path=output_path,
             expected_size=task.get("expected_size"),
-            max_colors=int(task.get("max_colors", 32)),
+            max_colors=_read_max_colors(task),
         )
         metadata_json = json.dumps(
             {
@@ -869,7 +888,7 @@ async def handle_task(task: dict[str, Any]) -> None:
                 "cfg": float(task.get("cfg", 7.0)),
                 "sampler": task.get("sampler") or "DPM++ 2M",
                 "negative_prompt": task.get("negative_prompt"),
-                "max_colors": int(task.get("max_colors", 32)),
+                "max_colors": _read_max_colors(task),
                 "max_retries": int(task.get("max_retries", 3)),
                 "expected_size": task.get("expected_size"),
                 "backend": outcome.backend,
@@ -1941,7 +1960,7 @@ async def workflows_generate(request: WorkflowGenerateRequest) -> dict[str, Any]
                 "cfg": cfg_value,
                 "sampler": sampler_value,
                 "expected_size": request.expected_size,
-                "max_colors": request.max_colors,
+                "max_colors": _resolve_max_colors(request.workflow_category, request.max_colors),
                 "max_retries": request.max_retries,
                 "candidate_slot": slot_index if candidates_total > 1 else None,
                 "candidates_total": candidates_total,
@@ -2485,7 +2504,7 @@ async def approve_from_candidate(body: ApproveFromCandidateRequest) -> dict[str,
     validation = validate_asset(
         image_path=dest,
         expected_size=meta.get("expected_size"),
-        max_colors=int(meta.get("max_colors", 32)),
+        max_colors=_read_max_colors(meta),
     )
 
     metadata_out = candidate.get("metadata_json") or json.dumps(meta, ensure_ascii=False)
@@ -2840,7 +2859,7 @@ async def select_asset_candidate(asset_id: str, body: SelectCandidateRequest) ->
             meta = json.loads(pick["metadata_json"])
         except (TypeError, json.JSONDecodeError):
             meta = {}
-    max_colors = int(meta.get("max_colors", 32))
+    max_colors = _read_max_colors(meta)
     expected = meta.get("expected_size")
     if expected is None:
         expected = asset.get("width")
@@ -2917,7 +2936,7 @@ async def restore_asset_history(asset_id: str, body: RestoreHistoryRequest) -> d
             meta = json.loads(target["metadata_json"])
         except (TypeError, json.JSONDecodeError):
             meta = {}
-    max_colors = int(meta.get("max_colors", 32))
+    max_colors = _read_max_colors(meta)
     expected = meta.get("expected_size")
     if expected is None:
         expected = target.get("width") or asset.get("width")
@@ -3003,7 +3022,7 @@ async def regenerate_asset(asset_id: str) -> dict[str, str]:
     cfg = float(metadata.get("cfg", 7.0))
     sampler = str(metadata.get("sampler", "DPM++ 2M"))
     negative_prompt = metadata.get("negative_prompt")
-    max_colors = int(metadata.get("max_colors", 32))
+    max_colors = _read_max_colors(metadata)
     max_retries = int(metadata.get("max_retries", 3))
     expected_size = metadata.get("expected_size")
     if expected_size is None:
@@ -3154,7 +3173,7 @@ async def batch_regenerate_failed(
         cfg = float(metadata.get("cfg", 7.0))
         sampler = str(metadata.get("sampler", "DPM++ 2M"))
         negative_prompt = metadata.get("negative_prompt")
-        max_colors = int(metadata.get("max_colors", 32))
+        max_colors = _read_max_colors(metadata)
         max_retries = int(metadata.get("max_retries", 3))
         expected_size = metadata.get("expected_size")
         if expected_size is None:

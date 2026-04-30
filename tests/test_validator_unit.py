@@ -38,6 +38,21 @@ def test_validate_asset_reports_size_palette_and_format_failures(tmp_path: Path)
     assert "포맷 오류" in result.message
 
 
+def test_validate_asset_skips_palette_check_when_max_colors_none(tmp_path: Path) -> None:
+    """max_colors=None 이면 팔레트 초과 여부 무관하게 검증 통과."""
+    path = tmp_path / "rich.png"
+    img = Image.new("RGB", (4, 4))
+    for x in range(4):
+        for y in range(4):
+            img.putpixel((x, y), (x * 64, y * 64, (x + y) * 32))
+    img.save(path, format="PNG")
+
+    result = validate_asset(path, expected_size=None, max_colors=None)
+
+    assert result.passed is True
+    assert "팔레트" not in result.message
+
+
 class _MockImageWithExhaustedPalette:
     def convert(self, _mode: str) -> _MockImageWithExhaustedPalette:
         return self

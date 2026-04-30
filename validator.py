@@ -34,7 +34,7 @@ def _count_colors(image: Image.Image) -> int:
 def validate_asset(
     image_path: Path,
     expected_size: int | None = None,
-    max_colors: int = 32,
+    max_colors: int | None = 32,
 ) -> ValidationResult:
     """이미지를 메타데이터 기반으로 검증한다."""
     with Image.open(image_path) as image:
@@ -49,7 +49,7 @@ def validate_asset(
     if expected_size is not None and (width != expected_size or height != expected_size):
         passed = False
         messages.append(f"크기 불일치: {width}x{height} (기대값 {expected_size}x{expected_size})")
-    if color_count > max_colors:
+    if max_colors is not None and color_count > max_colors:
         passed = False
         messages.append(f"팔레트 초과: {color_count}색 (최대 {max_colors}색)")
     if image_format.upper() != "PNG":
