@@ -109,7 +109,7 @@
     "inputs": {
       "mode": "foreground",
       "threshold": 245,
-      "tolerance": 5,
+      "threshold_tolerance": 5,
       "images": [
         "7",
         0
