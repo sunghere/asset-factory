@@ -1,7 +1,9 @@
 # icon/flat — App/game UI 아이콘 (flat / vector 풍, alpha 추출).
 #
 # 워크플로우: D1_AppIcon_V36_api_default.json. animagineXL40Opt_clear ckpt +
-# WAS rembg 노드 (mode=foreground 로 흰배경을 alpha 처리 — HANDOFF §5.1).
+# WAS Image Rembg (isnet-general-use) 노드로 alpha 추출 (GGU-615 fix: 이전
+# threshold-based Color BG Remove 는 off-white/cream 배경에서 투명비율 0~2%
+# 문제 → hyphoria_single_alpha 와 동일 ML 경로로 교체).
 # 한 호출에 raw + alpha 두 출력.
 schema_version: 1
 

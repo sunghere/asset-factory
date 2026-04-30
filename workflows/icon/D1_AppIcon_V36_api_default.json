@@ -105,18 +105,24 @@
     }
   },
   "9": {
-    "class_type": "Image Remove Background (Alpha)",
+    "class_type": "Image Rembg (Remove Background)",
     "inputs": {
-      "mode": "foreground",
-      "threshold": 245,
-      "threshold_tolerance": 5,
       "images": [
         "7",
         0
-      ]
+      ],
+      "transparency": true,
+      "model": "isnet-general-use",
+      "post_processing": false,
+      "only_mask": false,
+      "alpha_matting": false,
+      "alpha_matting_foreground_threshold": 240,
+      "alpha_matting_background_threshold": 10,
+      "alpha_matting_erode_size": 10,
+      "background_color": "none"
     },
     "_meta": {
-      "title": "Color BG Remove (white→alpha)"
+      "title": "Rembg BG Remove (isnet-general-use)"
     }
   },
   "10": {

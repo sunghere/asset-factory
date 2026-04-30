@@ -265,20 +265,25 @@ def _validate_comfy_upload_response(result: object) -> dict[str, str]:
 
 def _read_max_colors(meta: dict[str, Any], default: int = 32) -> int | None:
     """metadata dict 에서 max_colors 를 읽는다.
-    key 없음 → default(레거시 호환), null → None(제한 없음), 정수 → int 변환."""
+    key 없음 → default(레거시 호환), null 또는 0 → None(제한 없음), 정수 → int 변환.
+    0 은 DB NOT NULL 제약 때문에 sentinel 로 사용 (illustration/icon 무제한)."""
     if "max_colors" not in meta:
         return default
     val = meta["max_colors"]
-    return None if val is None else int(val)
+    if val is None or int(val) == 0:
+        return None
+    return int(val)
 
 
-def _resolve_max_colors(workflow_category: str, caller_override: int | None) -> int | None:
+def _resolve_max_colors(workflow_category: str, caller_override: int | None) -> int:
     """workflow_category 기반 max_colors 기본값 분기.
-    illustration/* → None(팔레트 무제한), 그 외 → 32."""
+    illustration/* / icon/* → 0(sentinel=무제한), 그 외 → 32.
+    0 을 반환하는 이유: generation_tasks.max_colors 가 NOT NULL 이어서 None 저장 불가.
+    _read_max_colors 가 0 을 읽어 None 으로 변환한다."""
     if caller_override is not None:
         return caller_override
-    if workflow_category.startswith("illustration"):
-        return None
+    if workflow_category.startswith(("illustration", "icon")):
+        return 0
     return 32
 
 
