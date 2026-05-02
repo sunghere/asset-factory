@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import json
 import random
 import re
 import shutil
 import os
 import uuid
+import httpx
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -287,6 +289,31 @@ def _resolve_max_colors(workflow_category: str, caller_override: int | None) -> 
     return 32
 
 
+def _resolve_validation_args(
+    *,
+    workflow_category: str | None,
+    workflow_variant: str | None,
+    output_label: str | None,
+    fallback_max_colors: int | None = 32,
+    fallback_require_alpha: bool = False,
+) -> tuple[int | None, bool]:
+    """registry 정책으로 (max_colors, require_alpha) 를 결정한다.
+
+    workflow_category/variant 미지정이면 fallback 값을 그대로 사용.
+    registry 에 해당 변형이 없으면 fallback 으로 폴백 (unknown variant 방어).
+    """
+    if not (workflow_category and workflow_variant):
+        return fallback_max_colors, fallback_require_alpha
+    try:
+        from workflow_registry import WorkflowRegistryError, get_default_registry
+        registry = get_default_registry()
+        variant = registry.variant(workflow_category, workflow_variant)
+    except Exception:  # noqa: BLE001
+        return fallback_max_colors, fallback_require_alpha
+    rule = variant.validation.for_output(output_label or "")
+    return rule.max_colors, rule.require_alpha
+
+
 def _approved_dir(project: str) -> Path:
     """승격된 메인 이미지가 들어가는 디렉토리.
 
@@ -516,6 +543,7 @@ backends = BackendRegistry(
 api_key = os.getenv("API_KEY")
 worker_task: asyncio.Task[Any] | None = None
 gc_worker_task: asyncio.Task[Any] | None = None
+monitoring_task: asyncio.Task[Any] | None = None
 
 # System.jsx Worker 블록용 런타임 상태. 프로세스 수명 내에서만 의미 있음.
 _worker_state: dict[str, Any] = {
@@ -564,7 +592,18 @@ _SD_CATALOG_TIMEOUT_SECONDS = float(os.getenv("SD_CATALOG_TIMEOUT_SECONDS", "5")
 _COMFYUI_HEALTH_TIMEOUT_SECONDS = float(os.getenv("COMFYUI_HEALTH_TIMEOUT_SECONDS", "5"))
 _COMFYUI_CATALOG_TIMEOUT_SECONDS = float(os.getenv("COMFYUI_CATALOG_TIMEOUT_SECONDS", "10"))
 _COMFYUI_QUEUE_TIMEOUT_SECONDS = float(os.getenv("COMFYUI_QUEUE_TIMEOUT_SECONDS", "5"))
+_QUEUE_DEPTH_ALERT_THRESHOLD = int(os.getenv("QUEUE_DEPTH_ALERT_THRESHOLD", "10"))
+_COMPLETION_TIMEOUT_SECONDS = int(os.getenv("COMPLETION_TIMEOUT_SECONDS", "600"))
+_ALERT_POLL_INTERVAL_SECONDS = int(os.getenv("ALERT_POLL_INTERVAL_SECONDS", "30"))
+_PC_API_URL = os.getenv("PAPERCLIP_API_URL")
+_PC_API_KEY = os.getenv("PAPERCLIP_API_KEY")
+_PC_COMPANY_ID = os.getenv("PAPERCLIP_COMPANY_ID")
+_PC_ASSIGNEE_AGENT_ID = os.getenv(
+    "PAPERCLIP_ALERT_ASSIGNEE_AGENT_ID",
+    "e59a0717-192a-44a3-bf5f-c46ef6b2c291",
+)
 _log_ring: list[dict[str, Any]] = []
+_alert_state: dict[str, Any] = {"last_alert_at": None, "last_alert_issue_id": None}
 
 
 def _push_log(level: str, message: str, *, context: dict[str, Any] | None = None) -> None:
@@ -879,10 +918,19 @@ async def handle_task(task: dict[str, Any]) -> None:
             for label, p in saved_paths.items()
             if label != primary_label
         }
+        _wf_category = task.get("workflow_category")
+        _wf_variant = task.get("workflow_variant")
+        _val_max_colors, _val_require_alpha = _resolve_validation_args(
+            workflow_category=_wf_category,
+            workflow_variant=_wf_variant,
+            output_label=primary_label,
+            fallback_max_colors=_read_max_colors(task),
+        )
         validation = validate_asset(
             image_path=output_path,
             expected_size=task.get("expected_size"),
-            max_colors=_read_max_colors(task),
+            max_colors=_val_max_colors,
+            require_alpha=_val_require_alpha,
         )
         metadata_json = json.dumps(
             {
@@ -896,6 +944,9 @@ async def handle_task(task: dict[str, Any]) -> None:
                 "max_colors": _read_max_colors(task),
                 "max_retries": int(task.get("max_retries", 3)),
                 "expected_size": task.get("expected_size"),
+                "workflow_category": _wf_category,
+                "workflow_variant": _wf_variant,
+                "primary_output_label": primary_label,
                 "backend": outcome.backend,
                 # ComfyUI 변형의 경우 stage1/hires/rembg_alpha 등 부가 출력 파일 경로
                 "extra_outputs": extra_paths,
@@ -1067,10 +1118,116 @@ async def _gc_loop() -> None:
         await asyncio.sleep(max(60, interval))
 
 
+async def _check_comfyui_ok() -> bool:
+    """ComfyUI 연결 여부를 타임아웃 포함 점검."""
+    try:
+        async with asyncio.timeout(_COMFYUI_HEALTH_TIMEOUT_SECONDS):
+            await comfyui_client.health_check()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def _create_or_update_incident_issue(title: str, body: str) -> None:
+    """Paperclip 이슈를 생성하거나, 24시간 내 동일 알람은 코멘트로 누적."""
+    if not (_PC_API_URL and _PC_API_KEY and _PC_COMPANY_ID):
+        logging.getLogger(__name__).warning(
+            "Paperclip alert env vars not set — skipping issue creation"
+        )
+        return
+
+    headers = {"Authorization": f"Bearer {_PC_API_KEY}", "Content-Type": "application/json"}
+    now = datetime.now(timezone.utc)
+
+    last_issue_id = _alert_state.get("last_alert_issue_id")
+    last_alert_at = _alert_state.get("last_alert_at")
+    within_24h = (
+        isinstance(last_alert_at, str)
+        and (now - datetime.fromisoformat(last_alert_at)) < timedelta(hours=24)
+    )
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        if within_24h and last_issue_id:
+            resp = await client.get(
+                f"{_PC_API_URL}/api/issues/{last_issue_id}",
+                headers=headers,
+            )
+            if resp.status_code == 200:
+                issue = resp.json()
+                if issue.get("status") not in ("done", "cancelled"):
+                    await client.post(
+                        f"{_PC_API_URL}/api/issues/{last_issue_id}/comments",
+                        headers=headers,
+                        json={"comment": body},
+                    )
+                    return
+
+        resp = await client.post(
+            f"{_PC_API_URL}/api/companies/{_PC_COMPANY_ID}/issues",
+            headers=headers,
+            json={
+                "title": title,
+                "description": body,
+                "status": "todo",
+                "priority": "high",
+                "assigneeAgentId": _PC_ASSIGNEE_AGENT_ID,
+            },
+        )
+        if resp.status_code in (200, 201):
+            new_issue = resp.json()
+            _alert_state["last_alert_issue_id"] = new_issue.get("id")
+            _alert_state["last_alert_at"] = now.isoformat()
+
+
+async def _fire_alert(reason: str, task: dict[str, Any] | None = None, *, queue_depth: int = 0) -> None:
+    if reason == "stuck":
+        if task is None:
+            return
+        title = f"[Incident] Asset Factory 워커 태스크 stuck — task #{task['id']}"
+        body = (
+            f"태스크 `#{task['id']}` ({task.get('asset_key')}) 가 "
+            f"`{_COMPLETION_TIMEOUT_SECONDS}s` 초과 후 max_retries({task.get('max_retries', 3)}) 도달.\n\n"
+            f"- status: failed\n- retries (at time of failure): {task.get('retries')}\n"
+            f"- started_at: {task.get('started_at')}"
+        )
+    else:
+        title = "[Incident] Asset Factory 큐 적체 + ComfyUI 오프라인"
+        body = (
+            f"queue_depth={queue_depth} (임계치 {_QUEUE_DEPTH_ALERT_THRESHOLD} 초과) + "
+            "ComfyUI 오프라인 조합 감지.\n\n"
+            "ComfyUI 호스트 복구 또는 큐 수동 정리 필요."
+        )
+    await _create_or_update_incident_issue(title, body)
+
+
+async def _monitoring_tick() -> None:
+    stuck_tasks = await db.find_and_requeue_stuck_tasks(_COMPLETION_TIMEOUT_SECONDS)
+    for task in stuck_tasks:
+        if int(task.get("retries", 0)) >= int(task.get("max_retries", 3)):
+            await _fire_alert("stuck", task)
+
+    stats = await db.system_stats()
+    queue_depth = int(stats.get("queued_total", 0))
+    if queue_depth >= _QUEUE_DEPTH_ALERT_THRESHOLD:
+        comfyui_ok = await _check_comfyui_ok()
+        if not comfyui_ok:
+            await _fire_alert("queue_depth+comfyui_down", queue_depth=queue_depth)
+
+
+async def monitoring_worker() -> None:
+    """큐 적체/백엔드 오프라인/stuck 태스크를 주기적으로 점검한다."""
+    while True:
+        await asyncio.sleep(_ALERT_POLL_INTERVAL_SECONDS)
+        try:
+            await _monitoring_tick()
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger(__name__).error("monitoring_tick error: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     """앱 수명 주기 관리."""
-    global worker_task, gc_worker_task
+    global worker_task, gc_worker_task, monitoring_task
     await db.init()
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     if os.getenv("ASSET_FACTORY_MOCK_MODE") == "1":
@@ -1079,6 +1236,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     await db.recover_orphan_tasks()
     worker_task = asyncio.create_task(generation_worker())
     gc_worker_task = asyncio.create_task(_gc_loop())
+    monitoring_task = asyncio.create_task(monitoring_worker())
     try:
         yield
     finally:
@@ -1086,6 +1244,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             gc_worker_task.cancel()
             try:
                 await gc_worker_task
+            except asyncio.CancelledError:
+                pass
+        if monitoring_task:
+            monitoring_task.cancel()
+            try:
+                await monitoring_task
             except asyncio.CancelledError:
                 pass
         if worker_task:
@@ -1169,18 +1333,41 @@ async def app_redesign_catchall(path: str) -> FileResponse:
 
 
 @app.get("/api/health")
-async def health() -> dict[str, Any]:
+async def health(include_backends: bool = False) -> dict[str, Any]:
     """기본 헬스체크 + 운영 설정값 노출.
 
     ``bypass_retention_days`` 는 approval_mode='bypass' 후보의 자동 청소 기준
     (env ``AF_BYPASS_RETENTION_DAYS``, 기본 7).
     """
     from candidate_gc import get_bypass_retention_days
-    return {
+    result: dict[str, Any] = {
         "ok": True,
         "service": "asset-factory",
         "bypass_retention_days": get_bypass_retention_days(),
     }
+    if include_backends:
+        t0 = asyncio.get_running_loop().time()
+        last_checked = datetime.now(timezone.utc).isoformat()
+        try:
+            async with asyncio.timeout(_COMFYUI_HEALTH_TIMEOUT_SECONDS):
+                await comfyui_client.health_check()
+            result["backends"] = {
+                "comfyui": {
+                    "ok": True,
+                    "latencyMs": round((asyncio.get_running_loop().time() - t0) * 1000),
+                    "lastCheckedAt": last_checked,
+                }
+            }
+        except Exception as exc:  # noqa: BLE001
+            result["backends"] = {
+                "comfyui": {
+                    "ok": False,
+                    "latencyMs": round((asyncio.get_running_loop().time() - t0) * 1000),
+                    "lastCheckedAt": last_checked,
+                    "error": f"{exc.__class__.__name__}: {exc}",
+                }
+            }
+    return result
 
 
 @app.get("/api/health/sd")
@@ -2506,10 +2693,17 @@ async def approve_from_candidate(body: ApproveFromCandidateRequest) -> dict[str,
         except (TypeError, json.JSONDecodeError):
             meta = {}
 
+    _cp_max_colors, _cp_require_alpha = _resolve_validation_args(
+        workflow_category=meta.get("workflow_category"),
+        workflow_variant=meta.get("workflow_variant"),
+        output_label=meta.get("primary_output_label"),
+        fallback_max_colors=_read_max_colors(meta),
+    )
     validation = validate_asset(
         image_path=dest,
         expected_size=meta.get("expected_size"),
-        max_colors=_read_max_colors(meta),
+        max_colors=_cp_max_colors,
+        require_alpha=_cp_require_alpha,
     )
 
     metadata_out = candidate.get("metadata_json") or json.dumps(meta, ensure_ascii=False)
@@ -2864,15 +3058,21 @@ async def select_asset_candidate(asset_id: str, body: SelectCandidateRequest) ->
             meta = json.loads(pick["metadata_json"])
         except (TypeError, json.JSONDecodeError):
             meta = {}
-    max_colors = _read_max_colors(meta)
     expected = meta.get("expected_size")
     if expected is None:
         expected = asset.get("width")
+    _pick_max_colors, _pick_require_alpha = _resolve_validation_args(
+        workflow_category=meta.get("workflow_category"),
+        workflow_variant=meta.get("workflow_variant"),
+        output_label=meta.get("primary_output_label"),
+        fallback_max_colors=_read_max_colors(meta),
+    )
 
     validation = validate_asset(
         image_path=dest,
         expected_size=int(expected) if expected is not None else None,
-        max_colors=max_colors,
+        max_colors=_pick_max_colors,
+        require_alpha=_pick_require_alpha,
     )
     metadata_out = pick.get("metadata_json")
     if not metadata_out:
@@ -2941,15 +3141,21 @@ async def restore_asset_history(asset_id: str, body: RestoreHistoryRequest) -> d
             meta = json.loads(target["metadata_json"])
         except (TypeError, json.JSONDecodeError):
             meta = {}
-    max_colors = _read_max_colors(meta)
     expected = meta.get("expected_size")
     if expected is None:
         expected = target.get("width") or asset.get("width")
+    _rst_max_colors, _rst_require_alpha = _resolve_validation_args(
+        workflow_category=meta.get("workflow_category"),
+        workflow_variant=meta.get("workflow_variant"),
+        output_label=meta.get("primary_output_label"),
+        fallback_max_colors=_read_max_colors(meta),
+    )
 
     validation = validate_asset(
         image_path=dest,
         expected_size=int(expected) if expected is not None else None,
-        max_colors=max_colors,
+        max_colors=_rst_max_colors,
+        require_alpha=_rst_require_alpha,
     )
     metadata_out = target.get("metadata_json")
     if not metadata_out and meta:
@@ -3069,6 +3275,90 @@ async def regenerate_asset(asset_id: str) -> dict[str, str]:
     return {"job_id": job_id}
 
 
+def _validate_asset_with_policy(asset: dict[str, Any]) -> "ValidationResult":
+    """에셋 DB 행에서 metadata_json 기반 정책을 읽어 validate_asset 을 실행한다."""
+    meta: dict[str, Any] = {}
+    if asset.get("metadata_json"):
+        try:
+            meta = json.loads(asset["metadata_json"])
+        except (TypeError, json.JSONDecodeError):
+            meta = {}
+    _max_colors, _require_alpha = _resolve_validation_args(
+        workflow_category=meta.get("workflow_category"),
+        workflow_variant=meta.get("workflow_variant"),
+        output_label=meta.get("primary_output_label"),
+        fallback_max_colors=_read_max_colors(meta),
+    )
+    return validate_asset(
+        image_path=Path(asset["image_path"]),
+        max_colors=_max_colors,
+        require_alpha=_require_alpha,
+    )
+
+
+class RevalidateRequest(BaseModel):
+    asset_keys: list[str] | None = None
+
+
+@app.post("/api/projects/{project}/revalidate", dependencies=[Depends(require_api_key)])
+async def revalidate_project_assets(
+    project: str,
+    body: RevalidateRequest = RevalidateRequest(),
+) -> dict[str, Any]:
+    """프로젝트 에셋을 현재 validation 정책으로 재검증한다.
+
+    body.asset_keys 를 지정하면 해당 키만, 미지정 시 전체 프로젝트 에셋을 대상으로 한다.
+    디스크 이미지를 그대로 읽어 정책만 바꿔 재평가하므로 재생성 없이 fail → pass 전환 가능.
+    """
+    assets = await db.list_assets(project=project)
+    if body.asset_keys is not None:
+        key_set = set(body.asset_keys)
+        assets = [a for a in assets if a["asset_key"] in key_set]
+
+    checked = 0
+    passed_count = 0
+    failed_count = 0
+    for asset in assets:
+        try:
+            result = _validate_asset_with_policy(asset)
+        except Exception as exc:  # noqa: BLE001
+            result_passed = False
+            result_msg = f"검증 오류: {exc}"
+            await db.update_asset_validation(
+                asset["id"],
+                width=asset.get("width") or 0,
+                height=asset.get("height") or 0,
+                color_count=asset.get("color_count") or 0,
+                has_alpha=asset.get("has_alpha") or False,
+                validation_status="fail",
+                validation_message=result_msg,
+            )
+            failed_count += 1
+            checked += 1
+            continue
+        await db.update_asset_validation(
+            asset["id"],
+            width=result.width,
+            height=result.height,
+            color_count=result.color_count,
+            has_alpha=result.has_alpha,
+            validation_status="pass" if result.passed else "fail",
+            validation_message=result.message,
+        )
+        if result.passed:
+            passed_count += 1
+        else:
+            failed_count += 1
+        checked += 1
+
+    return {
+        "project": project,
+        "checked": checked,
+        "passed": passed_count,
+        "failed": failed_count,
+    }
+
+
 @app.post("/api/validate/all", dependencies=[Depends(require_api_key)])
 async def validate_all_assets(project: str | None = Query(default=None)) -> dict[str, Any]:
     """전체 에셋 재검증.
@@ -3081,7 +3371,7 @@ async def validate_all_assets(project: str | None = Query(default=None)) -> dict
     checked = 0
     failed = 0
     for asset in assets:
-        result = validate_asset(image_path=Path(asset["image_path"]))
+        result = _validate_asset_with_policy(asset)
         await db.update_asset_validation(
             asset["id"],
             width=result.width,
@@ -3103,7 +3393,7 @@ async def validate_asset_endpoint(asset_id: str) -> dict[str, Any]:
     asset = await db.get_asset(asset_id)
     if asset is None:
         raise HTTPException(status_code=404, detail="에셋을 찾을 수 없습니다.")
-    result = validate_asset(image_path=Path(asset["image_path"]))
+    result = _validate_asset_with_policy(asset)
     await db.update_asset_validation(
         asset_id,
         width=result.width,
@@ -3133,7 +3423,7 @@ async def batch_revalidate_failed(
     updated = 0
     still_fail = 0
     for asset in assets:
-        result = validate_asset(image_path=Path(asset["image_path"]))
+        result = _validate_asset_with_policy(asset)
         await db.update_asset_validation(
             asset["id"],
             width=result.width,

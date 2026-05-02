@@ -64,3 +64,38 @@ class _MockImageWithExhaustedPalette:
 
 def test_count_colors_caps_when_palette_exceeds_limit() -> None:
     assert _count_colors(_MockImageWithExhaustedPalette()) == 1024 * 1024
+
+
+def test_validate_asset_require_alpha_fails_when_no_alpha(tmp_path: Path) -> None:
+    """require_alpha=True 이고 알파 채널이 없으면 fail."""
+    path = tmp_path / "no_alpha.png"
+    Image.new("RGB", (4, 4), (255, 0, 0)).save(path, format="PNG")
+
+    result = validate_asset(path, require_alpha=True)
+
+    assert result.passed is False
+    assert result.has_alpha is False
+    assert "알파 채널 누락" in result.message
+
+
+def test_validate_asset_require_alpha_passes_when_has_alpha(tmp_path: Path) -> None:
+    """require_alpha=True 이고 알파 채널이 있으면 pass."""
+    path = tmp_path / "with_alpha.png"
+    Image.new("RGBA", (4, 4), (255, 0, 0, 128)).save(path, format="PNG")
+
+    result = validate_asset(path, max_colors=None, require_alpha=True)
+
+    assert result.passed is True
+    assert result.has_alpha is True
+    assert "알파 채널 누락" not in result.message
+
+
+def test_validate_asset_require_alpha_false_ignores_missing_alpha(tmp_path: Path) -> None:
+    """require_alpha=False (기본값) 이면 알파 없어도 통과."""
+    path = tmp_path / "no_alpha.png"
+    Image.new("RGB", (4, 4), (0, 0, 0)).save(path, format="PNG")
+
+    result = validate_asset(path, max_colors=None, require_alpha=False)
+
+    assert result.passed is True
+    assert "알파" not in result.message
