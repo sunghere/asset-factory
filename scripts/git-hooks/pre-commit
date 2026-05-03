@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Asset Factory — pre-commit hook.
+#
+# 본 hook 은 staged 변경에 .py 가 포함된 경우 ruff 를 돌려서 린트 깨진
+# 커밋을 차단한다. CI 가 1차 검출자가 되지 않도록 — AGENTS.md §2 참조.
+#
+# 설치: ./scripts/install-hooks.sh (한 번만)
+# 임시 우회: git commit --no-verify (정말 필요할 때만)
+
+set -e
+
+# staged 된 .py 가 없으면 빠르게 통과 — 문서/jsx/yaml 만 만지는 커밋은 그냥 통과.
+PY_STAGED=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.py$' || true)
+if [ -z "$PY_STAGED" ]; then
+  exit 0
+fi
+
+ROOT_DIR="$(git rev-parse --show-toplevel)"
+RUFF="$ROOT_DIR/.venv/bin/ruff"
+
+if [ ! -x "$RUFF" ]; then
+  echo "[pre-commit] .venv/bin/ruff 미발견 — 설치 후 재시도하거나 --no-verify 로 우회." >&2
+  exit 1
+fi
+
+# repo 전체를 검사 — staged 파일만 검사하면 미스테이지 변경이 만든 빨간 상태를
+# 못 잡는다. ruff 는 1k loc 기준 100ms 미만이라 비용 부담 없음.
+if ! "$RUFF" check . ; then
+  echo "" >&2
+  echo "[pre-commit] ruff 검사 실패 — 위 issue 를 수정한 뒤 다시 git commit." >&2
+  echo "[pre-commit] 임시 우회가 정말 필요하면 git commit --no-verify." >&2
+  exit 1
+fi
+
+exit 0
