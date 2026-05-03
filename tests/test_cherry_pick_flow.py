@@ -94,6 +94,39 @@ def test_reject_marks_is_rejected_and_orders_last(isolated) -> None:
     assert int(items[-1]["id"]) == ids[1]
 
 
+def test_list_batch_candidates_derives_status_field(isolated) -> None:
+    """Candidates 응답이 frontend 친화 status 를 파생 추가한다.
+
+    회귀 가드: status 필드가 빠지면 cherry-pick 화면이 SSE reload 직후
+    동일 후보를 무한 재반려하는 버그 (PR #51 fix). is_rejected=0 →
+    pending, is_rejected=1 → rejected, picked_at != None → approved.
+    """
+    db, data = isolated
+    ids = asyncio.run(_seed_candidates(db, data, "btc_status"))
+    with TestClient(server.app) as client:
+        # 1) 처음에는 모두 pending
+        r0 = client.get("/api/batches/btc_status/candidates")
+        items0 = r0.json()["items"]
+        assert all(i["status"] == "pending" for i in items0)
+
+        # 2) 한 장 reject → rejected 로 status 가 바뀐다
+        client.post(f"/api/batches/btc_status/candidates/{ids[0]}/reject")
+        r1 = client.get("/api/batches/btc_status/candidates")
+        items1 = r1.json()["items"]
+        rejected = next(i for i in items1 if int(i["id"]) == ids[0])
+        assert rejected["status"] == "rejected"
+        assert rejected["is_rejected"] == 1
+        # 다른 후보는 그대로 pending
+        others = [i for i in items1 if int(i["id"]) != ids[0]]
+        assert all(i["status"] == "pending" for i in others)
+
+        # 3) unreject 후 다시 pending
+        client.post(f"/api/batches/btc_status/candidates/{ids[0]}/unreject")
+        r2 = client.get("/api/batches/btc_status/candidates")
+        items2 = r2.json()["items"]
+        assert all(i["status"] == "pending" for i in items2)
+
+
 def test_reject_404_for_other_batch(isolated) -> None:
     db, data = isolated
     ids = asyncio.run(_seed_candidates(db, data, "btc_owner"))
