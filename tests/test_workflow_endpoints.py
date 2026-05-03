@@ -1475,10 +1475,6 @@ def test_resolve_validation_args_sprite_pixel_alpha_primary_output(isolated) -> 
     server.workflow_registry 로 패치하지만, _resolve_validation_args 는
     get_default_registry() 를 직접 호출한다 — 실제 registry 가 잘 설정됐는지 검증.
     """
-    from workflow_registry import WorkflowRegistry, get_default_registry
-    registry_root = Path(__file__).resolve().parent.parent / "workflows"
-    real_registry = WorkflowRegistry(root=registry_root)
-
     import server as _srv
     _srv_resolve = _srv._resolve_validation_args  # type: ignore[attr-defined]
 

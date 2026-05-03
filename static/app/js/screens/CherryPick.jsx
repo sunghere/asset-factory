@@ -912,8 +912,8 @@ function HelpDialog({ open, onClose, keymapEnabled = true, autoAdvance = true })
      active 가 남아 있으면 409 (force 옵션 제공). */
 function BatchOps({ batchId, meta, onChanged }) {
   const toasts = window.useToasts();
-  const [confirm, setConfirm] = useState(null); // 'cancel' | 'delete' | null
-  const [busy, setBusy] = useState(false);
+  const [confirm, setConfirm] = useStateCP(null); // 'cancel' | 'delete' | null
+  const [busy, setBusy] = useStateCP(false);
 
   const totalActive = Number(meta?.active || 0);
 

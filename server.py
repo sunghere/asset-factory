@@ -50,7 +50,7 @@ from prompt_resolution import (
 )
 from recommendations import recommend as recommend_variants
 from recommendations import search as search_variants
-from validator import validate_asset
+from validator import ValidationResult, validate_asset
 from workflow_registry import WorkflowRegistry, WorkflowRegistryError
 
 load_dotenv()
@@ -305,7 +305,7 @@ def _resolve_validation_args(
     if not (workflow_category and workflow_variant):
         return fallback_max_colors, fallback_require_alpha
     try:
-        from workflow_registry import WorkflowRegistryError, get_default_registry
+        from workflow_registry import get_default_registry
         registry = get_default_registry()
         variant = registry.variant(workflow_category, workflow_variant)
     except Exception:  # noqa: BLE001
@@ -1257,24 +1257,26 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # 각 background task 의 CancelledError 는 cancel() 직후 의도된 흐름 —
+        # 이걸 다시 raise 하면 lifespan 종료 자체가 실패로 기록된다. 무시 정상.
         if gc_worker_task:
             gc_worker_task.cancel()
             try:
                 await gc_worker_task
             except asyncio.CancelledError:
-                pass
+                pass  # expected on shutdown
         if monitoring_task:
             monitoring_task.cancel()
             try:
                 await monitoring_task
             except asyncio.CancelledError:
-                pass
+                pass  # expected on shutdown
         if worker_task:
             worker_task.cancel()
             try:
                 await worker_task
             except asyncio.CancelledError:
-                pass
+                pass  # expected on shutdown
 
 
 app = FastAPI(title="Asset Factory", version="0.1.0", lifespan=lifespan)
@@ -2358,7 +2360,10 @@ async def _enqueue_design_batch(spec: DesignBatchRequest) -> dict[str, Any]:
             v = workflow_registry.variant(spec.workflow_category, variant_name)
             max_outputs_per_task = max(max_outputs_per_task, len(v.outputs))
         except WorkflowRegistryError:
-            pass
+            # variant 검증은 expand_design_batch 가 이미 했음 — 여기 도달하면
+            # registry 가 race window 동안 다시 사라진 케이스. 추정치 1 로 갱신
+            # 안 하고 계속 (다른 variant 가 남아 있을 수 있어 break 도 안 함).
+            continue
     _ensure_disk_space_for_enqueue(expected_files=max_outputs_per_task * len(tasks))
 
     batch_id = f"btc_{uuid.uuid4().hex[:16]}"
@@ -2569,16 +2574,28 @@ async def delete_batch_api(
 
     result = await db.delete_batch(batch_id)
     # best-effort 디스크 unlink — DB 는 이미 정리됐으므로 파일 누락은 무해.
+    # 실패 사유 (path / OSError 메시지) 는 서버 로그로만 보내고 응답에서는
+    # 카운트만 노출 — CodeQL "Information exposure through an exception"
+    # 가이드 (응답 본문에 stack/path 흘리지 말 것).
     unlinked = 0
-    failed_unlinks: list[str] = []
+    failed_unlink_count = 0
     for path_str in result.get("image_paths", []):
         try:
             p = Path(path_str)
             if p.exists():
                 p.unlink()
                 unlinked += 1
-        except OSError as exc:
-            failed_unlinks.append(f"{path_str}: {exc}")
+        except OSError:
+            failed_unlink_count += 1
+            # CRLF stripping: batch_id 는 URL path 에서, path_str 는 DB 에서
+            # 오는 잠재적 untrusted 입력. raw 그대로 logger 에 흘리면 CRLF
+            # 인젝션으로 가짜 로그 라인이 만들어질 수 있어 newline 류 escape.
+            _safe_bid = batch_id.replace('\r', '').replace('\n', '')
+            _safe_path = path_str.replace('\r', '').replace('\n', '')
+            logging.getLogger(__name__).warning(
+                "delete_batch: unlink 실패 batch_id=%s path=%s",
+                _safe_bid, _safe_path, exc_info=True,
+            )
 
     await event_broker.publish(
         {
@@ -2593,7 +2610,7 @@ async def delete_batch_api(
         "deleted_tasks": result["deleted_tasks"],
         "deleted_candidates": result["deleted_candidates"],
         "unlinked_files": unlinked,
-        "failed_unlinks": failed_unlinks,
+        "failed_unlink_count": failed_unlink_count,
         "force": force,
     }
 
@@ -3381,7 +3398,7 @@ async def regenerate_asset(asset_id: str) -> dict[str, str]:
     return {"job_id": job_id}
 
 
-def _validate_asset_with_policy(asset: dict[str, Any]) -> "ValidationResult":
+def _validate_asset_with_policy(asset: dict[str, Any]) -> ValidationResult:
     """에셋 DB 행에서 metadata_json 기반 정책을 읽어 validate_asset 을 실행한다."""
     meta: dict[str, Any] = {}
     if asset.get("metadata_json"):
@@ -3428,7 +3445,6 @@ async def revalidate_project_assets(
         try:
             result = _validate_asset_with_policy(asset)
         except Exception as exc:  # noqa: BLE001
-            result_passed = False
             result_msg = f"검증 오류: {exc}"
             await db.update_asset_validation(
                 asset["id"],
