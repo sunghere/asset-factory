@@ -1517,6 +1517,43 @@ class Database:
             )
             return [dict(r) for r in await cur.fetchall()]
 
+    async def list_all_candidate_id_paths(self) -> list[tuple[int, str]]:
+        """모든 ``asset_candidates`` row 의 ``(id, image_path)`` 페어 반환.
+
+        orphan 검사용 — 응답 후 호출자가 ``Path.exists()`` 로 disk 존재 여부를
+        검증한다. SQL 만으로 'file 이 disk 에 없는 row' 를 찾을 수 없어 모든
+        row 를 가져와 Python 측에서 분류한다. 운영 DB 가 candidate 수십만 행
+        규모로 커지면 batched 페이징 필요 — 현 단계 (수백~수천) 는 일괄 OK.
+        """
+        async with aiosqlite.connect(self.db_path) as conn:
+            cur = await conn.execute(
+                "SELECT id, image_path FROM asset_candidates"
+            )
+            rows = await cur.fetchall()
+        return [(int(r[0]), str(r[1])) for r in rows if r[1]]
+
+    async def delete_candidates_by_ids(self, ids: list[int]) -> int:
+        """``id IN (...)`` 으로 후보 행을 일괄 DELETE. 삭제 행 수 반환.
+
+        호출자는 disk 파일이 이미 unlink 됐거나 부재 상태임을 보장해야 한다
+        (이 함수는 FS 를 건드리지 않음).
+        """
+        if not ids:
+            return 0
+        # SQLite default SQLITE_MAX_VARIABLE_NUMBER 가 999 — chunking.
+        deleted = 0
+        async with aiosqlite.connect(self.db_path) as conn:
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                placeholders = ",".join("?" * len(chunk))
+                cur = await conn.execute(
+                    f"DELETE FROM asset_candidates WHERE id IN ({placeholders})",
+                    chunk,
+                )
+                deleted += cur.rowcount or 0
+            await conn.commit()
+        return int(deleted)
+
     async def cancel_batch(self, batch_id: str) -> dict[str, int]:
         """배치의 ``queued`` / ``processing`` 태스크를 ``cancelled`` 로 전환.
 
