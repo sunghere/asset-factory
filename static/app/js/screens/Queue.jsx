@@ -215,12 +215,19 @@ function Queue() {
               </td></tr>
             )}
             {rows.map((b, idx) => {
-              const done = (b.total || 0) - (b.remaining || 0);
+              // task 도메인 (생성 진행) — list_recent_batches 가 채워주는 값.
+              const taskTotal = Number(b.total || 0);
+              const taskDone = Number(b.done || 0);
+              const taskActive = Number(b.active || 0);
+              const taskFailed = Number(b.failed || 0);
+              // candidate 도메인 (cherry-pick 검토) — list_today_batches 가
+              // count_pending_candidates 로 채움. b.remaining = rejected 안 된 후보.
+              const reviewRemaining = Number(b.remaining || 0);
               const active = idx === cursor;
               const category = b.category || b.asset_category || null;
               const rejected = Number(b.rejected_count || 0);
               const picked = Number(b.picked_candidates || (b.approved ? 1 : 0));
-              const statusIcon = b.approved ? '✓' : ((done === 0 && rejected === 0) ? '★' : '◐');
+              const statusIcon = b.approved ? '✓' : ((taskDone === 0 && rejected === 0) ? '★' : '◐');
               return (
                 <tr
                   key={b.batch_id}
@@ -240,7 +247,20 @@ function Queue() {
                       <span className="chip">{b.project || 'default'}</span>
                       {category && <span className="chip">{category}</span>}
                       <span className="chip" style={{ color: 'var(--accent-approve)' }}>
-                        남음 <b style={{ marginLeft: 4 }}>{b.remaining}</b>
+                        진행 <b style={{ marginLeft: 4 }}>{taskDone}/{taskTotal}</b>
+                      </span>
+                      {taskActive > 0 && (
+                        <span className="chip" style={{ color: 'var(--text-muted)' }}>
+                          처리중 {taskActive}
+                        </span>
+                      )}
+                      {taskFailed > 0 && (
+                        <span className="chip" style={{ color: 'var(--accent-reject)' }}>
+                          실패 {taskFailed}
+                        </span>
+                      )}
+                      <span className="chip" style={{ color: 'var(--accent-pick)' }}>
+                        검토 {reviewRemaining}
                       </span>
                       <span className="chip" style={{ color: 'var(--text-muted)' }}>
                         rejected {rejected}
@@ -248,18 +268,17 @@ function Queue() {
                       <span className="chip" style={{ color: 'var(--text-muted)' }}>
                         picked {picked}
                       </span>
-                      <span className="chip" style={{ color: 'var(--text-muted)' }}>
-                        총 {b.total}
-                      </span>
                       <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>
                         {b.batch_id}
                       </span>
                     </div>
                   </td>
                   <td>
-                    <window.SegProgress approved={done} rejected={0} total={b.total || 1}/>
+                    {/* progress bar: task 생성 진행도 (done / total). 0/N 에서
+                        시작해 N/N 으로 채워진다. failed 는 빨간 segment. */}
+                    <window.SegProgress approved={taskDone} rejected={taskFailed} total={taskTotal || 1}/>
                     <div style={{ marginTop: 4, fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)' }}>
-                      {done} / {b.total}
+                      {taskDone} / {taskTotal}
                     </div>
                   </td>
                   <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)' }}>
