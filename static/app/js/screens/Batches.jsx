@@ -149,6 +149,7 @@ function Batches() {
               <th style={{ width: 88 }}>status</th>
               <th>asset_key / batch_id</th>
               <th style={{ width: 110 }}>project</th>
+              <th style={{ width: 180 }}>workflow</th>
               <th style={{ width: 150 }}>progress</th>
               <th style={{ width: 120 }}>candidates</th>
               <th style={{ width: 170 }}>first seen</th>
@@ -156,10 +157,10 @@ function Batches() {
           </thead>
           <tbody>
             {batches.loading && !batches.data && (
-              <tr><td colSpan={6} style={{ padding: 20 }}><window.Skeleton height={20}/></td></tr>
+              <tr><td colSpan={7} style={{ padding: 20 }}><window.Skeleton height={20}/></td></tr>
             )}
             {batches.data && rows.length === 0 && (
-              <tr><td colSpan={6} style={{ padding: 30 }}>
+              <tr><td colSpan={7} style={{ padding: 30 }}>
                 <window.EmptyState title="배치 없음" hint={q ? '검색어와 일치하는 배치가 없습니다.' : '필터를 완화하거나 새 배치를 등록해 보세요.'}/>
               </td></tr>
             )}
@@ -179,6 +180,21 @@ function Batches() {
                   </td>
                   <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-muted)' }}>
                     {b.project || 'default'}
+                  </td>
+                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+                    {b.workflow_category ? (
+                      <>
+                        <span className="pill" style={{ fontSize: 10 }}>{b.workflow_category}</span>
+                        {Array.isArray(b.workflow_variants) && b.workflow_variants.length > 0 && (
+                          <span style={{ marginLeft: 6, color: 'var(--text-faint)' }}>
+                            {b.workflow_variants.slice(0, 2).join(', ')}
+                            {b.workflow_variants.length > 2 ? ` +${b.workflow_variants.length - 2}` : ''}
+                          </span>
+                        )}
+                      </>
+                    ) : (
+                      <span style={{ color: 'var(--text-faint)' }}>—</span>
+                    )}
                   </td>
                   <td>{progressCell(b)}</td>
                   <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>

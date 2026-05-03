@@ -12,6 +12,7 @@
     "/static/app/js/screens/CherryPick.jsx",
     "/static/app/js/screens/Assets.jsx",
     "/static/app/js/screens/AssetDetail.jsx",
+    "/static/app/js/screens/Manual.jsx",
     "/static/app/js/screens/Batches.jsx",
     "/static/app/js/screens/BatchDetail.jsx",
     "/static/app/js/screens/BatchNew.jsx",

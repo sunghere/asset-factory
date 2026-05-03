@@ -46,6 +46,7 @@ const NAV_ITEMS = [
   { key: 'dashboard', icon: '⌂', label: '/dashboard', to: '/' },
   { key: 'queue',     icon: '≡', label: '/queue',     to: '/queue' },
   { key: 'assets',    icon: '▦', label: '/assets',    to: '/assets' },
+  { key: 'manual',    icon: '◉', label: '/manual',    to: '/manual' },
   { key: 'batches',   icon: '◫', label: '/batches',   to: '/batches' },
   { key: 'catalog',   icon: '⊞', label: '/catalog',   to: '/catalog' },
   { key: 'export',    icon: '↑', label: '/export',    to: '/export' },

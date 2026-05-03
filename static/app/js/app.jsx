@@ -22,6 +22,7 @@ const ROUTES = [
   { pattern: '/cherry-pick/:batchId',   nav: 'queue',     render: ({ batchId }) => <window.CherryPick batchId={batchId}/> },
   { pattern: '/assets',                 nav: 'assets',    render: () => <window.Assets/> },
   { pattern: '/assets/:assetId',        nav: 'assets',    render: ({ assetId }) => <window.AssetDetail assetId={assetId}/> },
+  { pattern: '/manual',                 nav: 'manual',    render: () => <window.Manual/> },
   { pattern: '/batches',                nav: 'batches',   render: () => <window.Batches/> },
   { pattern: '/batches/new',            nav: 'batches',   render: () => <window.BatchNew/> },
   { pattern: '/batches/:batchId',       nav: 'batches',   render: ({ batchId }) => <window.BatchDetail batchId={batchId}/> },

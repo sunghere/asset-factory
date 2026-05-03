@@ -168,9 +168,17 @@ const api = {
     request('GET', `/api/jobs/recent?limit=${limit}`),
   getJob: (id) => request('GET', `/api/jobs/${encodeURIComponent(id)}`),
 
-  // Design batch (regen / manual enqueue)
+  // Design batch (workflow 곱집합 enqueue) — DesignBatchRequest payload.
+  // spec: { asset_key, project, category, workflow_category, workflow_variants[],
+  //         workflow_params_overrides[], prompts[], common, seeds_per_combo, ... }
   createDesignBatch: (spec) =>
     request('POST', '/api/batches', { body: spec }),
+
+  // 단일/N 회 ComfyUI 워크플로우 생성 — WorkflowGenerateRequest payload.
+  // spec: { project, asset_key, category, workflow_category, workflow_variant,
+  //         prompt, subject, prompt_mode, candidates_total, workflow_params, ... }
+  workflowsGenerate: (spec) =>
+    request('POST', '/api/workflows/generate', { body: spec }),
 
   // Export
   runExport: (body) => request('POST', '/api/export', { body }),
