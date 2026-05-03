@@ -996,7 +996,8 @@ async def handle_task(task: dict[str, Any]) -> None:
                 batch_id=batch_id,
                 approval_mode=task.get("approval_mode") or "manual",
             )
-            if batch_id is not None:
+            # candidate_id == 0: archive guard 가 INSERT 를 skip → 후행 이벤트도 skip.
+            if candidate_id != 0 and batch_id is not None:
                 await event_broker.publish(
                     {
                         "type": ev.EVT_CANDIDATE_ADDED,

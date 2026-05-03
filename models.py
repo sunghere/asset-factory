@@ -1432,7 +1432,26 @@ class Database:
         batch_id: str | None = None,
         approval_mode: str = "manual",
     ) -> int:
-        """후보 이미지 한 슬롯을 저장한다. INSERT OR REPLACE."""
+        """후보 이미지 한 슬롯을 저장한다. INSERT OR REPLACE.
+
+        Worker-level archive guard (design doc §"Archive Write Inventory (T3)"):
+        archive 후 in-flight task 결과가 도착하면 candidate INSERT 를 skip.
+        호출자는 ``return == 0`` 로 skip 여부 판단 (event publish 등 후행
+        부작용 차단). 기존 in-flight 결과는 자연 종료 (drain 일관성).
+        """
+        proj = await self.get_project(project)
+        if proj is not None and (
+            proj.get("archived_at") is not None or proj.get("purge_status") is not None
+        ):
+            logger.warning(
+                "WORKER_ARCHIVED_SKIP: project=%s archived/purging — skipping "
+                "candidate INSERT (asset_key=%s slot=%s job=%s)",
+                project,
+                asset_key,
+                slot_index,
+                job_id,
+            )
+            return 0
         now = utc_now()
         async with aiosqlite.connect(self.db_path) as conn:
             cursor = await conn.execute(
