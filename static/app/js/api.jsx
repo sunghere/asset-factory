@@ -148,6 +148,8 @@ const api = {
   },
   selectAssetCandidate: (id, body) =>
     request('POST', `/api/assets/${encodeURIComponent(id)}/select-candidate`, { body }),
+  deleteAssetCandidate: (candidateId) =>
+    request('DELETE', `/api/asset-candidates/${encodeURIComponent(candidateId)}`),
   restoreAssetHistory: (id, version) =>
     request('POST', `/api/assets/${encodeURIComponent(id)}/restore-history`, { body: { version } }),
   regenerateAsset: (id) =>

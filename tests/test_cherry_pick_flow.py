@@ -94,6 +94,62 @@ def test_reject_marks_is_rejected_and_orders_last(isolated) -> None:
     assert int(items[-1]["id"]) == ids[1]
 
 
+def test_delete_asset_candidate_unlinks_file_and_row(isolated) -> None:  # noqa: ANN001
+    """``DELETE /api/asset-candidates/{id}`` 가 파일 + row 둘 다 정리한다.
+
+    AssetDetail 의 broken-image 카드 inline 정리 버튼 백엔드 — orphan 도
+    파일이 없는 채로 row 만 삭제 가능 (자동 회복 효과).
+    """
+    db, data = isolated
+    ids = asyncio.run(_seed_candidates(db, data, "btc_del"))
+    target = ids[1]
+
+    # 1) 정상 케이스 — 파일과 row 모두 존재
+    with TestClient(server.app) as client:
+        r = client.delete(f"/api/asset-candidates/{target}")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["deleted_row"] == 1
+    assert body["file_existed"] is True
+    assert body["file_unlinked"] is True
+
+    # row 사라졌는지 확인
+    with TestClient(server.app) as client:
+        r2 = client.get("/api/batches/btc_del/candidates")
+    items = r2.json()["items"]
+    assert all(int(i["id"]) != target for i in items)
+
+    # 2) 파일이 이미 없는 orphan row 도 정리 가능 (file_existed=False)
+    other = ids[0]
+    async def _orphan_first() -> str:
+        async with __import__("aiosqlite").connect(str(db.db_path)) as conn:
+            cur = await conn.execute(
+                "SELECT image_path FROM asset_candidates WHERE id=?", (other,),
+            )
+            row = await cur.fetchone()
+        path = row[0]
+        Path(path).unlink()
+        return path
+    asyncio.run(_orphan_first())
+
+    with TestClient(server.app) as client:
+        r3 = client.delete(f"/api/asset-candidates/{other}")
+    assert r3.status_code == 200
+    body3 = r3.json()
+    assert body3["deleted_row"] == 1
+    assert body3["file_existed"] is False
+    assert body3["file_unlinked"] is False
+
+
+def test_delete_asset_candidate_404(isolated) -> None:  # noqa: ANN001
+    """존재하지 않는 candidate id 는 404."""
+    asyncio.run(_seed_candidates(isolated[0], isolated[1], "btc_del404"))
+    with TestClient(server.app) as client:
+        r = client.delete("/api/asset-candidates/9999999")
+    assert r.status_code == 404
+
+
 def test_gc_orphan_candidates_dry_run_then_delete(isolated, tmp_path) -> None:  # noqa: ANN001
     """image_path 가 disk 에 없는 candidate row 만 골라 일괄 삭제.
 
@@ -580,4 +636,64 @@ def test_gc_prioritizes_rejected_candidates(isolated) -> None:
     # 다른 슬롯은 보존
     assert (data / "candidates" / "proj" / "key" / "job1" / "slot_0.png").exists()
     assert (data / "candidates" / "proj" / "key" / "job1" / "slot_2.png").exists()
-    _ = ids, rejected_id  # 미사용 명시
+
+    # GC 가 파일뿐 아니라 DB row 도 함께 정리해야 한다 — bypass 와 동일 정합성.
+    # 이 가드가 빠지면 #52 의 dangling rows 가 reject + GC 사이클마다 누적된다.
+    assert result["deleted_rows"] >= 1
+    async def _check_row_gone() -> bool:
+        async with __import__("aiosqlite").connect(str(target_db)) as conn:
+            cur = await conn.execute(
+                "SELECT COUNT(*) FROM asset_candidates WHERE id=?",
+                (rejected_id,),
+            )
+            row = await cur.fetchone()
+            return int(row[0] or 0) == 0
+    assert asyncio.run(_check_row_gone())
+    _ = ids
+
+
+def test_run_gc_candidates_cleans_orphan_row_when_file_missing(isolated, tmp_path) -> None:  # noqa: ANN001
+    """GC 가 'file 부재' rejected row 도 자동 정리한다.
+
+    외부 도구가 파일만 지웠거나 이전 GC 가 row 정리를 빠뜨린 경우 — 다음 GC
+    실행 때 모두 회복돼야 한다.
+    """
+    db, data = isolated
+    ids = asyncio.run(_seed_candidates(db, data, "btc_orphan_gc"))
+    target_db = data / "asset-factory.db"
+    target_db.write_bytes(Path(db.db_path).read_bytes())
+    new_db = Database(target_db)
+    asyncio.run(new_db.init())
+
+    async def seed_orphan() -> int:
+        # 새 DB 에 1건 insert → reject 마킹 → 디스크 파일 미리 unlink (orphan 시뮬).
+        img = data / "candidates" / "proj" / "key" / "job1" / "slot_orphan.png"
+        await new_db.insert_asset_candidate(
+            project="proj", asset_key="key", slot_index=99, job_id="job1",
+            image_path=str(img), width=32, height=32, color_count=4,
+            validation_status="pass", validation_message="ok",
+            generation_seed=99, generation_model="m", generation_prompt="p",
+            metadata_json="{}", batch_id="btc_orphan_gc",
+        )
+        cand = (await new_db.list_batch_candidates("btc_orphan_gc"))[-1]
+        cid = int(cand["id"])
+        await new_db.reject_candidate(cid)
+        return cid
+    cid = asyncio.run(seed_orphan())
+
+    # 파일은 처음부터 만들지 않았기 때문에 path.is_file() == False — orphan.
+    img = data / "candidates" / "proj" / "key" / "job1" / "slot_orphan.png"
+    assert not img.exists()
+
+    result = run_gc_candidates(data, max_age_seconds=10**9, max_total_bytes=0)
+    assert result["deleted_rows"] >= 1
+
+    async def _gone() -> bool:
+        async with __import__("aiosqlite").connect(str(target_db)) as conn:
+            cur = await conn.execute(
+                "SELECT COUNT(*) FROM asset_candidates WHERE id=?", (cid,),
+            )
+            row = await cur.fetchone()
+            return int(row[0] or 0) == 0
+    assert asyncio.run(_gone())
+    _ = ids
