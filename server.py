@@ -2744,6 +2744,43 @@ async def unreject_batch_candidate(batch_id: str, candidate_id: int) -> dict[str
     return {"ok": True, "candidate_id": candidate_id, "is_rejected": False}
 
 
+@app.delete(
+    "/api/asset-candidates/{candidate_id}",
+    dependencies=[Depends(require_api_key)],
+)
+async def delete_asset_candidate(candidate_id: int) -> dict[str, Any]:
+    """단일 후보를 영구 삭제 — disk 파일 + DB row.
+
+    AssetDetail 의 broken-image 카드 inline 정리, 또는 사용자가 특정 후보만
+    골라 정리할 때. 삭제는 비가역. row 가 없으면 404. 파일이 이미 없어도 row
+    는 정리 (자동 회복 효과). bulk 정리는 ``POST /api/system/gc/orphan-candidates``.
+    """
+    candidate = await db.get_candidate_by_id(candidate_id)
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="후보를 찾을 수 없습니다.")
+    image_path = candidate.get("image_path")
+    file_existed = False
+    file_unlinked = False
+    if image_path:
+        try:
+            p = Path(str(image_path))
+            file_existed = p.exists()
+            if file_existed:
+                p.unlink()
+                file_unlinked = True
+        except OSError:
+            # unlink 실패해도 row 는 계속 정리 — orphan 보존보다 정리 우선.
+            pass
+    deleted = await db.delete_candidates_by_ids([int(candidate_id)])
+    return {
+        "ok": True,
+        "candidate_id": int(candidate_id),
+        "deleted_row": int(deleted),
+        "file_existed": file_existed,
+        "file_unlinked": file_unlinked,
+    }
+
+
 @app.get("/api/cherry-pick/queue")
 async def get_cherry_pick_queue(
     since: str | None = Query(default=None, description="ISO8601 UTC. 미지정 시 오늘 KST 00:00."),

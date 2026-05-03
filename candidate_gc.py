@@ -124,24 +124,34 @@ def run_gc_candidates(
 
     deleted_files = 0
     freed_bytes = 0
+    deleted_rows = 0
 
-    # 1) reject된 후보 우선 삭제 (mtime/용량 무시)
+    # 1) reject된 후보 우선 삭제 (mtime/용량 무시) — 파일 unlink + DB row 정리.
+    # bypass step (아래) 과 같은 정합성을 맞춘다. 이전엔 unlink 만 하고 row 가
+    # 남아 cherry-pick / AssetDetail 의 image fetch 가 broken-icon 이 되는
+    # dangling 누적 버그 (#52 의 46 orphans). 파일이 이미 없는 row 도 정리 대상
+    # 에 포함 — 외부 도구가 파일만 지운 케이스도 자동 회복.
+    deleted_rejected_paths: list[str] = []
     for raw in rejected_paths:
         path = Path(raw)
-        if not path.is_file():
-            continue
-        try:
-            resolved = path.resolve()
-            resolved.relative_to(candidates_root.resolve())
-        except (OSError, ValueError):
-            continue
-        try:
-            size = path.stat().st_size
-            path.unlink()
-            deleted_files += 1
-            freed_bytes += size
-        except OSError:
-            pass
+        file_existed = path.is_file()
+        if file_existed:
+            try:
+                resolved = path.resolve()
+                resolved.relative_to(candidates_root.resolve())
+            except (OSError, ValueError):
+                continue
+            try:
+                size = path.stat().st_size
+                path.unlink()
+                deleted_files += 1
+                freed_bytes += size
+            except OSError:
+                # unlink 실패면 DB row 도 건드리지 않는다 (재시도 가능 상태로 남김).
+                continue
+        deleted_rejected_paths.append(raw)
+    if deleted_rejected_paths:
+        deleted_rows += _delete_candidate_rows(data_root, deleted_rejected_paths)
 
     files: list[tuple[Path, float, int]] = []
     for path in candidates_root.rglob("*"):
@@ -181,7 +191,7 @@ def run_gc_candidates(
                 except OSError:
                     pass
     if deleted_bypass_paths:
-        _delete_candidate_rows(data_root, deleted_bypass_paths)
+        deleted_rows += _delete_candidate_rows(data_root, deleted_bypass_paths)
     # bypass_resolved 별칭 — 이후 단계 ((3) 일반 retention) 에서도 bypass 패스
     # 는 건너뛰게 유지.
     bypass_resolved = set(bypass_resolved_to_raw.keys())
@@ -232,4 +242,5 @@ def run_gc_candidates(
         "deleted_files": deleted_files,
         "freed_bytes": freed_bytes,
         "scanned_files": scanned,
+        "deleted_rows": deleted_rows,
     }

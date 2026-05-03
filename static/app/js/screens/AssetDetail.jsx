@@ -265,7 +265,7 @@ function AssetDetail({ assetId }) {
               </button>
             </div>
 
-            {tab === 'candidates' && <CandidatesTab items={cands.data || []} loading={cands.loading} onPromote={promoteCandidate}/>}
+            {tab === 'candidates' && <CandidatesTab items={cands.data || []} loading={cands.loading} onPromote={promoteCandidate} onCandidateDeleted={() => cands.reload()}/>}
             {tab === 'history' && (
               <HistoryTab
                 items={history.data || []}
@@ -317,34 +317,89 @@ function AssetDetail({ assetId }) {
   );
 }
 
-function CandidatesTab({ items, loading, onPromote }) {
+function CandidatesTab({ items, loading, onPromote, onCandidateDeleted }) {
   if (loading && items.length === 0) return <window.Skeleton height={180}/>;
   if (items.length === 0) {
     return <window.EmptyState title="후보 없음" hint="최근 배치에서 생성된 후보가 없습니다. 재생성 버튼을 누르면 새 배치가 생깁니다."/>;
   }
   return (
     <div className="asset-grid">
-      {items.map((c) => {
-        const url = c.image_url
-          || `/api/asset-candidates/image?project=${encodeURIComponent(c.project)}&asset_key=${encodeURIComponent(c.asset_key)}&job_id=${encodeURIComponent(c.job_id)}&slot_index=${c.slot_index}`;
-        return (
-          <div key={`${c.job_id}-${c.slot_index}`} className={`asset-card ${c.is_picked ? 'selected' : ''}`}>
-            <div className="thumb-box">
-              <img src={url} alt="" loading="lazy"/>
-              {c.is_picked && <span className="vbdg pass">PRIMARY</span>}
+      {items.map((c) => (
+        <CandidateCard
+          key={`${c.job_id}-${c.slot_index}-${c.id}`}
+          c={c}
+          onPromote={onPromote}
+          onDeleted={onCandidateDeleted}
+        />
+      ))}
+    </div>
+  );
+}
+
+function CandidateCard({ c, onPromote, onDeleted }) {
+  const toasts = window.useToasts();
+  const [broken, setBroken] = React.useState(false);
+  const [deleting, setDeleting] = React.useState(false);
+  const url = c.image_url
+    || `/api/asset-candidates/image?project=${encodeURIComponent(c.project)}&asset_key=${encodeURIComponent(c.asset_key)}&job_id=${encodeURIComponent(c.job_id)}&slot_index=${c.slot_index}`;
+
+  async function cleanup() {
+    if (!c.id) {
+      toasts.push({ kind: 'error', message: '이 후보의 id 가 없어 정리할 수 없습니다.' });
+      return;
+    }
+    if (!window.confirm(`후보 #${c.id} 의 row 를 영구 삭제합니다. 진행할까요?`)) return;
+    setDeleting(true);
+    try {
+      const r = await window.api.deleteAssetCandidate(c.id);
+      toasts.push({
+        kind: 'success',
+        message: `후보 #${c.id} 정리됨 (row ${r.deleted_row}, file ${r.file_unlinked ? 'unlinked' : 'absent'}).`,
+      });
+      onDeleted?.(c);
+    } catch (e) {
+      toasts.push({ kind: 'error', message: '정리 실패: ' + (e.message || e) });
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  return (
+    <div className={`asset-card ${c.is_picked ? 'selected' : ''}`}>
+      <div className="thumb-box" style={broken ? { background: 'var(--bg-elev-2)', display: 'grid', placeItems: 'center' } : undefined}>
+        {broken ? (
+          <div style={{ textAlign: 'center', padding: 12 }}>
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)' }}>
+              이미지 없음
             </div>
-            <div className="strip">
-              <span className="asset-key">slot {c.slot_index}</span>
-              <button
-                className={c.is_picked ? 'btn' : 'btn btn-primary'}
-                onClick={() => onPromote(c)}
-                disabled={c.is_picked}
-                style={{ padding: '2px 8px', fontSize: 10 }}
-              >{c.is_picked ? 'current' : 'primary로 교체'}</button>
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--text-faint)', marginTop: 4 }}>
+              candidate row 만 남은 dangling 상태
             </div>
           </div>
-        );
-      })}
+        ) : (
+          <img src={url} alt="" loading="lazy" onError={() => setBroken(true)}/>
+        )}
+        {c.is_picked && !broken && <span className="vbdg pass">PRIMARY</span>}
+      </div>
+      <div className="strip">
+        <span className="asset-key">slot {c.slot_index}</span>
+        {broken ? (
+          <button
+            className="btn"
+            onClick={cleanup}
+            disabled={deleting}
+            style={{ padding: '2px 8px', fontSize: 10, color: 'var(--accent-reject)' }}
+            title="이 후보의 row 를 영구 삭제합니다."
+          >{deleting ? '…' : '정리'}</button>
+        ) : (
+          <button
+            className={c.is_picked ? 'btn' : 'btn btn-primary'}
+            onClick={() => onPromote(c)}
+            disabled={c.is_picked}
+            style={{ padding: '2px 8px', fontSize: 10 }}
+          >{c.is_picked ? 'current' : 'primary로 교체'}</button>
+        )}
+      </div>
     </div>
   );
 }
