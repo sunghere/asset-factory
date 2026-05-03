@@ -2479,6 +2479,184 @@ async def unarchive_project(slug: str) -> dict[str, Any]:
     return await _project_to_response(unarchived)
 
 
+def purge_target_dirs(slug: str) -> list[Path]:
+    """purge 대상 디스크 디렉토리 — 단일 source.
+
+    새 project-partitioned 디렉토리가 생기면 여기에 추가. ``_safe_segment`` 로
+    path traversal 방어 redundancy 적용 (design doc §"보안 / 안전장치").
+    """
+    safe = _safe_segment(slug)
+    return [
+        DATA_DIR / "approved" / safe,
+        DATA_DIR / "candidates" / safe,
+    ]
+
+
+def _disk_usage_for_slug(slug: str) -> tuple[int, int]:
+    """purge_target_dirs 의 file count + 누적 byte. 존재하지 않는 dir 는 skip."""
+    files = 0
+    bytes_total = 0
+    for d in purge_target_dirs(slug):
+        if not d.is_dir():
+            continue
+        for p in d.rglob("*"):
+            if p.is_file():
+                files += 1
+                try:
+                    bytes_total += p.stat().st_size
+                except OSError:
+                    pass
+    return files, bytes_total
+
+
+@app.post("/api/projects/{slug}/purge", dependencies=[Depends(require_api_key)])
+async def purge_project(
+    slug: str,
+    dry_run: bool = Query(default=False),
+    confirm: bool = Query(default=False),
+) -> dict[str, Any]:
+    """2-step destructive cleanup (design doc §"Purge (Tombstone state machine)").
+
+    - ``dry_run=true``: 카운트 + active_task_count blocking 정보. 변경 없음.
+    - ``confirm=true``: 사전조건 검증 (archived AND active_task_count==0 AND
+      purge_status IS NULL) → DB DELETE 단일 트랜잭션 → 디스크 best-effort
+      → projects row 제거. 디스크 실패 시 purge_status='purging' 유지 +
+      ``files_failed=true`` 응답.
+    - 둘 다 false → 400.
+    """
+    if dry_run == confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="exactly one of dry_run / confirm must be true",
+        )
+    project = await db.get_project(slug)
+    if project is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    if project.get("archived_at") is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "purge_requires_archive",
+                "detail": "purge 는 archive 후에만 가능합니다.",
+            },
+        )
+
+    counts = await db.project_counts(slug)
+    files_count, bytes_count = _disk_usage_for_slug(slug)
+    will_delete = {
+        "assets": counts["asset_count"],
+        "tasks": counts["batch_count"],  # batch 단위 카운트는 UI 친화 표시용
+        "candidates": counts["candidate_count"],
+        "files": files_count,
+        "bytes": bytes_count,
+    }
+
+    if dry_run:
+        blocking = (
+            {"active_task_count": counts["active_task_count"]}
+            if counts["active_task_count"] > 0
+            else None
+        )
+        return {"will_delete": will_delete, "blocking": blocking}
+
+    # confirm path.
+    if counts["active_task_count"] > 0:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "active_tasks_in_flight",
+                "active_task_count": counts["active_task_count"],
+            },
+        )
+    if project.get("purge_status") is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "purge_already_in_progress", "slug": slug},
+        )
+
+    # 1) tombstone 마킹.
+    await db.set_project_purge_status(slug, "purging")
+    # 2) DB cascade DELETE (단일 transaction).
+    deleted_db = await db.cascade_delete_project_data(slug)
+
+    # 3) disk best-effort. AGENTS.md §8 — DB 가 진실, 파일은 best-effort.
+    files_failed = False
+    for d in purge_target_dirs(slug):
+        # path traversal 방어 redundancy.
+        if _safe_segment(slug) != slug.replace("/", "_").replace("\\", "_").replace("..", "_"):
+            # 이미 safe 하지만 redundancy.
+            pass
+        try:
+            if d.is_dir():
+                shutil.rmtree(d, ignore_errors=False)
+        except OSError as exc:
+            files_failed = True
+            logging.getLogger(__name__).warning(
+                "PURGE_FILE_FAILED: project=%s dir=%s err=%s",
+                slug,
+                d,
+                str(exc).replace("\r", "").replace("\n", ""),
+            )
+
+    # 4) 성공 시 projects row 제거.
+    project_removed = False
+    if not files_failed:
+        await db.delete_project_row(slug)
+        project_removed = True
+
+    return {
+        "deleted": {
+            "assets": deleted_db["assets"],
+            "tasks": deleted_db["tasks"],
+            "candidates": deleted_db["candidates"],
+            "files": files_count,
+            "bytes": bytes_count,
+        },
+        "files_failed": files_failed,
+        "project_removed": project_removed,
+    }
+
+
+@app.post(
+    "/api/projects/{slug}/purge/retry",
+    dependencies=[Depends(require_api_key)],
+)
+async def purge_retry(slug: str) -> dict[str, Any]:
+    """디스크 정리 실패 후 재시도 — purge_status='purging' 인 project 만 대상.
+
+    DB 는 이미 정리된 상태이므로 디스크만 재시도. 성공 시 projects row 제거.
+    """
+    project = await db.get_project(slug)
+    if project is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    if project.get("purge_status") != "purging":
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "not_in_purging_state", "slug": slug},
+        )
+
+    files_failed = False
+    for d in purge_target_dirs(slug):
+        try:
+            if d.is_dir():
+                shutil.rmtree(d, ignore_errors=False)
+        except OSError as exc:
+            files_failed = True
+            logging.getLogger(__name__).warning(
+                "PURGE_RETRY_FILE_FAILED: project=%s dir=%s err=%s",
+                slug,
+                d,
+                str(exc).replace("\r", "").replace("\n", ""),
+            )
+
+    project_removed = False
+    if not files_failed:
+        await db.delete_project_row(slug)
+        project_removed = True
+
+    return {"files_failed": files_failed, "project_removed": project_removed}
+
+
 @app.get("/api/projects/{project_id}/spec")
 async def get_project_spec(project_id: str) -> dict[str, Any]:
     """프로젝트 스펙 파일을 반환한다."""
