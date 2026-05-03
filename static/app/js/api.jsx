@@ -101,6 +101,12 @@ const api = {
     request('GET', `/api/batches/${encodeURIComponent(batchId)}/tasks`),
   retryFailedTasks: (batchId) =>
     request('POST', `/api/batches/${encodeURIComponent(batchId)}/retry-failed`),
+  cancelBatch: (batchId) =>
+    request('POST', `/api/batches/${encodeURIComponent(batchId)}/cancel`),
+  deleteBatch: (batchId, { force = false } = {}) => {
+    const qs = force ? '?force=true' : '';
+    return request('DELETE', `/api/batches/${encodeURIComponent(batchId)}${qs}`);
+  },
   rejectCandidate: (batchId, candidateId) =>
     request('POST', `/api/batches/${encodeURIComponent(batchId)}/candidates/${candidateId}/reject`),
   unrejectCandidate: (batchId, candidateId) =>

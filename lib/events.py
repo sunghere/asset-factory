@@ -29,6 +29,8 @@ EVT_VALIDATION_UPDATED = "validation_updated"  # 후보 재검증 결과 반영 
 EVT_BATCH_RETRY_FAILED = "batch_retry_failed"
 EVT_BATCH_REVALIDATE_FAILED_DONE = "batch_revalidate_failed_done"
 EVT_BATCH_REGENERATE_FAILED_QUEUED = "batch_regenerate_failed_queued"
+EVT_BATCH_CANCELLED = "batch_cancelled"
+EVT_BATCH_DELETED = "batch_deleted"
 
 # --- Asset lifecycle ---------------------------------------------------------
 EVT_ASSET_APPROVED_FROM_CANDIDATE = "asset_approved_from_candidate"
@@ -57,6 +59,8 @@ EventType = Literal[
     "batch_retry_failed",
     "batch_revalidate_failed_done",
     "batch_regenerate_failed_queued",
+    "batch_cancelled",
+    "batch_deleted",
     "asset_approved_from_candidate",
     "asset_approve_undone",
     "asset_candidate_selected",
@@ -82,6 +86,8 @@ ALL_EVENT_TYPES: tuple[str, ...] = (
     EVT_BATCH_RETRY_FAILED,
     EVT_BATCH_REVALIDATE_FAILED_DONE,
     EVT_BATCH_REGENERATE_FAILED_QUEUED,
+    EVT_BATCH_CANCELLED,
+    EVT_BATCH_DELETED,
     EVT_ASSET_APPROVED_FROM_CANDIDATE,
     EVT_ASSET_APPROVE_UNDONE,
     EVT_ASSET_CANDIDATE_SELECTED,

@@ -1517,6 +1517,92 @@ class Database:
             )
             return [dict(r) for r in await cur.fetchall()]
 
+    async def cancel_batch(self, batch_id: str) -> dict[str, int]:
+        """배치의 ``queued`` / ``processing`` 태스크를 ``cancelled`` 로 전환.
+
+        이미 ``done`` / ``failed`` 인 task 는 건드리지 않는다 (history 보존).
+        ``processing`` 도 status 만 cancelled 로 마크 — ComfyUI 서버에서
+        실제로 실행 중인 prompt 는 자체적으로 끝까지 돈다 (interrupt 미구현).
+        그래도 결과 저장 단계에서 cancelled 상태 task 는 candidate 가
+        만들어지지 않도록 워커 측에서 가드해야 안전 — 단, 본 PR scope 밖이라
+        기록만 하고 race window 는 수용 (UI 가 즉시 사라지지 않을 수 있음).
+
+        반환: {cancelled_queued, cancelled_processing, untouched_done,
+        untouched_failed} — UI 에 정확한 수치 표시용.
+        """
+        now = utc_now()
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cur = await conn.execute(
+                """
+                SELECT status, COUNT(*) AS n
+                FROM generation_tasks
+                WHERE batch_id=?
+                GROUP BY status
+                """,
+                (batch_id,),
+            )
+            counts: dict[str, int] = {row["status"]: int(row["n"]) for row in await cur.fetchall()}
+            cancel_q = int(counts.get("queued", 0))
+            cancel_p = int(counts.get("processing", 0))
+            await conn.execute(
+                """
+                UPDATE generation_tasks
+                SET status='cancelled',
+                    last_error=COALESCE(last_error, 'cancelled by user'),
+                    updated_at=?
+                WHERE batch_id=? AND status IN ('queued','processing')
+                """,
+                (now, batch_id),
+            )
+            await conn.commit()
+        return {
+            "cancelled_queued": cancel_q,
+            "cancelled_processing": cancel_p,
+            "untouched_done": int(counts.get("done", 0)),
+            "untouched_failed": int(counts.get("failed", 0)),
+        }
+
+    async def delete_batch(self, batch_id: str) -> dict[str, Any]:
+        """배치의 task / candidate row 를 모두 삭제하고 파일 경로를 반환.
+
+        파일 unlink 는 호출자 (server.py) 책임 — DB 트랜잭션과 FS unlink 를
+        엮으면 partial failure 시 정합성이 깨진다. DB 만 먼저 정리하고 파일
+        리스트를 돌려주면 server 가 best-effort 로 unlink.
+
+        active 태스크 (queued/processing) 가 남아 있으면 caller 가 먼저
+        ``cancel_batch`` 를 호출했어야 한다 — 본 함수는 status 와 무관하게
+        삭제 (force semantics). 호출 정책은 endpoint 레이어에서.
+
+        반환: {deleted_tasks, deleted_candidates, image_paths[]}.
+        """
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cur = await conn.execute(
+                "SELECT image_path FROM asset_candidates WHERE batch_id=?",
+                (batch_id,),
+            )
+            image_paths = [str(r["image_path"]) for r in await cur.fetchall() if r["image_path"]]
+
+            cur = await conn.execute(
+                "DELETE FROM asset_candidates WHERE batch_id=?",
+                (batch_id,),
+            )
+            deleted_candidates = cur.rowcount or 0
+
+            cur = await conn.execute(
+                "DELETE FROM generation_tasks WHERE batch_id=?",
+                (batch_id,),
+            )
+            deleted_tasks = cur.rowcount or 0
+
+            await conn.commit()
+        return {
+            "deleted_tasks": int(deleted_tasks),
+            "deleted_candidates": int(deleted_candidates),
+            "image_paths": image_paths,
+        }
+
     async def retry_failed_batch_tasks(self, batch_id: str) -> list[int]:
         """해당 batch 에서 ``status='failed'`` 인 태스크를 큐로 되돌린다.
 

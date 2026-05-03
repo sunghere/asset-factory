@@ -2513,6 +2513,91 @@ async def retry_failed_batch_tasks_api(batch_id: str) -> dict[str, Any]:
     return {"batch_id": batch_id, "retried_count": len(retried), "task_ids": retried}
 
 
+@app.post(
+    "/api/batches/{batch_id}/cancel",
+    dependencies=[Depends(require_api_key)],
+)
+async def cancel_batch_api(batch_id: str) -> dict[str, Any]:
+    """배치의 queued/processing 태스크를 cancelled 로 전환.
+
+    이미 done/failed 인 task 와 candidate 는 건드리지 않는다 (history 보존).
+    실제 cleanup (디스크 파일 + DB row 제거) 는 ``DELETE /api/batches/{id}``.
+    """
+    if not await db.get_batch_detail(batch_id):
+        raise HTTPException(status_code=404, detail=f"batch not found: {batch_id}")
+    counts = await db.cancel_batch(batch_id)
+    total_cancelled = counts["cancelled_queued"] + counts["cancelled_processing"]
+    if total_cancelled > 0:
+        await event_broker.publish(
+            {
+                "type": ev.EVT_BATCH_CANCELLED,
+                "batch_id": batch_id,
+                "cancelled_count": total_cancelled,
+            }
+        )
+    return {"batch_id": batch_id, **counts}
+
+
+@app.delete(
+    "/api/batches/{batch_id}",
+    dependencies=[Depends(require_api_key)],
+)
+async def delete_batch_api(
+    batch_id: str,
+    force: bool = Query(default=False, description="active 태스크 있어도 강제 삭제"),
+) -> dict[str, Any]:
+    """배치의 task / candidate row + 이미지 파일을 삭제 (테스트 정리/실수 회복).
+
+    안전장치: queued/processing 태스크가 남아 있으면 409 Conflict 로 거부.
+    호출자가 먼저 ``POST /api/batches/{id}/cancel`` 로 멈추거나, ``force=true``
+    쿼리로 우회. force 우회 시에도 워커는 race window 동안 결과를 저장하려
+    할 수 있어 cancel → delay → delete 순서가 권장됨.
+    """
+    detail = await db.get_batch_detail(batch_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail=f"batch not found: {batch_id}")
+    active = int(detail.get("active", 0) or 0)
+    if active > 0 and not force:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "batch_has_active_tasks",
+                "message": f"{active} 개의 task 가 아직 처리 중입니다. 먼저 취소(cancel) 하거나 force=true 로 호출하세요.",
+                "active": active,
+            },
+        )
+
+    result = await db.delete_batch(batch_id)
+    # best-effort 디스크 unlink — DB 는 이미 정리됐으므로 파일 누락은 무해.
+    unlinked = 0
+    failed_unlinks: list[str] = []
+    for path_str in result.get("image_paths", []):
+        try:
+            p = Path(path_str)
+            if p.exists():
+                p.unlink()
+                unlinked += 1
+        except OSError as exc:
+            failed_unlinks.append(f"{path_str}: {exc}")
+
+    await event_broker.publish(
+        {
+            "type": ev.EVT_BATCH_DELETED,
+            "batch_id": batch_id,
+            "deleted_tasks": result["deleted_tasks"],
+            "deleted_candidates": result["deleted_candidates"],
+        }
+    )
+    return {
+        "batch_id": batch_id,
+        "deleted_tasks": result["deleted_tasks"],
+        "deleted_candidates": result["deleted_candidates"],
+        "unlinked_files": unlinked,
+        "failed_unlinks": failed_unlinks,
+        "force": force,
+    }
+
+
 @app.get("/api/batches/{batch_id}/candidates")
 async def list_batch_candidates(batch_id: str) -> dict[str, Any]:
     """한 batch에 속한 모든 후보 (cherry-pick UI 본 화면).
