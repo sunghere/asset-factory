@@ -2615,18 +2615,38 @@ async def delete_batch_api(
     }
 
 
+def _derive_candidate_status(row: dict[str, Any]) -> str:
+    """``asset_candidates`` row 의 ``is_rejected`` / ``picked_at`` 에서 frontend
+    가 사용하는 ``status`` 문자열을 파생한다.
+
+    DB 스키마는 ``is_rejected: 0|1`` + ``picked_at: TEXT|NULL`` 로 분리돼 있고
+    별도의 ``status`` 컬럼은 없다. 그러나 frontend (CherryPick.jsx) 는 단일
+    ``c.status`` 키로 모든 분기 (early-return 가드, hideRejected 필터,
+    remaining/approved/rejected 카운트) 를 한다. API 응답에서 미리 derive 해서
+    내려주지 않으면, SSE reload 후 ``c.status`` 가 사라져 같은 후보를 무한
+    재반려할 수 있다 (#TODO 회귀 가드 테스트 추가).
+    """
+    if int(row.get("is_rejected") or 0) == 1:
+        return "rejected"
+    if row.get("picked_at"):
+        return "approved"
+    return "pending"
+
+
 @app.get("/api/batches/{batch_id}/candidates")
 async def list_batch_candidates(batch_id: str) -> dict[str, Any]:
     """한 batch에 속한 모든 후보 (cherry-pick UI 본 화면).
 
     rejected가 뒤로 정렬된다. 각 항목은 메타데이터(LoRA spec, seed, model 등)와
-    이미지 URL을 포함한다."""
+    이미지 URL, 그리고 frontend 친화 ``status`` (rejected/approved/pending) 를
+    포함한다."""
     rows = await db.list_batch_candidates(batch_id)
     items: list[dict[str, Any]] = []
     for row in rows:
         items.append(
             {
                 **row,
+                "status": _derive_candidate_status(row),
                 "image_url": (
                     "/api/asset-candidates/image?"
                     + f"project={row['project']}&asset_key={row['asset_key']}"
@@ -3044,11 +3064,17 @@ async def get_asset_candidates(
     asset_id: str,
     job_id: str | None = Query(default=None),
 ) -> list[dict[str, Any]]:
-    """배치 후보 슬롯 목록 (job_id 없으면 최근 후보 전체)."""
+    """배치 후보 슬롯 목록 (job_id 없으면 최근 후보 전체).
+
+    각 row 에 frontend 친화 ``status`` (rejected/approved/pending) 를 파생
+    추가 — `_derive_candidate_status` 의 같은 규칙으로 batch-level 응답과
+    일관 유지.
+    """
     asset = await db.get_asset(asset_id)
     if asset is None:
         raise HTTPException(status_code=404, detail="에셋을 찾을 수 없습니다.")
-    return await db.list_asset_candidates(asset["project"], asset["asset_key"], job_id)
+    rows = await db.list_asset_candidates(asset["project"], asset["asset_key"], job_id)
+    return [{**row, "status": _derive_candidate_status(row)} for row in rows]
 
 
 _THUMB_ALLOWED_SIZES: frozenset[int] = frozenset({128, 192, 256, 384, 512})
