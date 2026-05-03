@@ -94,6 +94,59 @@ def test_reject_marks_is_rejected_and_orders_last(isolated) -> None:
     assert int(items[-1]["id"]) == ids[1]
 
 
+def test_gc_orphan_candidates_dry_run_then_delete(isolated, tmp_path) -> None:  # noqa: ANN001
+    """image_path 가 disk 에 없는 candidate row 만 골라 일괄 삭제.
+
+    회귀 가드: candidate_gc 가 reject 후보의 disk 파일을 unlink 한 뒤 row
+    삭제가 누락되거나 외부 도구가 파일만 지운 케이스에서 broken-image 카드가
+    영구적으로 남던 문제. dry_run 으로 카운트만 보고, 실 삭제는 dry_run=false.
+    """
+    db, data = isolated
+    ids = asyncio.run(_seed_candidates(db, data, "btc_orphan"))
+
+    async def _orphan_one() -> str:
+        # 첫 candidate 의 image_path 파일을 일부러 unlink — DB row 는 그대로.
+        async with __import__("aiosqlite").connect(str(db.db_path)) as conn:
+            cur = await conn.execute(
+                "SELECT image_path FROM asset_candidates WHERE id=?",
+                (ids[0],),
+            )
+            row = await cur.fetchone()
+        path = row[0]
+        Path(path).unlink()
+        return path
+
+    orphaned_path = asyncio.run(_orphan_one())
+    assert not Path(orphaned_path).exists()
+
+    with TestClient(server.app) as client:
+        # dry_run=true (기본) — 카운트만, DB 행 보존
+        r1 = client.post("/api/system/gc/orphan-candidates")
+        assert r1.status_code == 200, r1.text
+        body1 = r1.json()
+        assert body1["dry_run"] is True
+        assert body1["orphans_found"] == 1
+        assert body1["deleted"] == 0
+        assert any(s["id"] == ids[0] for s in body1["sample"])
+
+        # 다른 candidate 들은 그대로
+        r_check = client.get("/api/batches/btc_orphan/candidates")
+        assert r_check.json()["count"] == 3
+
+        # dry_run=false — 실 삭제
+        r2 = client.post("/api/system/gc/orphan-candidates?dry_run=false")
+        assert r2.status_code == 200, r2.text
+        body2 = r2.json()
+        assert body2["dry_run"] is False
+        assert body2["deleted"] == 1
+
+        # orphan row 만 사라지고 정상 row 2건은 보존
+        r_after = client.get("/api/batches/btc_orphan/candidates")
+        items_after = r_after.json()["items"]
+        assert len(items_after) == 2
+        assert all(int(i["id"]) != ids[0] for i in items_after)
+
+
 def test_list_batch_candidates_derives_status_field(isolated) -> None:
     """Candidates 응답이 frontend 친화 status 를 파생 추가한다.
 

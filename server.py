@@ -1677,6 +1677,49 @@ async def gc_run() -> dict[str, Any]:
         raise HTTPException(status_code=500, detail=message) from exc
 
 
+@app.post(
+    "/api/system/gc/orphan-candidates",
+    dependencies=[Depends(require_api_key)],
+)
+async def gc_orphan_candidates(
+    dry_run: bool = Query(default=True, description="true 면 카운트만, false 면 실 삭제"),
+    limit: int = Query(default=10, ge=0, le=200, description="응답에 보여줄 sample path 개수"),
+) -> dict[str, Any]:
+    """``asset_candidates.image_path`` 가 disk 에 없는 dangling row 를 일괄 정리.
+
+    candidate_gc 가 reject 후보의 disk 파일을 unlink 한 뒤 DB row 삭제 단계가
+    누락된 케이스 (또는 외부 도구가 파일만 지운 케이스) 가 누적되면 AssetDetail
+    의 candidate 그리드에 broken-image 카드가 영구적으로 남는다. 본 endpoint
+    는 그것들을 일괄 청소.
+
+    ``dry_run=true`` (기본) 는 검출만 하고 응답에 sample path/count 를 돌려준다.
+    UI 쪽이 사용자에게 확인 받고 ``dry_run=false`` 로 재호출.
+    """
+    pairs = await db.list_all_candidate_id_paths()
+    orphans: list[tuple[int, str]] = []
+    for cid, p in pairs:
+        try:
+            if not Path(p).exists():
+                orphans.append((cid, p))
+        except OSError:
+            # NFS / 권한 문제로 stat 실패 — orphan 으로 간주하지 않고 건너뜀
+            # (false positive 로 잘못 삭제 방지).
+            continue
+
+    deleted = 0
+    if not dry_run and orphans:
+        deleted = await db.delete_candidates_by_ids([cid for cid, _ in orphans])
+
+    sample = [{"id": cid, "image_path": p} for cid, p in orphans[: max(0, limit)]]
+    return {
+        "scanned_total": len(pairs),
+        "orphans_found": len(orphans),
+        "deleted": deleted,
+        "dry_run": dry_run,
+        "sample": sample,
+    }
+
+
 @app.get("/api/system/db")
 async def system_db() -> dict[str, Any]:
     """System.jsx DB 블록 소스.

@@ -26,6 +26,8 @@ function fmtTs(ts) {
 function System() {
   const toasts = window.useToasts();
   const [running, setRunning] = useState(false);
+  const [orphanScan, setOrphanScan] = useState(null);  // { orphans_found, sample, scanned_total }
+  const [orphanBusy, setOrphanBusy] = useState(false);
 
   const health = window.useAsync(() => window.api.health(), []);
   // PLAN_comfyui_catalog.md Task 7 — ComfyUI 가 primary backend.
@@ -60,6 +62,46 @@ function System() {
       toasts.push({ kind: 'error', message: 'GC 실패: ' + (e.message || e) });
     } finally {
       setRunning(false);
+    }
+  }
+
+  async function scanOrphans() {
+    setOrphanBusy(true);
+    try {
+      const r = await window.api.gcOrphanCandidates({ dryRun: true, limit: 8 });
+      setOrphanScan(r);
+      toasts.push({
+        kind: r.orphans_found > 0 ? 'warning' : 'success',
+        message: r.orphans_found > 0
+          ? `Orphan ${r.orphans_found}건 검출 (전체 ${r.scanned_total}건 스캔). 아래에서 확인 후 정리하세요.`
+          : `Orphan 없음 (전체 ${r.scanned_total}건 스캔, 모두 정상).`,
+      });
+    } catch (e) {
+      toasts.push({ kind: 'error', message: '스캔 실패: ' + (e.message || e) });
+    } finally {
+      setOrphanBusy(false);
+    }
+  }
+
+  async function deleteOrphans() {
+    if (!orphanScan || orphanScan.orphans_found <= 0) return;
+    if (!window.confirm(
+      `image_path 가 disk 에 없는 candidate ${orphanScan.orphans_found}건을 DB 에서 영구 삭제합니다.\n` +
+      `되돌릴 수 없습니다. 진행할까요?`
+    )) return;
+    setOrphanBusy(true);
+    try {
+      const r = await window.api.gcOrphanCandidates({ dryRun: false, limit: 8 });
+      toasts.push({
+        kind: 'success',
+        message: `삭제 완료 — ${r.deleted}건 row 제거 (스캔 ${r.scanned_total}, orphan ${r.orphans_found}).`,
+      });
+      setOrphanScan(null);
+      dbStat.reload();
+    } catch (e) {
+      toasts.push({ kind: 'error', message: '삭제 실패: ' + (e.message || e) });
+    } finally {
+      setOrphanBusy(false);
     }
   }
 
@@ -154,6 +196,46 @@ function System() {
         <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)' }}>
           다음 메이저에서 제거 예정 (PLAN_comfyui_catalog.md §10)
         </span>
+      </div>
+
+      <div className="panel-card" style={{ marginBottom: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+          <h3 style={{ margin: 0 }}>Orphan candidates (이미지 없는 후보 row)</h3>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button type="button" className="btn" onClick={scanOrphans} disabled={orphanBusy}>
+              {orphanBusy ? '…' : '스캔 (dry-run)'}
+            </button>
+            {orphanScan && orphanScan.orphans_found > 0 && (
+              <button type="button" className="btn"
+                      onClick={deleteOrphans} disabled={orphanBusy}
+                      style={{ background: 'var(--accent-reject)', color: '#fff', borderColor: 'var(--accent-reject)' }}>
+                {orphanScan.orphans_found}건 영구 삭제
+              </button>
+            )}
+          </div>
+        </div>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
+          {orphanScan ? (
+            <>
+              스캔 {orphanScan.scanned_total} · orphan <b style={{ color: orphanScan.orphans_found > 0 ? 'var(--accent-warning, var(--accent-pick))' : 'var(--accent-approve)' }}>{orphanScan.orphans_found}</b>
+              {orphanScan.deleted > 0 && <> · 직전 삭제 {orphanScan.deleted}</>}
+            </>
+          ) : (
+            <span>모든 candidate row 의 image_path 가 disk 에 실재하는지 검사. dangling 만 정리 — 정상 row 는 건드리지 않음.</span>
+          )}
+        </div>
+        {orphanScan && orphanScan.sample && orphanScan.sample.length > 0 && (
+          <details>
+            <summary style={{ fontFamily: 'var(--font-mono)', fontSize: 11, cursor: 'pointer' }}>sample paths ({orphanScan.sample.length})</summary>
+            <ul style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)', marginTop: 6, listStyle: 'none', padding: 0 }}>
+              {orphanScan.sample.map((s) => (
+                <li key={s.id} style={{ wordBreak: 'break-all', marginBottom: 2 }}>
+                  <span style={{ color: 'var(--text-muted)' }}>id={s.id}</span> {s.image_path}
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
       </div>
 
       <div className="panel-card">

@@ -199,6 +199,12 @@ const api = {
 
   // System
   runGc: () => request('POST', '/api/system/gc/run'),
+  gcOrphanCandidates: ({ dryRun = true, limit = 10 } = {}) => {
+    const qs = new URLSearchParams();
+    qs.set('dry_run', dryRun ? 'true' : 'false');
+    qs.set('limit', String(limit));
+    return request('POST', `/api/system/gc/orphan-candidates?${qs.toString()}`);
+  },
   systemDb: () => request('GET', '/api/system/db'),
   systemWorker: () => request('GET', '/api/system/worker'),
   systemLogs: ({ level, limit } = {}) => {
