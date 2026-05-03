@@ -17,6 +17,13 @@ __pycache__/
 # Claude Code 세션/워크트리 상태
 .claude/
 
+# OMC (oh-my-claudecode) 오케스트레이션 state
+.omc/
+
+# repo root 에서 dev 서버가 만드는 SQLite 런타임 파일 — data/*.db 는 이미
+# 위에서 ignored 됐지만 run-dev.sh 가 ROOT 에 떨어뜨리는 케이스가 있어 추가.
+asset_factory.db
+
 # pytest 캐시 산출물 (CI/로컬에서 생성)
 .pytest_cache/
 pytest-cache-files-*/
