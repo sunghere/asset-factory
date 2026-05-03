@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -192,6 +192,10 @@ class Database:
             if "prompt_resolution_json" not in col_names:
                 await conn.execute(
                     "ALTER TABLE generation_tasks ADD COLUMN prompt_resolution_json TEXT"
+                )
+            if "started_at" not in col_names:
+                await conn.execute(
+                    "ALTER TABLE generation_tasks ADD COLUMN started_at TEXT"
                 )
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_tasks_batch ON generation_tasks(batch_id)"
@@ -405,10 +409,10 @@ class Database:
             await conn.execute(
                 """
                 UPDATE generation_tasks
-                SET status='processing', updated_at=?
+                SET status='processing', updated_at=?, started_at=?
                 WHERE id=?
                 """,
-                (utc_now(), row["id"]),
+                (utc_now(), utc_now(), row["id"]),
             )
             await conn.execute(
                 """
@@ -420,6 +424,52 @@ class Database:
             )
             await conn.commit()
             return dict(row)
+
+    async def find_and_requeue_stuck_tasks(self, timeout_seconds: int) -> list[dict[str, Any]]:
+        """processing 상태로 timeout_seconds 이상 멈춘 태스크를 재큐잉/실패 처리."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=timeout_seconds)).isoformat()
+        now = utc_now()
+        result: list[dict[str, Any]] = []
+
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.execute(
+                """
+                SELECT * FROM generation_tasks
+                WHERE status='processing'
+                  AND started_at IS NOT NULL
+                  AND started_at < ?
+                """,
+                (cutoff,),
+            )
+            rows = await cursor.fetchall()
+            for row in rows:
+                task = dict(row)
+                retries = int(task.get("retries") or 0)
+                max_retries = int(task.get("max_retries") or 3)
+                if retries < max_retries:
+                    await conn.execute(
+                        """
+                        UPDATE generation_tasks
+                        SET status='queued', retries=retries+1, updated_at=?,
+                            next_attempt_at=?, started_at=NULL
+                        WHERE id=?
+                        """,
+                        (now, now, task["id"]),
+                    )
+                else:
+                    await conn.execute(
+                        """
+                        UPDATE generation_tasks
+                        SET status='failed', last_error='stuck: completion_timeout exceeded',
+                            updated_at=?
+                        WHERE id=?
+                        """,
+                        (now, task["id"]),
+                    )
+                result.append(task)
+            await conn.commit()
+        return result
 
     async def finish_task_success(
         self,

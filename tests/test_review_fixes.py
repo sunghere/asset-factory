@@ -244,6 +244,112 @@ def test_recover_orphan_tasks_requeues_processing(isolated) -> None:
     asyncio.run(scenario())
 
 
+def test_claim_next_task_sets_started_at(isolated) -> None:
+    """claim 시 started_at이 기록되어 stuck 판별 기준점이 생긴다."""
+    db, _data = isolated
+
+    async def scenario() -> None:
+        await db.create_job(job_id="job-started", job_type="generate_single", payload=None)
+        await db.enqueue_generation_task(
+            {
+                "job_id": "job-started",
+                "project": "p",
+                "asset_key": "k",
+                "category": "ui",
+                "prompt": "x",
+                "negative_prompt": None,
+                "model_name": None,
+                "width": None,
+                "height": None,
+                "steps": 20,
+                "cfg": 7.0,
+                "sampler": "DPM++ 2M",
+                "expected_size": 64,
+                "max_colors": 32,
+                "max_retries": 3,
+            }
+        )
+        claimed = await db.claim_next_task()
+        assert claimed is not None
+        import aiosqlite
+        async with aiosqlite.connect(db.db_path) as conn:
+            cur = await conn.execute(
+                "SELECT started_at FROM generation_tasks WHERE id=?",
+                (claimed["id"],),
+            )
+            row = await cur.fetchone()
+        assert row is not None
+        assert row[0] is not None
+
+    asyncio.run(scenario())
+
+
+def test_find_and_requeue_stuck_tasks_requeues_or_fails_by_retry_budget(isolated) -> None:
+    """stuck task는 retries budget에 따라 queued 또는 failed로 전환된다."""
+    db, _data = isolated
+
+    async def scenario() -> None:
+        await db.create_job(job_id="job-stuck", job_type="generate_single", payload=None)
+        base = {
+            "job_id": "job-stuck",
+            "project": "p",
+            "asset_key": "k",
+            "category": "ui",
+            "prompt": "x",
+            "negative_prompt": None,
+            "model_name": None,
+            "width": None,
+            "height": None,
+            "steps": 20,
+            "cfg": 7.0,
+            "sampler": "DPM++ 2M",
+            "expected_size": 64,
+            "max_colors": 32,
+        }
+        await db.enqueue_generation_task({**base, "asset_key": "k1", "max_retries": 3})
+        await db.enqueue_generation_task({**base, "asset_key": "k2", "max_retries": 1})
+        t1 = await db.claim_next_task()
+        t2 = await db.claim_next_task()
+        assert t1 is not None and t2 is not None
+
+        import aiosqlite
+        stale = "2000-01-01T00:00:00+00:00"
+        async with aiosqlite.connect(db.db_path) as conn:
+            await conn.execute(
+                "UPDATE generation_tasks SET started_at=?, retries=0 WHERE id=?",
+                (stale, t1["id"]),
+            )
+            await conn.execute(
+                "UPDATE generation_tasks SET started_at=?, retries=1 WHERE id=?",
+                (stale, t2["id"]),
+            )
+            await conn.commit()
+
+        stuck = await db.find_and_requeue_stuck_tasks(timeout_seconds=600)
+        assert len(stuck) == 2
+
+        async with aiosqlite.connect(db.db_path) as conn:
+            c1 = await conn.execute(
+                "SELECT status, retries, started_at FROM generation_tasks WHERE id=?",
+                (t1["id"],),
+            )
+            r1 = await c1.fetchone()
+            c2 = await conn.execute(
+                "SELECT status, retries, last_error FROM generation_tasks WHERE id=?",
+                (t2["id"],),
+            )
+            r2 = await c2.fetchone()
+
+        assert r1 is not None and r2 is not None
+        assert r1[0] == "queued"
+        assert int(r1[1]) == 1
+        assert r1[2] is None
+        assert r2[0] == "failed"
+        assert "completion_timeout exceeded" in str(r2[2])
+
+    asyncio.run(scenario())
+
+
 # --------------------------------------------------------------------------------
 # Critical 3 - disk guard returns 507 at enqueue
 # --------------------------------------------------------------------------------
