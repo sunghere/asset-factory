@@ -3,6 +3,13 @@
 프로젝트 에이전트/작업자용 운영 규칙. 프로젝트 개요·기술스택은 `.cursorrules`,
 인프라·제약은 `HANDOFF.md`, 설계는 `DESIGN.md` 를 참조.
 
+> **에이전트 시작 시 — `AGENTS.md` 를 먼저 읽고 따를 것.**
+> [`AGENTS.md`](./AGENTS.md) 는 본 프로젝트에서 실제로 발생한 사고의 회고로
+> 도출된 운영 규칙 (로컬 ruff/pytest 선검증, PR 머지 전 CI/리뷰 확인,
+> `docs/pr/*.md` 본문 컨벤션, frontend↔backend 계약 mismatch, GC 의 file
+> ↔ DB row 짝 정합성 등) 을 담는다. 본 문서 (CLAUDE.md) 는 도메인/스크린/
+> 데이터 소스 규칙, `AGENTS.md` 는 개발 흐름 자체의 규칙.
+
 ---
 
 ## 세션 핸드오프 (`NEXT.md`)
