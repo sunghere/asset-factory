@@ -66,7 +66,7 @@ def test_system_db_reports_tables_and_queue(isolated, monkeypatch) -> None:  # n
             task_id = await db.enqueue_generation_task(
                 {
                     "job_id": "job_s1",
-                    "project": "p",
+                    "project": "pp",
                     "asset_key": f"k{idx}",
                     "category": "sprite",
                     "prompt": "x",

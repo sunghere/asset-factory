@@ -55,7 +55,7 @@ def test_scan_rejects_path_outside_allowlist(isolated, tmp_path) -> None:  # noq
     with TestClient(server.app) as client:
         r = client.post(
             "/api/projects/scan",
-            json={"project": "p", "root_path": str(tmp_path / "outside"), "max_colors": 32},
+            json={"project": "pp", "root_path": str(tmp_path / "outside"), "max_colors": 32},
         )
     assert r.status_code == 403
 
@@ -68,7 +68,7 @@ def test_image_serve_rejects_db_path_outside_allowlist(isolated, tmp_path) -> No
 
     async def prep() -> str:
         await db.upsert_scanned_asset(
-            project="p",
+            project="pp",
             asset_key="x",
             category="ui",
             image_path=str(outside),
@@ -79,7 +79,7 @@ def test_image_serve_rejects_db_path_outside_allowlist(isolated, tmp_path) -> No
             validation_status="pass",
             validation_message="ok",
         )
-        rows = await db.list_assets(project="p")
+        rows = await db.list_assets(project="pp")
         return rows[0]["id"]
 
     asset_id = asyncio.run(prep())
@@ -102,7 +102,7 @@ def test_replace_primary_keeps_old_path_in_history(isolated) -> None:
 
     async def scenario() -> None:
         await db.upsert_scanned_asset(
-            project="p",
+            project="pp",
             asset_key="k",
             category="ui",
             image_path=str(old_path),
@@ -113,7 +113,7 @@ def test_replace_primary_keeps_old_path_in_history(isolated) -> None:
             validation_status="pass",
             validation_message="ok",
         )
-        rows = await db.list_assets(project="p")
+        rows = await db.list_assets(project="pp")
         asset_id = rows[0]["id"]
         ok = await db.replace_asset_primary_image(
             asset_id,
@@ -148,12 +148,12 @@ def test_has_asset_helper(isolated) -> None:
 
     async def scenario() -> None:
         # 처음에는 asset이 없음
-        assert await db.has_asset("p", "k") is False
+        assert await db.has_asset("pp", "k") is False
         # 슬롯1이 먼저 성공한 상황을 흉내내기 위해 직접 upsert
         path = data / "slot1.png"
         _make_png(path)
         await db.upsert_scanned_asset(
-            project="p",
+            project="pp",
             asset_key="k",
             category="character",
             image_path=str(path),
@@ -164,7 +164,7 @@ def test_has_asset_helper(isolated) -> None:
             validation_status="pass",
             validation_message="ok",
         )
-        assert await db.has_asset("p", "k") is True
+        assert await db.has_asset("pp", "k") is True
 
     asyncio.run(scenario())
 
@@ -214,7 +214,7 @@ def test_recover_orphan_tasks_requeues_processing(isolated) -> None:
         await db.create_job(job_id="job1", job_type="generate_single", payload=None)
         task: dict[str, Any] = {
             "job_id": "job1",
-            "project": "p",
+            "project": "pp",
             "asset_key": "k",
             "category": "ui",
             "prompt": "x",
@@ -253,7 +253,7 @@ def test_claim_next_task_sets_started_at(isolated) -> None:
         await db.enqueue_generation_task(
             {
                 "job_id": "job-started",
-                "project": "p",
+                "project": "pp",
                 "asset_key": "k",
                 "category": "ui",
                 "prompt": "x",
@@ -292,7 +292,7 @@ def test_find_and_requeue_stuck_tasks_requeues_or_fails_by_retry_budget(isolated
         await db.create_job(job_id="job-stuck", job_type="generate_single", payload=None)
         base = {
             "job_id": "job-stuck",
-            "project": "p",
+            "project": "pp",
             "asset_key": "k",
             "category": "ui",
             "prompt": "x",
@@ -368,7 +368,7 @@ def test_generate_returns_507_when_disk_low(isolated, monkeypatch) -> None:  # n
         r = client.post(
             "/api/batches",
             json={
-                "project": "p",
+                "project": "pp",
                 "asset_key": "k",
                 "category": "character",
                 "workflow_category": "sprite",

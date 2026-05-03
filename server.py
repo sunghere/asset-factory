@@ -2174,6 +2174,7 @@ async def workflows_generate(request: WorkflowGenerateRequest) -> dict[str, Any]
     polling, 완료된 candidate 는 cherry-pick UI (``/cherry-pick?batch=...``) 또는
     기존 ``/api/assets`` 흐름으로 본다.
     """
+    await ensure_project_writable(request.project)
     try:
         variant = workflow_registry.variant(
             request.workflow_category, request.workflow_variant
@@ -2334,6 +2335,35 @@ def _slug_validation_error(slug: str) -> HTTPException:
     )
 
 
+async def ensure_project_writable(slug: str) -> None:
+    """write 진입점에서 호출하는 단일 helper (design doc §"자동 생성 흐름 (A2)").
+
+    - slug 가 검증 실패 → 400 (suggestion 포함, quarantined legacy 도 여기서 막힘).
+    - 미등록 + 검증 통과 → INSERT OR IGNORE (auto-create).
+    - archived → 409 ``project_archived``.
+    - purging → 410 ``project_being_purged``.
+
+    body 의 ``project`` 필드를 첫 줄에서 ``await ensure_project_writable(spec.project)``
+    로 부르는 패턴 — FastAPI Depends 는 query/path 만 보므로 helper 직호출.
+    """
+    if not is_valid_project_slug(slug):
+        raise _slug_validation_error(slug)
+    project = await db.get_project(slug)
+    if project is None:
+        await db.upsert_project_idempotent(slug)
+        return
+    if project.get("purge_status"):
+        raise HTTPException(
+            status_code=410,
+            detail={"error": "project_being_purged", "slug": slug},
+        )
+    if project.get("archived_at"):
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "project_archived", "slug": slug},
+        )
+
+
 async def _project_to_response(project_row: dict[str, Any]) -> dict[str, Any]:
     """projects row + counts 결합 — /api/projects 응답 schema (T8).
 
@@ -2472,6 +2502,7 @@ async def _enqueue_design_batch(spec: DesignBatchRequest) -> dict[str, Any]:
 
     batch_id를 발급하고 expand된 task들을 generation_tasks에 enqueue한다.
     예상 ETA는 task당 6초의 거친 추정치이다."""
+    await ensure_project_writable(spec.project)
     try:
         tasks = expand_design_batch(spec)
     except ValueError as exc:
@@ -2980,6 +3011,9 @@ async def approve_from_candidate(body: ApproveFromCandidateRequest) -> dict[str,
     asset_key = body.asset_key or candidate["asset_key"]
     category = body.category or "character"
 
+    # archive 후 새 approve 거부 — 진행 중 cherry-pick 도 read-only.
+    await ensure_project_writable(project)
+
     src_path = _ensure_path_allowed(Path(candidate["image_path"]))
     if not src_path.exists():
         raise HTTPException(status_code=404, detail="후보 파일이 디스크에 없습니다.")
@@ -3095,6 +3129,7 @@ async def approve_from_candidate(body: ApproveFromCandidateRequest) -> dict[str,
 @app.post("/api/projects/scan", dependencies=[Depends(require_api_key)])
 async def scan_project_assets(request: ScanRequest) -> dict[str, Any]:
     """기존 디렉토리를 스캔해 에셋 DB를 동기화한다."""
+    await ensure_project_writable(request.project)
     root = _ensure_path_allowed(Path(request.root_path))
     try:
         scanned = scan_directory(root)
@@ -3530,6 +3565,8 @@ async def regenerate_asset(asset_id: str) -> dict[str, str]:
     if asset is None:
         raise HTTPException(status_code=404, detail="에셋을 찾을 수 없습니다.")
 
+    await ensure_project_writable(asset["project"])
+
     job_id = str(uuid.uuid4())
     prompt = asset.get("generation_prompt")
     if not prompt:
@@ -3760,6 +3797,8 @@ async def batch_regenerate_failed(
 ) -> dict[str, Any]:
     """검증 FAIL 에셋에 대해 재생성 작업을 일괄 등록한다."""
     _ensure_disk_space_for_enqueue()
+    if project is not None:
+        await ensure_project_writable(project)
     assets = await db.list_assets(project=project, validation_status="fail")
     job_ids: list[str] = []
     for asset in assets:
