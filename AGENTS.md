@@ -35,9 +35,16 @@ PR (#49) 필요.
 ```
 
 - ruff 가 빨간 상태로 push 하지 말 것 (CI 의 Lint+Test job 이 즉시 실패).
-- pytest 433+ 통과 baseline 유지 (현재 main 기준 438). `tests/test_generator_comfyui.py` 는
+- pytest 433+ 통과 baseline 유지 (현재 main 기준 438+). `tests/test_generator_comfyui.py` 는
   `aioresponses` 미설치 환경 이슈 — `--ignore` 로 우회.
 - `.venv/bin/python` 로 호출 (시스템 python 의 라이브러리 mismatch 방지).
+
+### 자동화 — pre-commit hook
+
+`./scripts/install-hooks.sh` 1회 실행으로 `.git/hooks/pre-commit` 이
+`scripts/git-hooks/pre-commit` 으로 symlink 됨. 이후 staged `.py` 가 있는
+모든 commit 에서 ruff 가 자동 실행되어 빨간 상태가 main 까지 새는 걸
+차단. 임시 우회는 `git commit --no-verify` (정말 필요할 때만).
 
 ### 새 코드 작성 후 자가 점검
 
@@ -76,9 +83,16 @@ gh api repos/{owner}/{repo}/pulls/N/comments --jq '.[] | {path, line, body: (.bo
 
 ### Transient flake 대응
 
-알려진 flake (예: `test_system_db_reports_tables_and_queue` 의 lifespan
-worker timing race) 가 단독으로 빨갛게 뜨면 `gh run rerun {run_id} --failed`
-로 재시도. 한 번 더 빨개지면 real regression 으로 간주.
+알려진 flake 가 단독으로 빨갛게 뜨면 `gh run rerun {run_id} --failed` 로 재시도.
+한 번 더 빨개지면 real regression 으로 간주. 본 repo 의 known flake 는
+모두 fix 완료 상태 (PR #55 까지) — 새 flake 가 나면 본 섹션에 등재 후 별도
+PR 로 영구 fix.
+
+### 인프라 가드 — branch protection
+
+행동 측 가드 (위 폴링 커맨드) 와 별도로 GitHub 측에서도 빨간 머지를 막는
+branch protection rule 을 켤 것. 1회 설정 — `docs/CI-protection-setup.md`
+참조. 두 층 보완 관계: 행동은 누락 가능하지만 인프라는 영구.
 
 ### 머지 모드
 

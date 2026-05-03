@@ -44,8 +44,19 @@ def isolated(tmp_path: Path, monkeypatch):  # noqa: ANN001
     return db, db_path
 
 
-def test_system_db_reports_tables_and_queue(isolated) -> None:
+def test_system_db_reports_tables_and_queue(isolated, monkeypatch) -> None:  # noqa: ANN001
     db, db_path = isolated
+
+    # 본 테스트는 queued/processing/failed 의 정확한 카운트를 단언하는데,
+    # TestClient(..) 의 lifespan 이 실제 generation_worker 를 띄워 db.claim_next_task
+    # 를 호출한다. 워커가 queued task 를 claim 해 processing 으로 옮기는 race
+    # window 에서 (queued=2, processing=1) 같이 합 3 인 상태가 잡혀 어쌔션이
+    # 깨졌다 (Python 3.12 + GitHub runner 타이밍에서만 종종 재현). claim 을
+    # 비활성하면 워커는 idle 상태로만 돌고 DB count 는 seed 그대로 유지된다.
+    # test_system_worker_contract 는 별도 테스트라 영향 없음 (heartbeat 만 검증).
+    async def _no_claim():
+        return None
+    monkeypatch.setattr(db, "claim_next_task", _no_claim)
 
     async def seed() -> None:
         await db.create_job("job_s1", "generation", None)
