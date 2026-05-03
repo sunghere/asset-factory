@@ -1785,8 +1785,11 @@ class Database:
         """최근 batch 목록 (각 batch_id 별 집계).
 
         - ``since``: ISO8601 UTC, 이 시각 이후 생성된 batch만 필터.
-        - 각 항목: batch_id, project, asset_key, category, total, done, failed,
-          rejected_candidates, picked_candidates, first_created_at, last_updated_at.
+        - 각 항목: batch_id, project, asset_key, category, workflow_category,
+          workflow_variants(distinct list), backend, total, done, failed, active,
+          first_created_at, last_updated_at, candidate_total, rejected_count.
+        - workflow_variants 는 batch 안에서 다양한 variant 가 섞여 있을 수
+          있어 distinct 집합. 단일 variant batch 면 길이 1.
         """
         params: list[Any] = []
         where = "WHERE batch_id IS NOT NULL"
@@ -1804,6 +1807,8 @@ class Database:
                     MIN(asset_key) AS asset_key,
                     MIN(category) AS category,
                     MIN(job_id) AS job_id,
+                    MIN(workflow_category) AS workflow_category,
+                    MIN(backend) AS backend,
                     COUNT(*) AS total,
                     SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) AS done,
                     SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed,
@@ -1836,6 +1841,22 @@ class Database:
                 agg = await cur.fetchone()
                 row["candidate_total"] = int(agg["candidate_total"] or 0) if agg else 0
                 row["rejected_count"] = int(agg["rejected_count"] or 0) if agg else 0
+
+                # workflow_variants distinct — batch 안에 여러 variant 가 섞일
+                # 수 있어 GROUP BY 단계에서 집계 불가. 별도 1쿼리로 모음.
+                vcur = await conn.execute(
+                    """
+                    SELECT DISTINCT workflow_variant
+                    FROM generation_tasks
+                    WHERE batch_id=? AND workflow_variant IS NOT NULL
+                    ORDER BY workflow_variant
+                    """,
+                    (row["batch_id"],),
+                )
+                vrows = await vcur.fetchall()
+                row["workflow_variants"] = [
+                    str(r["workflow_variant"]) for r in vrows if r["workflow_variant"]
+                ]
         return results
 
     async def list_asset_candidates(

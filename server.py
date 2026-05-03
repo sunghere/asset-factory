@@ -326,26 +326,26 @@ def _approved_dir(project: str) -> Path:
 
 
 class GenerateRequest(BaseModel):
-    """단일 생성 요청."""
+    """A1111 단일 생성 요청 (legacy).
+
+    .. deprecated::
+        ``/api/generate`` 가 410 Gone 으로 전환됨에 따라 이 schema 는
+        backwards-compat 차원의 stub. ComfyUI 기반은 ``WorkflowGenerateRequest``.
+    """
 
     project: str = Field(..., examples=["cat-raising"])
     asset_key: str = Field(..., examples=["ksh_baby_idle"])
     category: str = Field(default="sprite")
-    prompt: str
-    negative_prompt: str | None = None
-    model_name: str | None = None
-    width: int | None = None
-    height: int | None = None
-    steps: int = 20
-    cfg: float = 7.0
-    sampler: str = "DPM++ 2M"
-    expected_size: int | None = 64
-    max_colors: int = 32
-    max_retries: int = 3
+    prompt: str = ""
 
 
 class BatchGenerateRequest(BaseModel):
-    """스펙 기반 배치 생성 요청."""
+    """A1111 spec 기반 배치 요청 (legacy).
+
+    .. deprecated::
+        ``/api/generate/batch`` 가 410 Gone. successor: ``/api/batches``
+        (DesignBatchRequest, workflow 곱집합).
+    """
 
     project: str | None = None
     spec: dict[str, Any] | None = None
@@ -389,42 +389,60 @@ class RestoreHistoryRequest(BaseModel):
     version: int = Field(ge=1)
 
 
-class LoraSpec(BaseModel):
-    """곱집합 한 칸을 차지할 LoRA 한 개."""
-
-    name: str
-    weight: float = Field(default=0.7, ge=-2.0, le=2.0)
-
-
 class BatchCommonParams(BaseModel):
-    """배치 모든 task에 공통 적용할 SD 파라미터."""
+    """배치 모든 task 에 공통 적용할 ComfyUI 호출 파라미터.
 
-    steps: int = Field(default=28, ge=1, le=200)
-    cfg: float = Field(default=7.0, ge=0.0, le=30.0)
-    sampler: str = Field(default="DPM++ 2M")
-    width: int | None = Field(default=None, ge=64, le=2048)
-    height: int | None = Field(default=None, ge=64, le=2048)
+    워크플로우 기반에서는 steps/cfg/sampler 가 variant default 의 *override*
+    역할 — None 이면 variant.defaults 값을 그대로 쓴다. width/height 는
+    workflow 의 input slot 이므로 ``workflow_params_overrides`` 쪽으로 옮겨
+    여기서는 다루지 않는다.
+    """
+
+    steps: int | None = Field(default=None, ge=1, le=200)
+    cfg: float | None = Field(default=None, ge=0.0, le=30.0)
+    sampler: str | None = Field(default=None)
     negative_prompt: str | None = None
     expected_size: int | None = None
-    max_colors: int = Field(default=32, ge=1, le=256)
+    max_colors: int | None = Field(default=None, ge=1, le=256)
     max_retries: int = Field(default=3, ge=0, le=10)
+    approval_mode: Literal["manual", "bypass"] = "manual"
 
 
 class DesignBatchRequest(BaseModel):
-    """에이전트 친화 batch 곱집합 spec.
+    """ComfyUI 워크플로우 곱집합 batch spec.
 
-    내부에서 prompts × models × loras × seeds 곱집합을 expand하여
-    generation_tasks를 enqueue한다. spec은 client agent가 LLM 등으로
-    먼저 풀어서 보내야 한다(AF는 LLM 호출 안 함)."""
+    내부에서 ``prompts × workflow_variants × workflow_params_overrides ×
+    seeds`` 곱집합을 expand 하여 ``generation_tasks`` 에 enqueue 한다. 모든
+    variant 는 ``workflow_category`` 안에 등록되어 있어야 한다 (cross-category
+    배치는 의도적으로 막음 — params schema 가 카테고리 단위로 일관됨).
+
+    예: workflow_category='sprite', workflow_variants=['pixel_alpha',
+    'pixel_solid'], workflow_params_overrides=[{}, {'controlnet_strength':
+    0.8}], prompts=[A, B], seeds_per_combo=2 → 2×2×2×2 = 16 tasks.
+    """
 
     asset_key: str = Field(..., examples=["marine_v2_idle"])
     project: str = Field(default="default-project")
     category: str = Field(default="character")
+    workflow_category: str = Field(..., examples=["sprite"])
+    workflow_variants: list[str] = Field(default_factory=list)
+    workflow_params_overrides: list[dict[str, Any]] = Field(
+        default_factory=lambda: [{}],
+        description=(
+            "각 entry 는 patch_workflow 인자 dict. 빈 dict {} 는 variant default 를 "
+            "그대로 사용. 키는 pose_image / controlnet_strength / lora_strengths / "
+            "width / height 등 workflow_patcher 가 인지하는 것."
+        ),
+    )
     prompts: list[str] = Field(default_factory=list)
-    models: list[str] = Field(default_factory=list)
-    loras: list[list[LoraSpec]] = Field(default_factory=list)
+    subject: str | None = None
+    prompt_mode: Literal["auto", "legacy", "subject"] = "auto"
+    style_extra: str | None = None
     seeds: list[int] | None = None
-    seeds_per_combo: int = Field(default=1, ge=1, le=64)
+    # 64 → 256 상향: ComfyUI 워크플로우 기반에서는 곱집합 dim 이 적어 (variants
+    # 1~2, overrides 1~3) seeds 가 주된 다양성 축. dogfood 100 장 케이스 등
+    # 한 batch 에 100+ seed 가 정상 (이전 A1111 는 model×lora 곱셈으로 분산).
+    seeds_per_combo: int = Field(default=1, ge=1, le=256)
     common: BatchCommonParams = Field(default_factory=BatchCommonParams)
 
 
@@ -618,120 +636,98 @@ def _push_log(level: str, message: str, *, context: dict[str, Any] | None = None
         del _log_ring[: len(_log_ring) - _LOG_RING_MAX]
 
 
-def _extract_tasks_from_spec(spec: dict[str, Any], project_override: str | None = None) -> tuple[str, list[dict[str, Any]]]:
-    """스펙 JSON에서 생성 태스크 목록을 추출한다."""
-    project = project_override or str(spec.get("project") or "default-project")
-    generation_config = spec.get("generation_config", {})
-    base_prompt = str(generation_config.get("base_prompt") or "pixel art sprite")
-    negative_prompt = generation_config.get("negative_prompt")
-    model_name = generation_config.get("model")
-    steps = int(generation_config.get("steps", 20))
-    cfg = float(generation_config.get("cfg", 7))
-    sampler = str(generation_config.get("sampler", "DPM++ 2M"))
-    max_colors = int(generation_config.get("max_colors", 32))
-    max_retries = int(generation_config.get("max_retries", 3))
+def _make_workflow_task(
+    *,
+    project: str,
+    asset_key: str,
+    category: str,
+    workflow_category: str,
+    variant: Any,
+    workflow_params: dict[str, Any] | None,
+    resolution: Any,
+    seed: int | None,
+    candidates_total: int,
+    candidate_slot: int | None,
+    steps: int | None,
+    cfg: float | None,
+    sampler: str | None,
+    expected_size: int | None,
+    max_colors: int | None,
+    max_retries: int,
+    approval_mode: str,
+) -> dict[str, Any]:
+    """``enqueue_generation_task`` 가 받는 ComfyUI task dict 를 만든다.
 
-    tasks: list[dict[str, Any]] = []
+    ``expand_design_batch`` (배치 곱집합) 와 ``workflows_generate`` (단일/N
+    호출) 모두에서 task dict 모양을 통일하기 위한 공유 헬퍼. variant default
+    를 fallback 으로 사용 — steps/cfg/sampler 가 None 이면 variant.defaults
+    의 값으로 채운다.
+    """
+    steps_value = int(
+        steps if steps is not None
+        else variant.defaults.get("steps", 20)
+    )
+    cfg_value = float(
+        cfg if cfg is not None
+        else variant.defaults.get("cfg", 7.0)
+    )
+    sampler_value = str(
+        sampler if sampler is not None
+        else variant.defaults.get("sampler", "DPM++ 2M")
+    )
+    workflow_params_json = (
+        json.dumps(workflow_params, ensure_ascii=False)
+        if workflow_params
+        else None
+    )
+    prompt_resolution_json = json.dumps(resolution.to_dict(), ensure_ascii=False)
 
-    for character in spec.get("characters", []):
-        char_id = str(character.get("id", "character"))
-        char_prompt = str(character.get("character_prompt") or "")
-        for stage in character.get("stages", []):
-            stage_name = str(stage.get("stage", "stage"))
-            expected_size = int(stage.get("output_size", 64))
-            for action in stage.get("actions", []):
-                action_name = str(action)
-                asset_key = f"{char_id}_{stage_name}_{action_name}"
-                prompt = f"{base_prompt}, {char_prompt}, {stage_name} stage, {action_name} action"
-                tasks.append(
-                    {
-                        "project": project,
-                        "asset_key": asset_key,
-                        "category": "character",
-                        "prompt": prompt,
-                        "negative_prompt": negative_prompt,
-                        "model_name": model_name,
-                        "width": None,
-                        "height": None,
-                        "steps": steps,
-                        "cfg": cfg,
-                        "sampler": sampler,
-                        "expected_size": expected_size,
-                        "max_colors": max_colors,
-                        "max_retries": max_retries,
-                    }
-                )
-
-    for bucket, category in (("ui_assets", "ui"), ("backgrounds", "background"), ("items", "item")):
-        for item in spec.get(bucket, []):
-            item_id = str(item.get("id") or "asset")
-            prompt_hint = str(item.get("prompt_hint") or "")
-            size_value = item.get("size")
-            expected_size = int(size_value) if isinstance(size_value, int) else 64
-            prompt = f"{base_prompt}, {category}, {prompt_hint}".strip(", ")
-            tasks.append(
-                {
-                    "project": project,
-                    "asset_key": item_id,
-                    "category": category,
-                    "prompt": prompt,
-                    "negative_prompt": negative_prompt,
-                    "model_name": model_name,
-                    "width": None,
-                    "height": None,
-                    "steps": steps,
-                    "cfg": cfg,
-                    "sampler": sampler,
-                    "expected_size": expected_size,
-                    "max_colors": max_colors,
-                    "max_retries": max_retries,
-                }
-            )
-
-    candidates_per_asset = int(generation_config.get("candidates_per_asset", 1))
-    if candidates_per_asset < 1:
-        candidates_per_asset = 1
-    if candidates_per_asset > 1:
-        expanded: list[dict[str, Any]] = []
-        for task_item in tasks:
-            for slot in range(candidates_per_asset):
-                expanded.append(
-                    {
-                        **task_item,
-                        "candidate_slot": slot,
-                        "candidates_total": candidates_per_asset,
-                    }
-                )
-        tasks = expanded
-
-    return project, tasks
-
-
-def _format_lora_suffix(loras: list[LoraSpec] | list[dict[str, Any]]) -> str:
-    """LoRA 스펙을 prompt에 붙일 ``<lora:name:weight>`` 토큰들로 직렬화한다."""
-    parts: list[str] = []
-    for lora in loras:
-        if isinstance(lora, LoraSpec):
-            name, weight = lora.name, lora.weight
-        else:
-            name, weight = str(lora["name"]), float(lora.get("weight", 0.7))
-        if not name:
-            continue
-        parts.append(f"<lora:{name}:{weight:g}>")
-    return (" " + " ".join(parts)) if parts else ""
+    return {
+        "project": project,
+        "asset_key": asset_key,
+        "category": category,
+        "prompt": resolution.final_positive,
+        "negative_prompt": resolution.final_negative or None,
+        "model_name": None,
+        "width": None,
+        "height": None,
+        "steps": steps_value,
+        "cfg": cfg_value,
+        "sampler": sampler_value,
+        "expected_size": expected_size,
+        "max_colors": _resolve_max_colors(workflow_category, max_colors),
+        "max_retries": max_retries,
+        "candidate_slot": candidate_slot,
+        "candidates_total": candidates_total,
+        "seed": seed,
+        "backend": "comfyui",
+        "workflow_category": workflow_category,
+        "workflow_variant": variant.name,
+        "workflow_params_json": workflow_params_json,
+        "approval_mode": approval_mode,
+        "prompt_resolution_json": prompt_resolution_json,
+    }
 
 
 def expand_design_batch(spec: DesignBatchRequest) -> list[dict[str, Any]]:
-    """batch spec → generation_tasks dict 리스트로 expand 한다.
+    """batch spec → ComfyUI workflow task dict 리스트.
 
-    곱집합: prompts × models × (loras 또는 [[]]) × seeds
-    각 task의 prompt에는 LoRA 토큰이 자동으로 append된다.
-    seeds가 비어있으면 ``seeds_per_combo`` 개의 무작위 시드를 생성한다.
+    곱집합: ``prompts × workflow_variants × workflow_params_overrides ×
+    seeds``. variant 가 등록되지 않았거나 호출 불가면 ``ValueError``
+    (호출자 ``_enqueue_design_batch`` 가 HTTP 400 으로 변환). prompt 합성은
+    ``resolve_prompt`` 가 variant 의 prompt_template 에 따라 legacy/subject
+    모드를 자동 분기.
     """
     if not spec.prompts:
-        raise ValueError("prompts는 최소 1개 필요합니다.")
-    models: list[str | None] = list(spec.models) if spec.models else [None]
-    lora_combos: list[list[LoraSpec]] = list(spec.loras) if spec.loras else [[]]
+        raise ValueError("prompts 는 최소 1개 필요합니다.")
+    if not spec.workflow_variants:
+        raise ValueError("workflow_variants 는 최소 1개 필요합니다.")
+
+    overrides = (
+        list(spec.workflow_params_overrides)
+        if spec.workflow_params_overrides
+        else [{}]
+    )
 
     if spec.seeds:
         seeds: list[int | None] = [int(s) for s in spec.seeds]
@@ -740,39 +736,60 @@ def expand_design_batch(spec: DesignBatchRequest) -> list[dict[str, Any]]:
     else:
         seeds = [None]
 
+    # 곱집합 만들기 전에 variant 사전 검증 — 미등록/사용불가 잡아서 부분
+    # enqueue 방지.
+    variants_by_name: dict[str, Any] = {}
+    for variant_name in spec.workflow_variants:
+        try:
+            variant = workflow_registry.variant(spec.workflow_category, variant_name)
+        except WorkflowRegistryError as exc:
+            raise ValueError(
+                f"variant {spec.workflow_category}/{variant_name}: {exc}"
+            ) from exc
+        if not variant.available:
+            raise ValueError(
+                f"variant {spec.workflow_category}/{variant_name} 는 호출 불가 "
+                f"(status={variant.status})"
+            )
+        variants_by_name[variant_name] = variant
+
     tasks: list[dict[str, Any]] = []
     for prompt in spec.prompts:
-        for model in models:
-            for lora_combo in lora_combos:
-                lora_suffix = _format_lora_suffix(lora_combo)
-                full_prompt = (prompt + lora_suffix).strip()
-                lora_spec_serialized = json.dumps(
-                    [
-                        {"name": item.name, "weight": item.weight}
-                        for item in lora_combo
-                    ],
-                    ensure_ascii=False,
+        for variant_name in spec.workflow_variants:
+            variant = variants_by_name[variant_name]
+            try:
+                resolution = resolve_prompt(
+                    variant,
+                    subject=spec.subject,
+                    prompt=prompt,
+                    negative_prompt=spec.common.negative_prompt,
+                    prompt_mode=spec.prompt_mode,
+                    style_extra=spec.style_extra,
                 )
+            except PromptResolutionError as exc:
+                raise ValueError(f"prompt 합성 실패 ({variant_name}): {exc}") from exc
+            for override in overrides:
                 for seed in seeds:
                     tasks.append(
-                        {
-                            "project": spec.project,
-                            "asset_key": spec.asset_key,
-                            "category": spec.category,
-                            "prompt": full_prompt,
-                            "negative_prompt": spec.common.negative_prompt,
-                            "model_name": model,
-                            "width": spec.common.width,
-                            "height": spec.common.height,
-                            "steps": spec.common.steps,
-                            "cfg": spec.common.cfg,
-                            "sampler": spec.common.sampler,
-                            "expected_size": spec.common.expected_size,
-                            "max_colors": spec.common.max_colors,
-                            "max_retries": spec.common.max_retries,
-                            "lora_spec_json": lora_spec_serialized,
-                            "seed": seed,
-                        }
+                        _make_workflow_task(
+                            project=spec.project,
+                            asset_key=spec.asset_key,
+                            category=spec.category,
+                            workflow_category=spec.workflow_category,
+                            variant=variant,
+                            workflow_params=override,
+                            resolution=resolution,
+                            seed=seed,
+                            candidates_total=1,
+                            candidate_slot=None,
+                            steps=spec.common.steps,
+                            cfg=spec.common.cfg,
+                            sampler=spec.common.sampler,
+                            expected_size=spec.common.expected_size,
+                            max_colors=spec.common.max_colors,
+                            max_retries=spec.common.max_retries,
+                            approval_mode=spec.common.approval_mode,
+                        )
                     )
     return tasks
 
@@ -1769,6 +1786,46 @@ def _mark_a1111_deprecated(response: Response, endpoint_path: str) -> dict[str, 
     return headers
 
 
+# ── A1111 generate endpoints — 410 Gone (Task 9, 본 PR) ────────────────────
+# A1111 backend 자체가 deprecated → call site 가 task 를 만들어도 워커가
+# 디스패치할 백엔드가 없음. 200 + 헤더 패턴 (catalog 식) 대신 즉시 410 Gone
+# 으로 명확히 끝낸다. successor: ``/api/workflows/generate`` (단일) +
+# ``/api/batches`` (배치).
+
+_legacy_generate_logger = _logging.getLogger("asset_factory.legacy_generate_gone")
+_legacy_generate_warned = {"flag": False}
+
+
+def _legacy_generate_gone(successor: str) -> HTTPException:
+    """A1111 시절의 generate 엔드포인트 호출에 대해 410 + deprecation 헤더 응답.
+
+    HTTPException 자체에 헤더를 실어 클라이언트가 Sunset / successor-version
+    링크를 즉시 볼 수 있게 한다 (FastAPI 가 detail 본문도 그대로 전달).
+    """
+    if not _legacy_generate_warned["flag"]:
+        _legacy_generate_logger.warning(
+            "Legacy A1111 generate endpoint called — gone. Successor=%s",
+            successor,
+        )
+        _legacy_generate_warned["flag"] = True
+    return HTTPException(
+        status_code=410,
+        detail={
+            "code": "a1111_endpoint_gone",
+            "message": (
+                "A1111 기반 generate 엔드포인트는 제거되었습니다. "
+                f"새 엔드포인트 사용: {successor}."
+            ),
+            "successor": successor,
+        },
+        headers={
+            "Deprecation": "true",
+            "Sunset": _a1111_deprecation_sunset_date(),
+            "Link": f'<{successor}>; rel="successor-version"',
+        },
+    )
+
+
 @app.get("/api/sd/catalog/models")
 async def sd_catalog_models(response: Response) -> dict[str, Any]:
     """A1111 모델 목록 + ``config/sd_catalog.yml`` 메타데이터 병합 반환.
@@ -2110,61 +2167,31 @@ async def workflows_generate(request: WorkflowGenerateRequest) -> dict[str, Any]
     job_type = "workflow_single" if request.candidates_total == 1 else "workflow_design"
     await db.create_job(job_id=job_id, job_type=job_type, payload=request.model_dump())
 
-    workflow_params_json = (
-        json.dumps(request.workflow_params, ensure_ascii=False)
-        if request.workflow_params
-        else None
-    )
-    prompt_resolution_json = json.dumps(resolution.to_dict(), ensure_ascii=False)
     candidates_total = int(request.candidates_total)
     base_seed = request.seed
 
-    # generation_tasks 의 steps/cfg/sampler 컬럼은 NOT NULL — variant 기본값으로 채움.
-    steps_value = int(
-        request.steps if request.steps is not None
-        else variant.defaults.get("steps", 20)
-    )
-    cfg_value = float(
-        request.cfg if request.cfg is not None
-        else variant.defaults.get("cfg", 7.0)
-    )
-    sampler_value = str(
-        request.sampler if request.sampler is not None
-        else variant.defaults.get("sampler", "DPM++ 2M")
-    )
-
     for slot_index in range(candidates_total):
         slot_seed = (base_seed + slot_index) if base_seed is not None else None
-        await db.enqueue_generation_task(
-            {
-                "job_id": job_id,
-                "project": request.project,
-                "asset_key": request.asset_key,
-                "category": request.category,
-                # §1.B: ComfyUI 로 디스패치되는 실제 final_positive/final_negative.
-                # legacy 모드면 request.prompt 그대로 (resolution.final_positive 와 동일).
-                "prompt": resolution.final_positive,
-                "negative_prompt": resolution.final_negative or None,
-                "model_name": None,
-                "width": None,
-                "height": None,
-                "steps": steps_value,
-                "cfg": cfg_value,
-                "sampler": sampler_value,
-                "expected_size": request.expected_size,
-                "max_colors": _resolve_max_colors(request.workflow_category, request.max_colors),
-                "max_retries": request.max_retries,
-                "candidate_slot": slot_index if candidates_total > 1 else None,
-                "candidates_total": candidates_total,
-                "seed": slot_seed,
-                "backend": "comfyui",
-                "workflow_category": request.workflow_category,
-                "workflow_variant": request.workflow_variant,
-                "workflow_params_json": workflow_params_json,
-                "approval_mode": request.approval_mode,
-                "prompt_resolution_json": prompt_resolution_json,
-            }
+        task = _make_workflow_task(
+            project=request.project,
+            asset_key=request.asset_key,
+            category=request.category,
+            workflow_category=request.workflow_category,
+            variant=variant,
+            workflow_params=request.workflow_params,
+            resolution=resolution,
+            seed=slot_seed,
+            candidates_total=candidates_total,
+            candidate_slot=slot_index if candidates_total > 1 else None,
+            steps=request.steps,
+            cfg=request.cfg,
+            sampler=request.sampler,
+            expected_size=request.expected_size,
+            max_colors=request.max_colors,
+            max_retries=request.max_retries,
+            approval_mode=request.approval_mode,
         )
+        await db.enqueue_generation_task({"job_id": job_id, **task})
     await db.mark_job_running(job_id)
     await event_broker.publish({"type": ev.EVT_JOB_CREATED, "job_id": job_id})
     return {
@@ -2268,63 +2295,27 @@ async def list_project_assets(
 
 
 @app.post("/api/generate", dependencies=[Depends(require_api_key)])
-async def generate_asset(request: GenerateRequest) -> dict[str, str]:
-    """단일 에셋 생성 작업 등록."""
-    _ensure_disk_space_for_enqueue()
-    job_id = str(uuid.uuid4())
-    await db.create_job(job_id=job_id, job_type="generate_single", payload=request.model_dump())
-    await db.enqueue_generation_task(
-        {
-            "job_id": job_id,
-            "project": request.project,
-            "asset_key": request.asset_key,
-            "category": request.category,
-            "prompt": request.prompt,
-            "negative_prompt": request.negative_prompt,
-            "model_name": request.model_name,
-            "width": request.width,
-            "height": request.height,
-            "steps": request.steps,
-            "cfg": request.cfg,
-            "sampler": request.sampler,
-            "expected_size": request.expected_size,
-            "max_colors": request.max_colors,
-            "max_retries": request.max_retries,
-        }
-    )
-    await db.mark_job_running(job_id)
-    await event_broker.publish({"type": ev.EVT_JOB_CREATED, "job_id": job_id})
-    return {"job_id": job_id}
+async def generate_asset(_request: GenerateRequest) -> dict[str, str]:
+    """A1111 기반 단일 생성 — 제거됨 (410 Gone).
+
+    .. deprecated::
+        ``model_name`` / ``sampler`` / ``cfg`` 페이로드 기반 단일 생성은
+        ``/api/workflows/generate`` (ComfyUI 변형 기반) 로 대체. payload schema
+        가 다르므로 클라이언트는 ``WorkflowGenerateRequest`` 로 갈아탈 것.
+    """
+    raise _legacy_generate_gone(successor="/api/workflows/generate")
 
 
 @app.post("/api/generate/batch", dependencies=[Depends(require_api_key)])
-async def generate_batch(request: BatchGenerateRequest) -> dict[str, Any]:
-    """스펙 기반 배치 생성 작업 등록."""
-    _ensure_disk_space_for_enqueue()
-    spec = request.spec
-    if spec is None:
-        if not request.spec_id:
-            raise HTTPException(status_code=400, detail="spec 또는 spec_id 중 하나는 필요합니다.")
-        spec_path = BASE_DIR / "specs" / f"{request.spec_id}.json"
-        if not spec_path.exists():
-            raise HTTPException(status_code=404, detail="요청한 spec_id 파일이 없습니다.")
-        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+async def generate_batch(_request: BatchGenerateRequest) -> dict[str, Any]:
+    """A1111 기반 spec 배치 — 제거됨 (410 Gone).
 
-    project, tasks = _extract_tasks_from_spec(spec, request.project)
-    if not tasks:
-        raise HTTPException(status_code=400, detail="생성 가능한 태스크가 없습니다. spec을 확인하세요.")
-
-    job_id = str(uuid.uuid4())
-    await db.create_job(
-        job_id=job_id,
-        job_type="generate_batch",
-        payload={"project": project, "task_count": len(tasks)},
-    )
-    for task in tasks:
-        await db.enqueue_generation_task({"job_id": job_id, **task})
-    await db.mark_job_running(job_id)
-    await event_broker.publish({"type": ev.EVT_BATCH_JOB_CREATED, "job_id": job_id, "task_count": len(tasks)})
-    return {"job_id": job_id, "project": project, "task_count": len(tasks)}
+    .. deprecated::
+        ``spec`` / ``spec_id`` 기반 배치는 ``/api/batches`` (DesignBatchRequest,
+        workflow 곱집합) 로 대체. spec → DesignBatchRequest 변환은 클라이언트
+        책임 (workflow_category/variants/overrides 명시 필요).
+    """
+    raise _legacy_generate_gone(successor="/api/batches")
 
 
 async def _enqueue_design_batch(spec: DesignBatchRequest) -> dict[str, Any]:
@@ -2332,13 +2323,23 @@ async def _enqueue_design_batch(spec: DesignBatchRequest) -> dict[str, Any]:
 
     batch_id를 발급하고 expand된 task들을 generation_tasks에 enqueue한다.
     예상 ETA는 task당 6초의 거친 추정치이다."""
-    _ensure_disk_space_for_enqueue()
     try:
         tasks = expand_design_batch(spec)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not tasks:
         raise HTTPException(status_code=400, detail="expand 결과가 비어있습니다. spec을 확인하세요.")
+
+    # variant 들 중 max outputs 로 디스크 가드 상향. multi-output 변형 (V38 = 5장)
+    # 이 섞여 있어도 가장 큰 한 개로 보수적 추정.
+    max_outputs_per_task = 1
+    for variant_name in set(spec.workflow_variants):
+        try:
+            v = workflow_registry.variant(spec.workflow_category, variant_name)
+            max_outputs_per_task = max(max_outputs_per_task, len(v.outputs))
+        except WorkflowRegistryError:
+            pass
+    _ensure_disk_space_for_enqueue(expected_files=max_outputs_per_task * len(tasks))
 
     batch_id = f"btc_{uuid.uuid4().hex[:16]}"
     job_id = str(uuid.uuid4())

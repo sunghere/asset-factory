@@ -354,20 +354,28 @@ def test_find_and_requeue_stuck_tasks_requeues_or_fails_by_retry_budget(isolated
 # Critical 3 - disk guard returns 507 at enqueue
 # --------------------------------------------------------------------------------
 def test_generate_returns_507_when_disk_low(isolated, monkeypatch) -> None:  # noqa: ANN001
-    """디스크 가드가 507 Insufficient Storage로 즉시 응답."""
+    """디스크 가드가 507 Insufficient Storage 로 즉시 응답.
+
+    legacy ``/api/generate`` 가 410 Gone 으로 전환되면서 본 회귀 가드는
+    workflow 기반 write 엔드포인트 (``/api/batches``) 의 disk guard 를 검증.
+    """
     def _raise(*_args, **_kwargs):  # noqa: ANN001, ANN002, ANN003
-        # 시그니처 호환: _check_disk_space(path) 와 (path, required_mb=...) 둘 다 수용
         raise RuntimeError("simulated low disk")
 
     monkeypatch.setattr(server, "_check_disk_space", _raise)
 
     with TestClient(server.app) as client:
         r = client.post(
-            "/api/generate",
+            "/api/batches",
             json={
                 "project": "p",
                 "asset_key": "k",
-                "prompt": "x",
+                "category": "character",
+                "workflow_category": "sprite",
+                "workflow_variants": ["pixel_alpha"],
+                "prompts": ["a sample prompt"],
+                "prompt_mode": "legacy",
+                "seeds": [1],
             },
         )
     assert r.status_code == 507

@@ -1,10 +1,9 @@
 """dogfood 셸 스크립트 안에 박혀 있는 batch JSON 스펙이 현재
-``DesignBatchRequest`` 스키마(``loras: list[list[LoraSpec]]`` + ``cfg`` /
-``sampler``)와 호환되는지 검증한다.
+``DesignBatchRequest`` 스키마 (ComfyUI workflow 곱집합 — workflow_category /
+workflow_variants / workflow_params_overrides) 와 호환되는지 검증한다.
 
-회귀 방지: codex 라운드 2 P2 — 스키마가 ``cfg_scale`` / ``sampler_name`` /
-flat ``loras`` 였던 시절의 페이로드가 dogfood 스크립트에 남아 있었다.
-이러면 ``/api/batches`` 호출이 422로 실패해서 5분 wedge 측정 자체가 안 된다.
+회귀 방지: A1111 시절의 ``models`` / ``loras`` flat 페이로드가 스크립트에
+남아 있으면 ``/api/batches`` 가 422로 실패하여 wedge 측정 자체가 안 된다.
 """
 
 from __future__ import annotations
