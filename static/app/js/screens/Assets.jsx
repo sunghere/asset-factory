@@ -357,12 +357,15 @@ function Assets() {
             <span>전체</span>
           </label>
           {(projects.data?.items || []).map((p) => {
-            const id = typeof p === 'string' ? p : (p.id ?? p.name ?? String(p));
-            const label = typeof p === 'string' ? p : (p.name ?? p.id ?? String(p));
+            // 새 schema: {slug, display_name, archived_at, ...}. archived 는 dim
+            // 처리 — read 는 가능하지만 새 write 거부 시각 단서 (DESIGN.md A11y).
+            const slug = p.slug;
+            const label = p.display_name || p.slug;
+            const archived = !!p.archived_at;
             return (
-              <label key={id} className="row">
-                <input type="checkbox" checked={projectSet.has(id)} onChange={() => _toggleSetValue(setProjectSet, id)}/>
-                <span>{label}</span>
+              <label key={slug} className="row" style={{ opacity: archived ? 0.55 : 1 }}>
+                <input type="checkbox" checked={projectSet.has(slug)} onChange={() => _toggleSetValue(setProjectSet, slug)}/>
+                <span>{label}{archived ? ' ⊘' : ''}</span>
               </label>
             );
           })}

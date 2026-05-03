@@ -181,11 +181,13 @@ function Export() {
               <span>프로젝트 <span className="hint">(빈 값 = 전체)</span></span>
               <select className="input" value={project} onChange={(e) => setProject(e.target.value)}>
                 <option value="">— 전체 프로젝트 —</option>
-                {(projects.data?.items || []).map((p) => {
-                  const id = typeof p === 'string' ? p : (p.id ?? p.name ?? String(p));
-                  const label = typeof p === 'string' ? p : (p.name ?? p.id ?? String(p));
-                  return <option key={id} value={id}>{label}</option>;
-                })}
+                {(projects.data?.items || []).map((p) => (
+                  // 새 schema {slug, display_name}. archived 도 export 대상
+                  // (read-only 데이터도 내려받을 수 있어야 함) — 라벨에 ⊘ 표시.
+                  <option key={p.slug} value={p.slug}>
+                    {p.display_name || p.slug}{p.archived_at ? ' ⊘' : ''}
+                  </option>
+                ))}
               </select>
             </label>
 
