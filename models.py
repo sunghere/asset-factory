@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -192,6 +192,10 @@ class Database:
             if "prompt_resolution_json" not in col_names:
                 await conn.execute(
                     "ALTER TABLE generation_tasks ADD COLUMN prompt_resolution_json TEXT"
+                )
+            if "started_at" not in col_names:
+                await conn.execute(
+                    "ALTER TABLE generation_tasks ADD COLUMN started_at TEXT"
                 )
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_tasks_batch ON generation_tasks(batch_id)"
@@ -405,10 +409,10 @@ class Database:
             await conn.execute(
                 """
                 UPDATE generation_tasks
-                SET status='processing', updated_at=?
+                SET status='processing', updated_at=?, started_at=?
                 WHERE id=?
                 """,
-                (utc_now(), row["id"]),
+                (utc_now(), utc_now(), row["id"]),
             )
             await conn.execute(
                 """
@@ -420,6 +424,52 @@ class Database:
             )
             await conn.commit()
             return dict(row)
+
+    async def find_and_requeue_stuck_tasks(self, timeout_seconds: int) -> list[dict[str, Any]]:
+        """processing 상태로 timeout_seconds 이상 멈춘 태스크를 재큐잉/실패 처리."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=timeout_seconds)).isoformat()
+        now = utc_now()
+        result: list[dict[str, Any]] = []
+
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.execute(
+                """
+                SELECT * FROM generation_tasks
+                WHERE status='processing'
+                  AND started_at IS NOT NULL
+                  AND started_at < ?
+                """,
+                (cutoff,),
+            )
+            rows = await cursor.fetchall()
+            for row in rows:
+                task = dict(row)
+                retries = int(task.get("retries") or 0)
+                max_retries = int(task.get("max_retries") or 3)
+                if retries < max_retries:
+                    await conn.execute(
+                        """
+                        UPDATE generation_tasks
+                        SET status='queued', retries=retries+1, updated_at=?,
+                            next_attempt_at=?, started_at=NULL
+                        WHERE id=?
+                        """,
+                        (now, now, task["id"]),
+                    )
+                else:
+                    await conn.execute(
+                        """
+                        UPDATE generation_tasks
+                        SET status='failed', last_error='stuck: completion_timeout exceeded',
+                            updated_at=?
+                        WHERE id=?
+                        """,
+                        (now, task["id"]),
+                    )
+                result.append(task)
+            await conn.commit()
+        return result
 
     async def finish_task_success(
         self,
@@ -1467,6 +1517,92 @@ class Database:
             )
             return [dict(r) for r in await cur.fetchall()]
 
+    async def cancel_batch(self, batch_id: str) -> dict[str, int]:
+        """배치의 ``queued`` / ``processing`` 태스크를 ``cancelled`` 로 전환.
+
+        이미 ``done`` / ``failed`` 인 task 는 건드리지 않는다 (history 보존).
+        ``processing`` 도 status 만 cancelled 로 마크 — ComfyUI 서버에서
+        실제로 실행 중인 prompt 는 자체적으로 끝까지 돈다 (interrupt 미구현).
+        그래도 결과 저장 단계에서 cancelled 상태 task 는 candidate 가
+        만들어지지 않도록 워커 측에서 가드해야 안전 — 단, 본 PR scope 밖이라
+        기록만 하고 race window 는 수용 (UI 가 즉시 사라지지 않을 수 있음).
+
+        반환: {cancelled_queued, cancelled_processing, untouched_done,
+        untouched_failed} — UI 에 정확한 수치 표시용.
+        """
+        now = utc_now()
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cur = await conn.execute(
+                """
+                SELECT status, COUNT(*) AS n
+                FROM generation_tasks
+                WHERE batch_id=?
+                GROUP BY status
+                """,
+                (batch_id,),
+            )
+            counts: dict[str, int] = {row["status"]: int(row["n"]) for row in await cur.fetchall()}
+            cancel_q = int(counts.get("queued", 0))
+            cancel_p = int(counts.get("processing", 0))
+            await conn.execute(
+                """
+                UPDATE generation_tasks
+                SET status='cancelled',
+                    last_error=COALESCE(last_error, 'cancelled by user'),
+                    updated_at=?
+                WHERE batch_id=? AND status IN ('queued','processing')
+                """,
+                (now, batch_id),
+            )
+            await conn.commit()
+        return {
+            "cancelled_queued": cancel_q,
+            "cancelled_processing": cancel_p,
+            "untouched_done": int(counts.get("done", 0)),
+            "untouched_failed": int(counts.get("failed", 0)),
+        }
+
+    async def delete_batch(self, batch_id: str) -> dict[str, Any]:
+        """배치의 task / candidate row 를 모두 삭제하고 파일 경로를 반환.
+
+        파일 unlink 는 호출자 (server.py) 책임 — DB 트랜잭션과 FS unlink 를
+        엮으면 partial failure 시 정합성이 깨진다. DB 만 먼저 정리하고 파일
+        리스트를 돌려주면 server 가 best-effort 로 unlink.
+
+        active 태스크 (queued/processing) 가 남아 있으면 caller 가 먼저
+        ``cancel_batch`` 를 호출했어야 한다 — 본 함수는 status 와 무관하게
+        삭제 (force semantics). 호출 정책은 endpoint 레이어에서.
+
+        반환: {deleted_tasks, deleted_candidates, image_paths[]}.
+        """
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cur = await conn.execute(
+                "SELECT image_path FROM asset_candidates WHERE batch_id=?",
+                (batch_id,),
+            )
+            image_paths = [str(r["image_path"]) for r in await cur.fetchall() if r["image_path"]]
+
+            cur = await conn.execute(
+                "DELETE FROM asset_candidates WHERE batch_id=?",
+                (batch_id,),
+            )
+            deleted_candidates = cur.rowcount or 0
+
+            cur = await conn.execute(
+                "DELETE FROM generation_tasks WHERE batch_id=?",
+                (batch_id,),
+            )
+            deleted_tasks = cur.rowcount or 0
+
+            await conn.commit()
+        return {
+            "deleted_tasks": int(deleted_tasks),
+            "deleted_candidates": int(deleted_candidates),
+            "image_paths": image_paths,
+        }
+
     async def retry_failed_batch_tasks(self, batch_id: str) -> list[int]:
         """해당 batch 에서 ``status='failed'`` 인 태스크를 큐로 되돌린다.
 
@@ -1735,8 +1871,11 @@ class Database:
         """최근 batch 목록 (각 batch_id 별 집계).
 
         - ``since``: ISO8601 UTC, 이 시각 이후 생성된 batch만 필터.
-        - 각 항목: batch_id, project, asset_key, category, total, done, failed,
-          rejected_candidates, picked_candidates, first_created_at, last_updated_at.
+        - 각 항목: batch_id, project, asset_key, category, workflow_category,
+          workflow_variants(distinct list), backend, total, done, failed, active,
+          first_created_at, last_updated_at, candidate_total, rejected_count.
+        - workflow_variants 는 batch 안에서 다양한 variant 가 섞여 있을 수
+          있어 distinct 집합. 단일 variant batch 면 길이 1.
         """
         params: list[Any] = []
         where = "WHERE batch_id IS NOT NULL"
@@ -1754,6 +1893,8 @@ class Database:
                     MIN(asset_key) AS asset_key,
                     MIN(category) AS category,
                     MIN(job_id) AS job_id,
+                    MIN(workflow_category) AS workflow_category,
+                    MIN(backend) AS backend,
                     COUNT(*) AS total,
                     SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) AS done,
                     SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed,
@@ -1786,6 +1927,22 @@ class Database:
                 agg = await cur.fetchone()
                 row["candidate_total"] = int(agg["candidate_total"] or 0) if agg else 0
                 row["rejected_count"] = int(agg["rejected_count"] or 0) if agg else 0
+
+                # workflow_variants distinct — batch 안에 여러 variant 가 섞일
+                # 수 있어 GROUP BY 단계에서 집계 불가. 별도 1쿼리로 모음.
+                vcur = await conn.execute(
+                    """
+                    SELECT DISTINCT workflow_variant
+                    FROM generation_tasks
+                    WHERE batch_id=? AND workflow_variant IS NOT NULL
+                    ORDER BY workflow_variant
+                    """,
+                    (row["batch_id"],),
+                )
+                vrows = await vcur.fetchall()
+                row["workflow_variants"] = [
+                    str(r["workflow_variant"]) for r in vrows if r["workflow_variant"]
+                ]
         return results
 
     async def list_asset_candidates(

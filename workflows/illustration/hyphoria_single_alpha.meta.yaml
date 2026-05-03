@@ -1,8 +1,9 @@
 # illustration/hyphoria_single_alpha — Hyphoria 일러스트 single + alpha 변형.
 #
 # 워크플로우: B4_Hyphoria_V36_api_single_alpha.json. ckpt: hyphoria_v002 (Illustrious).
-# hyphoria_stage1 베이스 + WAS rembg(Image Remove Background (Alpha), foreground,
-# threshold 245 / tolerance 5) → Save Alpha 노드 (icon/flat 패턴 동일, HANDOFF §5.1).
+# hyphoria_stage1 베이스 + WAS rembg(Image Rembg (Remove Background), isnet-general-use
+# semantic segmentation) → Save Alpha 노드 (GGU-609: threshold-based Color BG Remove
+# → isnet-general-use 교체, warm-paper hue mismatch 해결).
 # 한 호출에 raw stage1 + alpha 두 출력. warm-paper / personal-ritual 톤의
 # hero illustration·object 자산을 alpha 배경으로 납품할 때 사용.
 schema_version: 1

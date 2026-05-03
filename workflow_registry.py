@@ -64,6 +64,32 @@ def infer_input_labels(workflow_json: dict[str, Any]) -> tuple["InputLabelSpec",
 
 
 @dataclass(slots=True, frozen=True)
+class OutputValidationRule:
+    """한 output label 에 대한 검증 정책.
+
+    max_colors=None 이면 색 검사를 건너뜀. require_alpha=True 이면 알파 채널 필수.
+    """
+
+    max_colors: int | None = 32
+    require_alpha: bool = False
+
+
+@dataclass(slots=True, frozen=True)
+class ValidationPolicy:
+    """변형 단위 검증 정책. registry.yml 의 `validation:` 블록에서 파싱된다.
+
+    `for_output(label)` 로 특정 output label 의 규칙을 조회하며,
+    명시 안 된 label 은 default 로 폴백한다.
+    """
+
+    default: OutputValidationRule = field(default_factory=OutputValidationRule)
+    outputs: dict[str, OutputValidationRule] = field(default_factory=dict)
+
+    def for_output(self, label: str) -> OutputValidationRule:
+        return self.outputs.get(label, self.default)
+
+
+@dataclass(slots=True, frozen=True)
 class OutputSpec:
     """워크플로우의 한 SaveImage 출력 노드 메타.
 
@@ -184,6 +210,7 @@ class VariantSpec:
     defaults: dict[str, Any]
     input_labels: tuple[InputLabelSpec, ...] = ()
     meta: VariantMetaSpec = field(default_factory=VariantMetaSpec)
+    validation: ValidationPolicy = field(default_factory=ValidationPolicy)
 
     @property
     def available(self) -> bool:
@@ -420,6 +447,7 @@ class WorkflowRegistry:
             category, name, data, file_path, status, meta_raw
         )
         meta = _parse_variant_meta(category, name, meta_raw)
+        validation = _parse_validation_policy(category, name, data.get("validation"), outputs)
 
         return VariantSpec(
             category=category,
@@ -433,6 +461,7 @@ class WorkflowRegistry:
             defaults=defaults,
             input_labels=input_labels,
             meta=meta,
+            validation=validation,
         )
 
     def _load_sidecar_meta(self, category: str, name: str) -> dict[str, Any]:
@@ -720,6 +749,92 @@ def _parse_variant_meta(category: str, name: str, raw: dict[str, Any]) -> Varian
         tags=_parse_str_tuple(category, name, "tags", raw.get("tags")),
         prompt_template=_parse_prompt_template(category, name, raw.get("prompt_template")),
     )
+
+
+# ------------------------------------------------------------------ 검증 정책 파서
+
+
+def _parse_output_validation_rule(
+    category: str, name: str, label: str, raw: Any
+) -> OutputValidationRule:
+    if raw is None:
+        return OutputValidationRule()
+    if not isinstance(raw, dict):
+        raise WorkflowRegistryError(
+            f"variant {category}/{name} validation.outputs.{label} must be a mapping"
+        )
+    mc = raw.get("max_colors", 32)
+    if mc is not None and (isinstance(mc, bool) or not isinstance(mc, int)):
+        raise WorkflowRegistryError(
+            f"variant {category}/{name} validation.outputs.{label}.max_colors"
+            f" must be an integer or null"
+        )
+    ra = raw.get("require_alpha", False)
+    if not isinstance(ra, bool):
+        raise WorkflowRegistryError(
+            f"variant {category}/{name} validation.outputs.{label}.require_alpha"
+            f" must be a boolean"
+        )
+    return OutputValidationRule(max_colors=mc, require_alpha=ra)
+
+
+def _parse_validation_policy(
+    category: str,
+    name: str,
+    raw: Any,
+    outputs: tuple[OutputSpec, ...],
+) -> ValidationPolicy:
+    """registry.yml ``validation:`` 블록 → ValidationPolicy.
+
+    ``validation:`` 누락 → 기본 max_colors=32 정책 (regression 없음).
+    ``validation.outputs`` 에 알 수 없는 label 이 있으면 즉시 raise (오타 방지).
+    """
+    if raw is None:
+        return ValidationPolicy()
+    if not isinstance(raw, dict):
+        raise WorkflowRegistryError(
+            f"variant {category}/{name} validation must be a mapping"
+        )
+
+    default_raw = raw.get("default")
+    if default_raw is None:
+        default_rule = OutputValidationRule()
+    elif not isinstance(default_raw, dict):
+        raise WorkflowRegistryError(
+            f"variant {category}/{name} validation.default must be a mapping"
+        )
+    else:
+        mc = default_raw.get("max_colors", 32)
+        if mc is not None and (isinstance(mc, bool) or not isinstance(mc, int)):
+            raise WorkflowRegistryError(
+                f"variant {category}/{name} validation.default.max_colors"
+                f" must be an integer or null"
+            )
+        ra = default_raw.get("require_alpha", False)
+        if not isinstance(ra, bool):
+            raise WorkflowRegistryError(
+                f"variant {category}/{name} validation.default.require_alpha"
+                f" must be a boolean"
+            )
+        default_rule = OutputValidationRule(max_colors=mc, require_alpha=ra)
+
+    outputs_raw = raw.get("outputs") or {}
+    if not isinstance(outputs_raw, dict):
+        raise WorkflowRegistryError(
+            f"variant {category}/{name} validation.outputs must be a mapping"
+        )
+
+    known_labels = {o.label for o in outputs}
+    output_rules: dict[str, OutputValidationRule] = {}
+    for label, orule in outputs_raw.items():
+        if label not in known_labels:
+            raise WorkflowRegistryError(
+                f"variant {category}/{name} validation.outputs references unknown"
+                f" output label '{label}' (available: {sorted(known_labels)})"
+            )
+        output_rules[str(label)] = _parse_output_validation_rule(category, name, label, orule)
+
+    return ValidationPolicy(default=default_rule, outputs=output_rules)
 
 
 # ------------------------------------------------------------------ catalog 직렬화

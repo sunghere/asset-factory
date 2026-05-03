@@ -1052,6 +1052,35 @@ def test_health_default_retention_when_env_unset(isolated, monkeypatch) -> None:
     assert body["bypass_retention_days"] == 7.0
 
 
+def test_health_include_backends_true_surfaces_comfyui_status(isolated, monkeypatch) -> None:  # noqa: ANN001
+    async def fake_health() -> dict:
+        return {"ok": True}
+
+    monkeypatch.setattr(server.comfyui_client, "health_check", fake_health)
+
+    with TestClient(server.app) as client:
+        body = client.get("/api/health?include_backends=true").json()
+
+    assert body["ok"] is True
+    assert body["backends"]["comfyui"]["ok"] is True
+    assert isinstance(body["backends"]["comfyui"]["latencyMs"], int)
+    assert body["backends"]["comfyui"]["lastCheckedAt"]
+
+
+def test_health_include_backends_keeps_top_level_ok_when_comfyui_down(isolated, monkeypatch) -> None:  # noqa: ANN001
+    async def fail_health() -> dict:
+        raise RuntimeError("ComfyUI offline")
+
+    monkeypatch.setattr(server.comfyui_client, "health_check", fail_health)
+
+    with TestClient(server.app) as client:
+        body = client.get("/api/health?include_backends=true").json()
+
+    assert body["ok"] is True
+    assert body["backends"]["comfyui"]["ok"] is False
+    assert "RuntimeError" in body["backends"]["comfyui"]["error"]
+
+
 def test_approve_from_bypass_candidate_preserves_approval_mode(
     isolated, tmp_path
 ) -> None:  # noqa: ANN001
@@ -1432,3 +1461,110 @@ def test_sd_catalog_loras_response_includes_deprecation_marker(isolated, monkeyp
     assert body["deprecated"] is True
     assert r.headers.get("Deprecation") == "true"
     assert r.headers.get("Sunset")
+
+
+# ----------------------------------------------------------------------------
+# 정책 매트릭스 분기 — _resolve_validation_args + _validate_asset_with_policy
+# ----------------------------------------------------------------------------
+
+
+def test_resolve_validation_args_sprite_pixel_alpha_primary_output(isolated) -> None:  # noqa: ANN001
+    """sprite/pixel_alpha 의 primary output(pixel_alpha) → max_colors=128, require_alpha=True.
+
+    실제 workflows/registry.yml 로 룩업. isolated fixture 는 mini registry 를
+    server.workflow_registry 로 패치하지만, _resolve_validation_args 는
+    get_default_registry() 를 직접 호출한다 — 실제 registry 가 잘 설정됐는지 검증.
+    """
+    from workflow_registry import WorkflowRegistry, get_default_registry
+    registry_root = Path(__file__).resolve().parent.parent / "workflows"
+    real_registry = WorkflowRegistry(root=registry_root)
+
+    import server as _srv
+    _srv_resolve = _srv._resolve_validation_args  # type: ignore[attr-defined]
+
+    max_colors, require_alpha = _srv_resolve(
+        workflow_category="sprite",
+        workflow_variant="pixel_alpha",
+        output_label="pixel_alpha",
+        fallback_max_colors=32,
+    )
+    assert max_colors == 128
+    assert require_alpha is True
+
+
+def test_resolve_validation_args_icon_flat_skips_color_check(isolated) -> None:  # noqa: ANN001
+    """icon/flat stage1 → max_colors=None (색 검사 skip)."""
+    import server as _srv
+    max_colors, require_alpha = _srv._resolve_validation_args(  # type: ignore[attr-defined]
+        workflow_category="icon",
+        workflow_variant="flat",
+        output_label="stage1",
+        fallback_max_colors=32,
+    )
+    assert max_colors is None
+    assert require_alpha is False
+
+
+def test_resolve_validation_args_icon_flat_alpha_requires_alpha(isolated) -> None:  # noqa: ANN001
+    """icon/flat alpha → max_colors=None + require_alpha=True."""
+    import server as _srv
+    max_colors, require_alpha = _srv._resolve_validation_args(  # type: ignore[attr-defined]
+        workflow_category="icon",
+        workflow_variant="flat",
+        output_label="alpha",
+        fallback_max_colors=32,
+    )
+    assert max_colors is None
+    assert require_alpha is True
+
+
+def test_resolve_validation_args_unknown_variant_uses_fallback(isolated) -> None:  # noqa: ANN001
+    """알 수 없는 category/variant 는 fallback 값을 그대로 반환한다."""
+    import server as _srv
+    max_colors, require_alpha = _srv._resolve_validation_args(  # type: ignore[attr-defined]
+        workflow_category="sprite",
+        workflow_variant="nonexistent_variant_xyz",
+        output_label="stage1",
+        fallback_max_colors=32,
+    )
+    assert max_colors == 32
+    assert require_alpha is False
+
+
+def test_resolve_validation_args_no_category_uses_fallback(isolated) -> None:  # noqa: ANN001
+    """workflow_category 미지정 → fallback 반환."""
+    import server as _srv
+    max_colors, require_alpha = _srv._resolve_validation_args(  # type: ignore[attr-defined]
+        workflow_category=None,
+        workflow_variant=None,
+        output_label=None,
+        fallback_max_colors=16,
+        fallback_require_alpha=True,
+    )
+    assert max_colors == 16
+    assert require_alpha is True
+
+
+def test_validate_asset_with_policy_uses_workflow_metadata(tmp_path: Path, isolated) -> None:  # noqa: ANN001
+    """_validate_asset_with_policy 가 metadata_json 의 workflow 정보로 정책 룩업."""
+    from PIL import Image
+    import server as _srv
+
+    # icon/flat stage1 은 max_colors=None → 수백 색 있어도 통과
+    img = Image.new("RGB", (4, 4))
+    for x in range(4):
+        for y in range(4):
+            img.putpixel((x, y), (x * 60, y * 60, (x + y) * 30))
+    path = tmp_path / "icon_stage1.png"
+    img.save(path, format="PNG")
+
+    asset = {
+        "image_path": str(path),
+        "metadata_json": json.dumps({
+            "workflow_category": "icon",
+            "workflow_variant": "flat",
+            "primary_output_label": "stage1",
+        }),
+    }
+    result = _srv._validate_asset_with_policy(asset)  # type: ignore[attr-defined]
+    assert result.passed is True, result.message

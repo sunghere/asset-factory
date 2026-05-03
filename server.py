@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import json
 import random
 import re
 import shutil
 import os
 import uuid
+import httpx
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -263,6 +265,55 @@ def _validate_comfy_upload_response(result: object) -> dict[str, str]:
     return result
 
 
+def _read_max_colors(meta: dict[str, Any], default: int = 32) -> int | None:
+    """metadata dict 에서 max_colors 를 읽는다.
+    key 없음 → default(레거시 호환), null 또는 0 → None(제한 없음), 정수 → int 변환.
+    0 은 DB NOT NULL 제약 때문에 sentinel 로 사용 (illustration/icon 무제한)."""
+    if "max_colors" not in meta:
+        return default
+    val = meta["max_colors"]
+    if val is None or int(val) == 0:
+        return None
+    return int(val)
+
+
+def _resolve_max_colors(workflow_category: str, caller_override: int | None) -> int:
+    """workflow_category 기반 max_colors 기본값 분기.
+    illustration/* / icon/* → 0(sentinel=무제한), 그 외 → 32.
+    0 을 반환하는 이유: generation_tasks.max_colors 가 NOT NULL 이어서 None 저장 불가.
+    _read_max_colors 가 0 을 읽어 None 으로 변환한다."""
+    if caller_override is not None:
+        return caller_override
+    if workflow_category.startswith(("illustration", "icon")):
+        return 0
+    return 32
+
+
+def _resolve_validation_args(
+    *,
+    workflow_category: str | None,
+    workflow_variant: str | None,
+    output_label: str | None,
+    fallback_max_colors: int | None = 32,
+    fallback_require_alpha: bool = False,
+) -> tuple[int | None, bool]:
+    """registry 정책으로 (max_colors, require_alpha) 를 결정한다.
+
+    workflow_category/variant 미지정이면 fallback 값을 그대로 사용.
+    registry 에 해당 변형이 없으면 fallback 으로 폴백 (unknown variant 방어).
+    """
+    if not (workflow_category and workflow_variant):
+        return fallback_max_colors, fallback_require_alpha
+    try:
+        from workflow_registry import WorkflowRegistryError, get_default_registry
+        registry = get_default_registry()
+        variant = registry.variant(workflow_category, workflow_variant)
+    except Exception:  # noqa: BLE001
+        return fallback_max_colors, fallback_require_alpha
+    rule = variant.validation.for_output(output_label or "")
+    return rule.max_colors, rule.require_alpha
+
+
 def _approved_dir(project: str) -> Path:
     """승격된 메인 이미지가 들어가는 디렉토리.
 
@@ -275,26 +326,26 @@ def _approved_dir(project: str) -> Path:
 
 
 class GenerateRequest(BaseModel):
-    """단일 생성 요청."""
+    """A1111 단일 생성 요청 (legacy).
+
+    .. deprecated::
+        ``/api/generate`` 가 410 Gone 으로 전환됨에 따라 이 schema 는
+        backwards-compat 차원의 stub. ComfyUI 기반은 ``WorkflowGenerateRequest``.
+    """
 
     project: str = Field(..., examples=["cat-raising"])
     asset_key: str = Field(..., examples=["ksh_baby_idle"])
     category: str = Field(default="sprite")
-    prompt: str
-    negative_prompt: str | None = None
-    model_name: str | None = None
-    width: int | None = None
-    height: int | None = None
-    steps: int = 20
-    cfg: float = 7.0
-    sampler: str = "DPM++ 2M"
-    expected_size: int | None = 64
-    max_colors: int = 32
-    max_retries: int = 3
+    prompt: str = ""
 
 
 class BatchGenerateRequest(BaseModel):
-    """스펙 기반 배치 생성 요청."""
+    """A1111 spec 기반 배치 요청 (legacy).
+
+    .. deprecated::
+        ``/api/generate/batch`` 가 410 Gone. successor: ``/api/batches``
+        (DesignBatchRequest, workflow 곱집합).
+    """
 
     project: str | None = None
     spec: dict[str, Any] | None = None
@@ -338,42 +389,60 @@ class RestoreHistoryRequest(BaseModel):
     version: int = Field(ge=1)
 
 
-class LoraSpec(BaseModel):
-    """곱집합 한 칸을 차지할 LoRA 한 개."""
-
-    name: str
-    weight: float = Field(default=0.7, ge=-2.0, le=2.0)
-
-
 class BatchCommonParams(BaseModel):
-    """배치 모든 task에 공통 적용할 SD 파라미터."""
+    """배치 모든 task 에 공통 적용할 ComfyUI 호출 파라미터.
 
-    steps: int = Field(default=28, ge=1, le=200)
-    cfg: float = Field(default=7.0, ge=0.0, le=30.0)
-    sampler: str = Field(default="DPM++ 2M")
-    width: int | None = Field(default=None, ge=64, le=2048)
-    height: int | None = Field(default=None, ge=64, le=2048)
+    워크플로우 기반에서는 steps/cfg/sampler 가 variant default 의 *override*
+    역할 — None 이면 variant.defaults 값을 그대로 쓴다. width/height 는
+    workflow 의 input slot 이므로 ``workflow_params_overrides`` 쪽으로 옮겨
+    여기서는 다루지 않는다.
+    """
+
+    steps: int | None = Field(default=None, ge=1, le=200)
+    cfg: float | None = Field(default=None, ge=0.0, le=30.0)
+    sampler: str | None = Field(default=None)
     negative_prompt: str | None = None
     expected_size: int | None = None
-    max_colors: int = Field(default=32, ge=1, le=256)
+    max_colors: int | None = Field(default=None, ge=1, le=256)
     max_retries: int = Field(default=3, ge=0, le=10)
+    approval_mode: Literal["manual", "bypass"] = "manual"
 
 
 class DesignBatchRequest(BaseModel):
-    """에이전트 친화 batch 곱집합 spec.
+    """ComfyUI 워크플로우 곱집합 batch spec.
 
-    내부에서 prompts × models × loras × seeds 곱집합을 expand하여
-    generation_tasks를 enqueue한다. spec은 client agent가 LLM 등으로
-    먼저 풀어서 보내야 한다(AF는 LLM 호출 안 함)."""
+    내부에서 ``prompts × workflow_variants × workflow_params_overrides ×
+    seeds`` 곱집합을 expand 하여 ``generation_tasks`` 에 enqueue 한다. 모든
+    variant 는 ``workflow_category`` 안에 등록되어 있어야 한다 (cross-category
+    배치는 의도적으로 막음 — params schema 가 카테고리 단위로 일관됨).
+
+    예: workflow_category='sprite', workflow_variants=['pixel_alpha',
+    'pixel_solid'], workflow_params_overrides=[{}, {'controlnet_strength':
+    0.8}], prompts=[A, B], seeds_per_combo=2 → 2×2×2×2 = 16 tasks.
+    """
 
     asset_key: str = Field(..., examples=["marine_v2_idle"])
     project: str = Field(default="default-project")
     category: str = Field(default="character")
+    workflow_category: str = Field(..., examples=["sprite"])
+    workflow_variants: list[str] = Field(default_factory=list)
+    workflow_params_overrides: list[dict[str, Any]] = Field(
+        default_factory=lambda: [{}],
+        description=(
+            "각 entry 는 patch_workflow 인자 dict. 빈 dict {} 는 variant default 를 "
+            "그대로 사용. 키는 pose_image / controlnet_strength / lora_strengths / "
+            "width / height 등 workflow_patcher 가 인지하는 것."
+        ),
+    )
     prompts: list[str] = Field(default_factory=list)
-    models: list[str] = Field(default_factory=list)
-    loras: list[list[LoraSpec]] = Field(default_factory=list)
+    subject: str | None = None
+    prompt_mode: Literal["auto", "legacy", "subject"] = "auto"
+    style_extra: str | None = None
     seeds: list[int] | None = None
-    seeds_per_combo: int = Field(default=1, ge=1, le=64)
+    # 64 → 256 상향: ComfyUI 워크플로우 기반에서는 곱집합 dim 이 적어 (variants
+    # 1~2, overrides 1~3) seeds 가 주된 다양성 축. dogfood 100 장 케이스 등
+    # 한 batch 에 100+ seed 가 정상 (이전 A1111 는 model×lora 곱셈으로 분산).
+    seeds_per_combo: int = Field(default=1, ge=1, le=256)
     common: BatchCommonParams = Field(default_factory=BatchCommonParams)
 
 
@@ -416,7 +485,7 @@ class WorkflowGenerateRequest(BaseModel):
     candidates_total: int = Field(default=1, ge=1, le=16)
     workflow_params: dict[str, Any] = Field(default_factory=dict)
     expected_size: int | None = None
-    max_colors: int = Field(default=32, ge=1, le=256)
+    max_colors: int | None = None  # None → workflow_category 기반 자동 분기 (_resolve_max_colors)
     max_retries: int = Field(default=3, ge=0, le=10)
     # Bypass 모드 — 사람 cherry-pick 큐 우회. 'manual' (default) 또는 'bypass'.
     # bypass 후보는 cherry-pick UI 에 안 뜨고, export manifest 에서도 제외된다.
@@ -492,6 +561,7 @@ backends = BackendRegistry(
 api_key = os.getenv("API_KEY")
 worker_task: asyncio.Task[Any] | None = None
 gc_worker_task: asyncio.Task[Any] | None = None
+monitoring_task: asyncio.Task[Any] | None = None
 
 # System.jsx Worker 블록용 런타임 상태. 프로세스 수명 내에서만 의미 있음.
 _worker_state: dict[str, Any] = {
@@ -540,7 +610,18 @@ _SD_CATALOG_TIMEOUT_SECONDS = float(os.getenv("SD_CATALOG_TIMEOUT_SECONDS", "5")
 _COMFYUI_HEALTH_TIMEOUT_SECONDS = float(os.getenv("COMFYUI_HEALTH_TIMEOUT_SECONDS", "5"))
 _COMFYUI_CATALOG_TIMEOUT_SECONDS = float(os.getenv("COMFYUI_CATALOG_TIMEOUT_SECONDS", "10"))
 _COMFYUI_QUEUE_TIMEOUT_SECONDS = float(os.getenv("COMFYUI_QUEUE_TIMEOUT_SECONDS", "5"))
+_QUEUE_DEPTH_ALERT_THRESHOLD = int(os.getenv("QUEUE_DEPTH_ALERT_THRESHOLD", "10"))
+_COMPLETION_TIMEOUT_SECONDS = int(os.getenv("COMPLETION_TIMEOUT_SECONDS", "600"))
+_ALERT_POLL_INTERVAL_SECONDS = int(os.getenv("ALERT_POLL_INTERVAL_SECONDS", "30"))
+_PC_API_URL = os.getenv("PAPERCLIP_API_URL")
+_PC_API_KEY = os.getenv("PAPERCLIP_API_KEY")
+_PC_COMPANY_ID = os.getenv("PAPERCLIP_COMPANY_ID")
+_PC_ASSIGNEE_AGENT_ID = os.getenv(
+    "PAPERCLIP_ALERT_ASSIGNEE_AGENT_ID",
+    "e59a0717-192a-44a3-bf5f-c46ef6b2c291",
+)
 _log_ring: list[dict[str, Any]] = []
+_alert_state: dict[str, Any] = {"last_alert_at": None, "last_alert_issue_id": None}
 
 
 def _push_log(level: str, message: str, *, context: dict[str, Any] | None = None) -> None:
@@ -555,120 +636,98 @@ def _push_log(level: str, message: str, *, context: dict[str, Any] | None = None
         del _log_ring[: len(_log_ring) - _LOG_RING_MAX]
 
 
-def _extract_tasks_from_spec(spec: dict[str, Any], project_override: str | None = None) -> tuple[str, list[dict[str, Any]]]:
-    """스펙 JSON에서 생성 태스크 목록을 추출한다."""
-    project = project_override or str(spec.get("project") or "default-project")
-    generation_config = spec.get("generation_config", {})
-    base_prompt = str(generation_config.get("base_prompt") or "pixel art sprite")
-    negative_prompt = generation_config.get("negative_prompt")
-    model_name = generation_config.get("model")
-    steps = int(generation_config.get("steps", 20))
-    cfg = float(generation_config.get("cfg", 7))
-    sampler = str(generation_config.get("sampler", "DPM++ 2M"))
-    max_colors = int(generation_config.get("max_colors", 32))
-    max_retries = int(generation_config.get("max_retries", 3))
+def _make_workflow_task(
+    *,
+    project: str,
+    asset_key: str,
+    category: str,
+    workflow_category: str,
+    variant: Any,
+    workflow_params: dict[str, Any] | None,
+    resolution: Any,
+    seed: int | None,
+    candidates_total: int,
+    candidate_slot: int | None,
+    steps: int | None,
+    cfg: float | None,
+    sampler: str | None,
+    expected_size: int | None,
+    max_colors: int | None,
+    max_retries: int,
+    approval_mode: str,
+) -> dict[str, Any]:
+    """``enqueue_generation_task`` 가 받는 ComfyUI task dict 를 만든다.
 
-    tasks: list[dict[str, Any]] = []
+    ``expand_design_batch`` (배치 곱집합) 와 ``workflows_generate`` (단일/N
+    호출) 모두에서 task dict 모양을 통일하기 위한 공유 헬퍼. variant default
+    를 fallback 으로 사용 — steps/cfg/sampler 가 None 이면 variant.defaults
+    의 값으로 채운다.
+    """
+    steps_value = int(
+        steps if steps is not None
+        else variant.defaults.get("steps", 20)
+    )
+    cfg_value = float(
+        cfg if cfg is not None
+        else variant.defaults.get("cfg", 7.0)
+    )
+    sampler_value = str(
+        sampler if sampler is not None
+        else variant.defaults.get("sampler", "DPM++ 2M")
+    )
+    workflow_params_json = (
+        json.dumps(workflow_params, ensure_ascii=False)
+        if workflow_params
+        else None
+    )
+    prompt_resolution_json = json.dumps(resolution.to_dict(), ensure_ascii=False)
 
-    for character in spec.get("characters", []):
-        char_id = str(character.get("id", "character"))
-        char_prompt = str(character.get("character_prompt") or "")
-        for stage in character.get("stages", []):
-            stage_name = str(stage.get("stage", "stage"))
-            expected_size = int(stage.get("output_size", 64))
-            for action in stage.get("actions", []):
-                action_name = str(action)
-                asset_key = f"{char_id}_{stage_name}_{action_name}"
-                prompt = f"{base_prompt}, {char_prompt}, {stage_name} stage, {action_name} action"
-                tasks.append(
-                    {
-                        "project": project,
-                        "asset_key": asset_key,
-                        "category": "character",
-                        "prompt": prompt,
-                        "negative_prompt": negative_prompt,
-                        "model_name": model_name,
-                        "width": None,
-                        "height": None,
-                        "steps": steps,
-                        "cfg": cfg,
-                        "sampler": sampler,
-                        "expected_size": expected_size,
-                        "max_colors": max_colors,
-                        "max_retries": max_retries,
-                    }
-                )
-
-    for bucket, category in (("ui_assets", "ui"), ("backgrounds", "background"), ("items", "item")):
-        for item in spec.get(bucket, []):
-            item_id = str(item.get("id") or "asset")
-            prompt_hint = str(item.get("prompt_hint") or "")
-            size_value = item.get("size")
-            expected_size = int(size_value) if isinstance(size_value, int) else 64
-            prompt = f"{base_prompt}, {category}, {prompt_hint}".strip(", ")
-            tasks.append(
-                {
-                    "project": project,
-                    "asset_key": item_id,
-                    "category": category,
-                    "prompt": prompt,
-                    "negative_prompt": negative_prompt,
-                    "model_name": model_name,
-                    "width": None,
-                    "height": None,
-                    "steps": steps,
-                    "cfg": cfg,
-                    "sampler": sampler,
-                    "expected_size": expected_size,
-                    "max_colors": max_colors,
-                    "max_retries": max_retries,
-                }
-            )
-
-    candidates_per_asset = int(generation_config.get("candidates_per_asset", 1))
-    if candidates_per_asset < 1:
-        candidates_per_asset = 1
-    if candidates_per_asset > 1:
-        expanded: list[dict[str, Any]] = []
-        for task_item in tasks:
-            for slot in range(candidates_per_asset):
-                expanded.append(
-                    {
-                        **task_item,
-                        "candidate_slot": slot,
-                        "candidates_total": candidates_per_asset,
-                    }
-                )
-        tasks = expanded
-
-    return project, tasks
-
-
-def _format_lora_suffix(loras: list[LoraSpec] | list[dict[str, Any]]) -> str:
-    """LoRA 스펙을 prompt에 붙일 ``<lora:name:weight>`` 토큰들로 직렬화한다."""
-    parts: list[str] = []
-    for lora in loras:
-        if isinstance(lora, LoraSpec):
-            name, weight = lora.name, lora.weight
-        else:
-            name, weight = str(lora["name"]), float(lora.get("weight", 0.7))
-        if not name:
-            continue
-        parts.append(f"<lora:{name}:{weight:g}>")
-    return (" " + " ".join(parts)) if parts else ""
+    return {
+        "project": project,
+        "asset_key": asset_key,
+        "category": category,
+        "prompt": resolution.final_positive,
+        "negative_prompt": resolution.final_negative or None,
+        "model_name": None,
+        "width": None,
+        "height": None,
+        "steps": steps_value,
+        "cfg": cfg_value,
+        "sampler": sampler_value,
+        "expected_size": expected_size,
+        "max_colors": _resolve_max_colors(workflow_category, max_colors),
+        "max_retries": max_retries,
+        "candidate_slot": candidate_slot,
+        "candidates_total": candidates_total,
+        "seed": seed,
+        "backend": "comfyui",
+        "workflow_category": workflow_category,
+        "workflow_variant": variant.name,
+        "workflow_params_json": workflow_params_json,
+        "approval_mode": approval_mode,
+        "prompt_resolution_json": prompt_resolution_json,
+    }
 
 
 def expand_design_batch(spec: DesignBatchRequest) -> list[dict[str, Any]]:
-    """batch spec → generation_tasks dict 리스트로 expand 한다.
+    """batch spec → ComfyUI workflow task dict 리스트.
 
-    곱집합: prompts × models × (loras 또는 [[]]) × seeds
-    각 task의 prompt에는 LoRA 토큰이 자동으로 append된다.
-    seeds가 비어있으면 ``seeds_per_combo`` 개의 무작위 시드를 생성한다.
+    곱집합: ``prompts × workflow_variants × workflow_params_overrides ×
+    seeds``. variant 가 등록되지 않았거나 호출 불가면 ``ValueError``
+    (호출자 ``_enqueue_design_batch`` 가 HTTP 400 으로 변환). prompt 합성은
+    ``resolve_prompt`` 가 variant 의 prompt_template 에 따라 legacy/subject
+    모드를 자동 분기.
     """
     if not spec.prompts:
-        raise ValueError("prompts는 최소 1개 필요합니다.")
-    models: list[str | None] = list(spec.models) if spec.models else [None]
-    lora_combos: list[list[LoraSpec]] = list(spec.loras) if spec.loras else [[]]
+        raise ValueError("prompts 는 최소 1개 필요합니다.")
+    if not spec.workflow_variants:
+        raise ValueError("workflow_variants 는 최소 1개 필요합니다.")
+
+    overrides = (
+        list(spec.workflow_params_overrides)
+        if spec.workflow_params_overrides
+        else [{}]
+    )
 
     if spec.seeds:
         seeds: list[int | None] = [int(s) for s in spec.seeds]
@@ -677,39 +736,60 @@ def expand_design_batch(spec: DesignBatchRequest) -> list[dict[str, Any]]:
     else:
         seeds = [None]
 
+    # 곱집합 만들기 전에 variant 사전 검증 — 미등록/사용불가 잡아서 부분
+    # enqueue 방지.
+    variants_by_name: dict[str, Any] = {}
+    for variant_name in spec.workflow_variants:
+        try:
+            variant = workflow_registry.variant(spec.workflow_category, variant_name)
+        except WorkflowRegistryError as exc:
+            raise ValueError(
+                f"variant {spec.workflow_category}/{variant_name}: {exc}"
+            ) from exc
+        if not variant.available:
+            raise ValueError(
+                f"variant {spec.workflow_category}/{variant_name} 는 호출 불가 "
+                f"(status={variant.status})"
+            )
+        variants_by_name[variant_name] = variant
+
     tasks: list[dict[str, Any]] = []
     for prompt in spec.prompts:
-        for model in models:
-            for lora_combo in lora_combos:
-                lora_suffix = _format_lora_suffix(lora_combo)
-                full_prompt = (prompt + lora_suffix).strip()
-                lora_spec_serialized = json.dumps(
-                    [
-                        {"name": item.name, "weight": item.weight}
-                        for item in lora_combo
-                    ],
-                    ensure_ascii=False,
+        for variant_name in spec.workflow_variants:
+            variant = variants_by_name[variant_name]
+            try:
+                resolution = resolve_prompt(
+                    variant,
+                    subject=spec.subject,
+                    prompt=prompt,
+                    negative_prompt=spec.common.negative_prompt,
+                    prompt_mode=spec.prompt_mode,
+                    style_extra=spec.style_extra,
                 )
+            except PromptResolutionError as exc:
+                raise ValueError(f"prompt 합성 실패 ({variant_name}): {exc}") from exc
+            for override in overrides:
                 for seed in seeds:
                     tasks.append(
-                        {
-                            "project": spec.project,
-                            "asset_key": spec.asset_key,
-                            "category": spec.category,
-                            "prompt": full_prompt,
-                            "negative_prompt": spec.common.negative_prompt,
-                            "model_name": model,
-                            "width": spec.common.width,
-                            "height": spec.common.height,
-                            "steps": spec.common.steps,
-                            "cfg": spec.common.cfg,
-                            "sampler": spec.common.sampler,
-                            "expected_size": spec.common.expected_size,
-                            "max_colors": spec.common.max_colors,
-                            "max_retries": spec.common.max_retries,
-                            "lora_spec_json": lora_spec_serialized,
-                            "seed": seed,
-                        }
+                        _make_workflow_task(
+                            project=spec.project,
+                            asset_key=spec.asset_key,
+                            category=spec.category,
+                            workflow_category=spec.workflow_category,
+                            variant=variant,
+                            workflow_params=override,
+                            resolution=resolution,
+                            seed=seed,
+                            candidates_total=1,
+                            candidate_slot=None,
+                            steps=spec.common.steps,
+                            cfg=spec.common.cfg,
+                            sampler=spec.common.sampler,
+                            expected_size=spec.common.expected_size,
+                            max_colors=spec.common.max_colors,
+                            max_retries=spec.common.max_retries,
+                            approval_mode=spec.common.approval_mode,
+                        )
                     )
     return tasks
 
@@ -855,10 +935,19 @@ async def handle_task(task: dict[str, Any]) -> None:
             for label, p in saved_paths.items()
             if label != primary_label
         }
+        _wf_category = task.get("workflow_category")
+        _wf_variant = task.get("workflow_variant")
+        _val_max_colors, _val_require_alpha = _resolve_validation_args(
+            workflow_category=_wf_category,
+            workflow_variant=_wf_variant,
+            output_label=primary_label,
+            fallback_max_colors=_read_max_colors(task),
+        )
         validation = validate_asset(
             image_path=output_path,
             expected_size=task.get("expected_size"),
-            max_colors=int(task.get("max_colors", 32)),
+            max_colors=_val_max_colors,
+            require_alpha=_val_require_alpha,
         )
         metadata_json = json.dumps(
             {
@@ -869,9 +958,12 @@ async def handle_task(task: dict[str, Any]) -> None:
                 "cfg": float(task.get("cfg", 7.0)),
                 "sampler": task.get("sampler") or "DPM++ 2M",
                 "negative_prompt": task.get("negative_prompt"),
-                "max_colors": int(task.get("max_colors", 32)),
+                "max_colors": _read_max_colors(task),
                 "max_retries": int(task.get("max_retries", 3)),
                 "expected_size": task.get("expected_size"),
+                "workflow_category": _wf_category,
+                "workflow_variant": _wf_variant,
+                "primary_output_label": primary_label,
                 "backend": outcome.backend,
                 # ComfyUI 변형의 경우 stage1/hires/rembg_alpha 등 부가 출력 파일 경로
                 "extra_outputs": extra_paths,
@@ -1043,10 +1135,116 @@ async def _gc_loop() -> None:
         await asyncio.sleep(max(60, interval))
 
 
+async def _check_comfyui_ok() -> bool:
+    """ComfyUI 연결 여부를 타임아웃 포함 점검."""
+    try:
+        async with asyncio.timeout(_COMFYUI_HEALTH_TIMEOUT_SECONDS):
+            await comfyui_client.health_check()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def _create_or_update_incident_issue(title: str, body: str) -> None:
+    """Paperclip 이슈를 생성하거나, 24시간 내 동일 알람은 코멘트로 누적."""
+    if not (_PC_API_URL and _PC_API_KEY and _PC_COMPANY_ID):
+        logging.getLogger(__name__).warning(
+            "Paperclip alert env vars not set — skipping issue creation"
+        )
+        return
+
+    headers = {"Authorization": f"Bearer {_PC_API_KEY}", "Content-Type": "application/json"}
+    now = datetime.now(timezone.utc)
+
+    last_issue_id = _alert_state.get("last_alert_issue_id")
+    last_alert_at = _alert_state.get("last_alert_at")
+    within_24h = (
+        isinstance(last_alert_at, str)
+        and (now - datetime.fromisoformat(last_alert_at)) < timedelta(hours=24)
+    )
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        if within_24h and last_issue_id:
+            resp = await client.get(
+                f"{_PC_API_URL}/api/issues/{last_issue_id}",
+                headers=headers,
+            )
+            if resp.status_code == 200:
+                issue = resp.json()
+                if issue.get("status") not in ("done", "cancelled"):
+                    await client.post(
+                        f"{_PC_API_URL}/api/issues/{last_issue_id}/comments",
+                        headers=headers,
+                        json={"comment": body},
+                    )
+                    return
+
+        resp = await client.post(
+            f"{_PC_API_URL}/api/companies/{_PC_COMPANY_ID}/issues",
+            headers=headers,
+            json={
+                "title": title,
+                "description": body,
+                "status": "todo",
+                "priority": "high",
+                "assigneeAgentId": _PC_ASSIGNEE_AGENT_ID,
+            },
+        )
+        if resp.status_code in (200, 201):
+            new_issue = resp.json()
+            _alert_state["last_alert_issue_id"] = new_issue.get("id")
+            _alert_state["last_alert_at"] = now.isoformat()
+
+
+async def _fire_alert(reason: str, task: dict[str, Any] | None = None, *, queue_depth: int = 0) -> None:
+    if reason == "stuck":
+        if task is None:
+            return
+        title = f"[Incident] Asset Factory 워커 태스크 stuck — task #{task['id']}"
+        body = (
+            f"태스크 `#{task['id']}` ({task.get('asset_key')}) 가 "
+            f"`{_COMPLETION_TIMEOUT_SECONDS}s` 초과 후 max_retries({task.get('max_retries', 3)}) 도달.\n\n"
+            f"- status: failed\n- retries (at time of failure): {task.get('retries')}\n"
+            f"- started_at: {task.get('started_at')}"
+        )
+    else:
+        title = "[Incident] Asset Factory 큐 적체 + ComfyUI 오프라인"
+        body = (
+            f"queue_depth={queue_depth} (임계치 {_QUEUE_DEPTH_ALERT_THRESHOLD} 초과) + "
+            "ComfyUI 오프라인 조합 감지.\n\n"
+            "ComfyUI 호스트 복구 또는 큐 수동 정리 필요."
+        )
+    await _create_or_update_incident_issue(title, body)
+
+
+async def _monitoring_tick() -> None:
+    stuck_tasks = await db.find_and_requeue_stuck_tasks(_COMPLETION_TIMEOUT_SECONDS)
+    for task in stuck_tasks:
+        if int(task.get("retries", 0)) >= int(task.get("max_retries", 3)):
+            await _fire_alert("stuck", task)
+
+    stats = await db.system_stats()
+    queue_depth = int(stats.get("queued_total", 0))
+    if queue_depth >= _QUEUE_DEPTH_ALERT_THRESHOLD:
+        comfyui_ok = await _check_comfyui_ok()
+        if not comfyui_ok:
+            await _fire_alert("queue_depth+comfyui_down", queue_depth=queue_depth)
+
+
+async def monitoring_worker() -> None:
+    """큐 적체/백엔드 오프라인/stuck 태스크를 주기적으로 점검한다."""
+    while True:
+        await asyncio.sleep(_ALERT_POLL_INTERVAL_SECONDS)
+        try:
+            await _monitoring_tick()
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger(__name__).error("monitoring_tick error: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     """앱 수명 주기 관리."""
-    global worker_task, gc_worker_task
+    global worker_task, gc_worker_task, monitoring_task
     await db.init()
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     if os.getenv("ASSET_FACTORY_MOCK_MODE") == "1":
@@ -1055,6 +1253,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     await db.recover_orphan_tasks()
     worker_task = asyncio.create_task(generation_worker())
     gc_worker_task = asyncio.create_task(_gc_loop())
+    monitoring_task = asyncio.create_task(monitoring_worker())
     try:
         yield
     finally:
@@ -1062,6 +1261,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             gc_worker_task.cancel()
             try:
                 await gc_worker_task
+            except asyncio.CancelledError:
+                pass
+        if monitoring_task:
+            monitoring_task.cancel()
+            try:
+                await monitoring_task
             except asyncio.CancelledError:
                 pass
         if worker_task:
@@ -1145,18 +1350,41 @@ async def app_redesign_catchall(path: str) -> FileResponse:
 
 
 @app.get("/api/health")
-async def health() -> dict[str, Any]:
+async def health(include_backends: bool = False) -> dict[str, Any]:
     """기본 헬스체크 + 운영 설정값 노출.
 
     ``bypass_retention_days`` 는 approval_mode='bypass' 후보의 자동 청소 기준
     (env ``AF_BYPASS_RETENTION_DAYS``, 기본 7).
     """
     from candidate_gc import get_bypass_retention_days
-    return {
+    result: dict[str, Any] = {
         "ok": True,
         "service": "asset-factory",
         "bypass_retention_days": get_bypass_retention_days(),
     }
+    if include_backends:
+        t0 = asyncio.get_running_loop().time()
+        last_checked = datetime.now(timezone.utc).isoformat()
+        try:
+            async with asyncio.timeout(_COMFYUI_HEALTH_TIMEOUT_SECONDS):
+                await comfyui_client.health_check()
+            result["backends"] = {
+                "comfyui": {
+                    "ok": True,
+                    "latencyMs": round((asyncio.get_running_loop().time() - t0) * 1000),
+                    "lastCheckedAt": last_checked,
+                }
+            }
+        except Exception as exc:  # noqa: BLE001
+            result["backends"] = {
+                "comfyui": {
+                    "ok": False,
+                    "latencyMs": round((asyncio.get_running_loop().time() - t0) * 1000),
+                    "lastCheckedAt": last_checked,
+                    "error": f"{exc.__class__.__name__}: {exc}",
+                }
+            }
+    return result
 
 
 @app.get("/api/health/sd")
@@ -1558,6 +1786,46 @@ def _mark_a1111_deprecated(response: Response, endpoint_path: str) -> dict[str, 
     return headers
 
 
+# ── A1111 generate endpoints — 410 Gone (Task 9, 본 PR) ────────────────────
+# A1111 backend 자체가 deprecated → call site 가 task 를 만들어도 워커가
+# 디스패치할 백엔드가 없음. 200 + 헤더 패턴 (catalog 식) 대신 즉시 410 Gone
+# 으로 명확히 끝낸다. successor: ``/api/workflows/generate`` (단일) +
+# ``/api/batches`` (배치).
+
+_legacy_generate_logger = _logging.getLogger("asset_factory.legacy_generate_gone")
+_legacy_generate_warned = {"flag": False}
+
+
+def _legacy_generate_gone(successor: str) -> HTTPException:
+    """A1111 시절의 generate 엔드포인트 호출에 대해 410 + deprecation 헤더 응답.
+
+    HTTPException 자체에 헤더를 실어 클라이언트가 Sunset / successor-version
+    링크를 즉시 볼 수 있게 한다 (FastAPI 가 detail 본문도 그대로 전달).
+    """
+    if not _legacy_generate_warned["flag"]:
+        _legacy_generate_logger.warning(
+            "Legacy A1111 generate endpoint called — gone. Successor=%s",
+            successor,
+        )
+        _legacy_generate_warned["flag"] = True
+    return HTTPException(
+        status_code=410,
+        detail={
+            "code": "a1111_endpoint_gone",
+            "message": (
+                "A1111 기반 generate 엔드포인트는 제거되었습니다. "
+                f"새 엔드포인트 사용: {successor}."
+            ),
+            "successor": successor,
+        },
+        headers={
+            "Deprecation": "true",
+            "Sunset": _a1111_deprecation_sunset_date(),
+            "Link": f'<{successor}>; rel="successor-version"',
+        },
+    )
+
+
 @app.get("/api/sd/catalog/models")
 async def sd_catalog_models(response: Response) -> dict[str, Any]:
     """A1111 모델 목록 + ``config/sd_catalog.yml`` 메타데이터 병합 반환.
@@ -1899,65 +2167,55 @@ async def workflows_generate(request: WorkflowGenerateRequest) -> dict[str, Any]
     job_type = "workflow_single" if request.candidates_total == 1 else "workflow_design"
     await db.create_job(job_id=job_id, job_type=job_type, payload=request.model_dump())
 
-    workflow_params_json = (
-        json.dumps(request.workflow_params, ensure_ascii=False)
-        if request.workflow_params
-        else None
-    )
-    prompt_resolution_json = json.dumps(resolution.to_dict(), ensure_ascii=False)
+    # 모든 워크플로우 호출에 batch_id 를 부여 — /api/batches 히스토리에 manual
+    # 요청도 함께 노출되고, candidates_total=1 이어도 handle_task 가 candidate
+    # path 로 처리하여 cherry-pick 에서 검토 가능. (handle_task §line 904
+    # 분기: batch_id != None & candidate_slot None → slot=task.id 자동 부여)
+    batch_id = f"btc_{uuid.uuid4().hex[:16]}"
+
     candidates_total = int(request.candidates_total)
     base_seed = request.seed
 
-    # generation_tasks 의 steps/cfg/sampler 컬럼은 NOT NULL — variant 기본값으로 채움.
-    steps_value = int(
-        request.steps if request.steps is not None
-        else variant.defaults.get("steps", 20)
-    )
-    cfg_value = float(
-        request.cfg if request.cfg is not None
-        else variant.defaults.get("cfg", 7.0)
-    )
-    sampler_value = str(
-        request.sampler if request.sampler is not None
-        else variant.defaults.get("sampler", "DPM++ 2M")
-    )
-
     for slot_index in range(candidates_total):
         slot_seed = (base_seed + slot_index) if base_seed is not None else None
-        await db.enqueue_generation_task(
-            {
-                "job_id": job_id,
-                "project": request.project,
-                "asset_key": request.asset_key,
-                "category": request.category,
-                # §1.B: ComfyUI 로 디스패치되는 실제 final_positive/final_negative.
-                # legacy 모드면 request.prompt 그대로 (resolution.final_positive 와 동일).
-                "prompt": resolution.final_positive,
-                "negative_prompt": resolution.final_negative or None,
-                "model_name": None,
-                "width": None,
-                "height": None,
-                "steps": steps_value,
-                "cfg": cfg_value,
-                "sampler": sampler_value,
-                "expected_size": request.expected_size,
-                "max_colors": request.max_colors,
-                "max_retries": request.max_retries,
-                "candidate_slot": slot_index if candidates_total > 1 else None,
-                "candidates_total": candidates_total,
-                "seed": slot_seed,
-                "backend": "comfyui",
-                "workflow_category": request.workflow_category,
-                "workflow_variant": request.workflow_variant,
-                "workflow_params_json": workflow_params_json,
-                "approval_mode": request.approval_mode,
-                "prompt_resolution_json": prompt_resolution_json,
-            }
+        task = _make_workflow_task(
+            project=request.project,
+            asset_key=request.asset_key,
+            category=request.category,
+            workflow_category=request.workflow_category,
+            variant=variant,
+            workflow_params=request.workflow_params,
+            resolution=resolution,
+            seed=slot_seed,
+            candidates_total=candidates_total,
+            candidate_slot=slot_index if candidates_total > 1 else None,
+            steps=request.steps,
+            cfg=request.cfg,
+            sampler=request.sampler,
+            expected_size=request.expected_size,
+            max_colors=request.max_colors,
+            max_retries=request.max_retries,
+            approval_mode=request.approval_mode,
         )
+        await db.enqueue_generation_task({
+            "job_id": job_id, "batch_id": batch_id, **task,
+        })
     await db.mark_job_running(job_id)
     await event_broker.publish({"type": ev.EVT_JOB_CREATED, "job_id": job_id})
+    # Batches 화면이 SSE 로 즉시 갱신되도록 design_batch_created 도 발행 —
+    # batch_id 가 부여된 이상 design batch 와 동일한 가시성을 가진다.
+    await event_broker.publish(
+        {
+            "type": ev.EVT_DESIGN_BATCH_CREATED,
+            "batch_id": batch_id,
+            "job_id": job_id,
+            "asset_key": request.asset_key,
+            "expanded_count": candidates_total,
+        }
+    )
     return {
         "job_id": job_id,
+        "batch_id": batch_id,
         "workflow_category": request.workflow_category,
         "workflow_variant": request.workflow_variant,
         "candidates_total": candidates_total,
@@ -2057,63 +2315,27 @@ async def list_project_assets(
 
 
 @app.post("/api/generate", dependencies=[Depends(require_api_key)])
-async def generate_asset(request: GenerateRequest) -> dict[str, str]:
-    """단일 에셋 생성 작업 등록."""
-    _ensure_disk_space_for_enqueue()
-    job_id = str(uuid.uuid4())
-    await db.create_job(job_id=job_id, job_type="generate_single", payload=request.model_dump())
-    await db.enqueue_generation_task(
-        {
-            "job_id": job_id,
-            "project": request.project,
-            "asset_key": request.asset_key,
-            "category": request.category,
-            "prompt": request.prompt,
-            "negative_prompt": request.negative_prompt,
-            "model_name": request.model_name,
-            "width": request.width,
-            "height": request.height,
-            "steps": request.steps,
-            "cfg": request.cfg,
-            "sampler": request.sampler,
-            "expected_size": request.expected_size,
-            "max_colors": request.max_colors,
-            "max_retries": request.max_retries,
-        }
-    )
-    await db.mark_job_running(job_id)
-    await event_broker.publish({"type": ev.EVT_JOB_CREATED, "job_id": job_id})
-    return {"job_id": job_id}
+async def generate_asset(_request: GenerateRequest) -> dict[str, str]:
+    """A1111 기반 단일 생성 — 제거됨 (410 Gone).
+
+    .. deprecated::
+        ``model_name`` / ``sampler`` / ``cfg`` 페이로드 기반 단일 생성은
+        ``/api/workflows/generate`` (ComfyUI 변형 기반) 로 대체. payload schema
+        가 다르므로 클라이언트는 ``WorkflowGenerateRequest`` 로 갈아탈 것.
+    """
+    raise _legacy_generate_gone(successor="/api/workflows/generate")
 
 
 @app.post("/api/generate/batch", dependencies=[Depends(require_api_key)])
-async def generate_batch(request: BatchGenerateRequest) -> dict[str, Any]:
-    """스펙 기반 배치 생성 작업 등록."""
-    _ensure_disk_space_for_enqueue()
-    spec = request.spec
-    if spec is None:
-        if not request.spec_id:
-            raise HTTPException(status_code=400, detail="spec 또는 spec_id 중 하나는 필요합니다.")
-        spec_path = BASE_DIR / "specs" / f"{request.spec_id}.json"
-        if not spec_path.exists():
-            raise HTTPException(status_code=404, detail="요청한 spec_id 파일이 없습니다.")
-        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+async def generate_batch(_request: BatchGenerateRequest) -> dict[str, Any]:
+    """A1111 기반 spec 배치 — 제거됨 (410 Gone).
 
-    project, tasks = _extract_tasks_from_spec(spec, request.project)
-    if not tasks:
-        raise HTTPException(status_code=400, detail="생성 가능한 태스크가 없습니다. spec을 확인하세요.")
-
-    job_id = str(uuid.uuid4())
-    await db.create_job(
-        job_id=job_id,
-        job_type="generate_batch",
-        payload={"project": project, "task_count": len(tasks)},
-    )
-    for task in tasks:
-        await db.enqueue_generation_task({"job_id": job_id, **task})
-    await db.mark_job_running(job_id)
-    await event_broker.publish({"type": ev.EVT_BATCH_JOB_CREATED, "job_id": job_id, "task_count": len(tasks)})
-    return {"job_id": job_id, "project": project, "task_count": len(tasks)}
+    .. deprecated::
+        ``spec`` / ``spec_id`` 기반 배치는 ``/api/batches`` (DesignBatchRequest,
+        workflow 곱집합) 로 대체. spec → DesignBatchRequest 변환은 클라이언트
+        책임 (workflow_category/variants/overrides 명시 필요).
+    """
+    raise _legacy_generate_gone(successor="/api/batches")
 
 
 async def _enqueue_design_batch(spec: DesignBatchRequest) -> dict[str, Any]:
@@ -2121,13 +2343,23 @@ async def _enqueue_design_batch(spec: DesignBatchRequest) -> dict[str, Any]:
 
     batch_id를 발급하고 expand된 task들을 generation_tasks에 enqueue한다.
     예상 ETA는 task당 6초의 거친 추정치이다."""
-    _ensure_disk_space_for_enqueue()
     try:
         tasks = expand_design_batch(spec)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not tasks:
         raise HTTPException(status_code=400, detail="expand 결과가 비어있습니다. spec을 확인하세요.")
+
+    # variant 들 중 max outputs 로 디스크 가드 상향. multi-output 변형 (V38 = 5장)
+    # 이 섞여 있어도 가장 큰 한 개로 보수적 추정.
+    max_outputs_per_task = 1
+    for variant_name in set(spec.workflow_variants):
+        try:
+            v = workflow_registry.variant(spec.workflow_category, variant_name)
+            max_outputs_per_task = max(max_outputs_per_task, len(v.outputs))
+        except WorkflowRegistryError:
+            pass
+    _ensure_disk_space_for_enqueue(expected_files=max_outputs_per_task * len(tasks))
 
     batch_id = f"btc_{uuid.uuid4().hex[:16]}"
     job_id = str(uuid.uuid4())
@@ -2279,6 +2511,91 @@ async def retry_failed_batch_tasks_api(batch_id: str) -> dict[str, Any]:
             }
         )
     return {"batch_id": batch_id, "retried_count": len(retried), "task_ids": retried}
+
+
+@app.post(
+    "/api/batches/{batch_id}/cancel",
+    dependencies=[Depends(require_api_key)],
+)
+async def cancel_batch_api(batch_id: str) -> dict[str, Any]:
+    """배치의 queued/processing 태스크를 cancelled 로 전환.
+
+    이미 done/failed 인 task 와 candidate 는 건드리지 않는다 (history 보존).
+    실제 cleanup (디스크 파일 + DB row 제거) 는 ``DELETE /api/batches/{id}``.
+    """
+    if not await db.get_batch_detail(batch_id):
+        raise HTTPException(status_code=404, detail=f"batch not found: {batch_id}")
+    counts = await db.cancel_batch(batch_id)
+    total_cancelled = counts["cancelled_queued"] + counts["cancelled_processing"]
+    if total_cancelled > 0:
+        await event_broker.publish(
+            {
+                "type": ev.EVT_BATCH_CANCELLED,
+                "batch_id": batch_id,
+                "cancelled_count": total_cancelled,
+            }
+        )
+    return {"batch_id": batch_id, **counts}
+
+
+@app.delete(
+    "/api/batches/{batch_id}",
+    dependencies=[Depends(require_api_key)],
+)
+async def delete_batch_api(
+    batch_id: str,
+    force: bool = Query(default=False, description="active 태스크 있어도 강제 삭제"),
+) -> dict[str, Any]:
+    """배치의 task / candidate row + 이미지 파일을 삭제 (테스트 정리/실수 회복).
+
+    안전장치: queued/processing 태스크가 남아 있으면 409 Conflict 로 거부.
+    호출자가 먼저 ``POST /api/batches/{id}/cancel`` 로 멈추거나, ``force=true``
+    쿼리로 우회. force 우회 시에도 워커는 race window 동안 결과를 저장하려
+    할 수 있어 cancel → delay → delete 순서가 권장됨.
+    """
+    detail = await db.get_batch_detail(batch_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail=f"batch not found: {batch_id}")
+    active = int(detail.get("active", 0) or 0)
+    if active > 0 and not force:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "batch_has_active_tasks",
+                "message": f"{active} 개의 task 가 아직 처리 중입니다. 먼저 취소(cancel) 하거나 force=true 로 호출하세요.",
+                "active": active,
+            },
+        )
+
+    result = await db.delete_batch(batch_id)
+    # best-effort 디스크 unlink — DB 는 이미 정리됐으므로 파일 누락은 무해.
+    unlinked = 0
+    failed_unlinks: list[str] = []
+    for path_str in result.get("image_paths", []):
+        try:
+            p = Path(path_str)
+            if p.exists():
+                p.unlink()
+                unlinked += 1
+        except OSError as exc:
+            failed_unlinks.append(f"{path_str}: {exc}")
+
+    await event_broker.publish(
+        {
+            "type": ev.EVT_BATCH_DELETED,
+            "batch_id": batch_id,
+            "deleted_tasks": result["deleted_tasks"],
+            "deleted_candidates": result["deleted_candidates"],
+        }
+    )
+    return {
+        "batch_id": batch_id,
+        "deleted_tasks": result["deleted_tasks"],
+        "deleted_candidates": result["deleted_candidates"],
+        "unlinked_files": unlinked,
+        "failed_unlinks": failed_unlinks,
+        "force": force,
+    }
 
 
 @app.get("/api/batches/{batch_id}/candidates")
@@ -2482,10 +2799,17 @@ async def approve_from_candidate(body: ApproveFromCandidateRequest) -> dict[str,
         except (TypeError, json.JSONDecodeError):
             meta = {}
 
+    _cp_max_colors, _cp_require_alpha = _resolve_validation_args(
+        workflow_category=meta.get("workflow_category"),
+        workflow_variant=meta.get("workflow_variant"),
+        output_label=meta.get("primary_output_label"),
+        fallback_max_colors=_read_max_colors(meta),
+    )
     validation = validate_asset(
         image_path=dest,
         expected_size=meta.get("expected_size"),
-        max_colors=int(meta.get("max_colors", 32)),
+        max_colors=_cp_max_colors,
+        require_alpha=_cp_require_alpha,
     )
 
     metadata_out = candidate.get("metadata_json") or json.dumps(meta, ensure_ascii=False)
@@ -2840,15 +3164,21 @@ async def select_asset_candidate(asset_id: str, body: SelectCandidateRequest) ->
             meta = json.loads(pick["metadata_json"])
         except (TypeError, json.JSONDecodeError):
             meta = {}
-    max_colors = int(meta.get("max_colors", 32))
     expected = meta.get("expected_size")
     if expected is None:
         expected = asset.get("width")
+    _pick_max_colors, _pick_require_alpha = _resolve_validation_args(
+        workflow_category=meta.get("workflow_category"),
+        workflow_variant=meta.get("workflow_variant"),
+        output_label=meta.get("primary_output_label"),
+        fallback_max_colors=_read_max_colors(meta),
+    )
 
     validation = validate_asset(
         image_path=dest,
         expected_size=int(expected) if expected is not None else None,
-        max_colors=max_colors,
+        max_colors=_pick_max_colors,
+        require_alpha=_pick_require_alpha,
     )
     metadata_out = pick.get("metadata_json")
     if not metadata_out:
@@ -2917,15 +3247,21 @@ async def restore_asset_history(asset_id: str, body: RestoreHistoryRequest) -> d
             meta = json.loads(target["metadata_json"])
         except (TypeError, json.JSONDecodeError):
             meta = {}
-    max_colors = int(meta.get("max_colors", 32))
     expected = meta.get("expected_size")
     if expected is None:
         expected = target.get("width") or asset.get("width")
+    _rst_max_colors, _rst_require_alpha = _resolve_validation_args(
+        workflow_category=meta.get("workflow_category"),
+        workflow_variant=meta.get("workflow_variant"),
+        output_label=meta.get("primary_output_label"),
+        fallback_max_colors=_read_max_colors(meta),
+    )
 
     validation = validate_asset(
         image_path=dest,
         expected_size=int(expected) if expected is not None else None,
-        max_colors=max_colors,
+        max_colors=_rst_max_colors,
+        require_alpha=_rst_require_alpha,
     )
     metadata_out = target.get("metadata_json")
     if not metadata_out and meta:
@@ -3003,7 +3339,7 @@ async def regenerate_asset(asset_id: str) -> dict[str, str]:
     cfg = float(metadata.get("cfg", 7.0))
     sampler = str(metadata.get("sampler", "DPM++ 2M"))
     negative_prompt = metadata.get("negative_prompt")
-    max_colors = int(metadata.get("max_colors", 32))
+    max_colors = _read_max_colors(metadata)
     max_retries = int(metadata.get("max_retries", 3))
     expected_size = metadata.get("expected_size")
     if expected_size is None:
@@ -3045,6 +3381,90 @@ async def regenerate_asset(asset_id: str) -> dict[str, str]:
     return {"job_id": job_id}
 
 
+def _validate_asset_with_policy(asset: dict[str, Any]) -> "ValidationResult":
+    """에셋 DB 행에서 metadata_json 기반 정책을 읽어 validate_asset 을 실행한다."""
+    meta: dict[str, Any] = {}
+    if asset.get("metadata_json"):
+        try:
+            meta = json.loads(asset["metadata_json"])
+        except (TypeError, json.JSONDecodeError):
+            meta = {}
+    _max_colors, _require_alpha = _resolve_validation_args(
+        workflow_category=meta.get("workflow_category"),
+        workflow_variant=meta.get("workflow_variant"),
+        output_label=meta.get("primary_output_label"),
+        fallback_max_colors=_read_max_colors(meta),
+    )
+    return validate_asset(
+        image_path=Path(asset["image_path"]),
+        max_colors=_max_colors,
+        require_alpha=_require_alpha,
+    )
+
+
+class RevalidateRequest(BaseModel):
+    asset_keys: list[str] | None = None
+
+
+@app.post("/api/projects/{project}/revalidate", dependencies=[Depends(require_api_key)])
+async def revalidate_project_assets(
+    project: str,
+    body: RevalidateRequest = RevalidateRequest(),
+) -> dict[str, Any]:
+    """프로젝트 에셋을 현재 validation 정책으로 재검증한다.
+
+    body.asset_keys 를 지정하면 해당 키만, 미지정 시 전체 프로젝트 에셋을 대상으로 한다.
+    디스크 이미지를 그대로 읽어 정책만 바꿔 재평가하므로 재생성 없이 fail → pass 전환 가능.
+    """
+    assets = await db.list_assets(project=project)
+    if body.asset_keys is not None:
+        key_set = set(body.asset_keys)
+        assets = [a for a in assets if a["asset_key"] in key_set]
+
+    checked = 0
+    passed_count = 0
+    failed_count = 0
+    for asset in assets:
+        try:
+            result = _validate_asset_with_policy(asset)
+        except Exception as exc:  # noqa: BLE001
+            result_passed = False
+            result_msg = f"검증 오류: {exc}"
+            await db.update_asset_validation(
+                asset["id"],
+                width=asset.get("width") or 0,
+                height=asset.get("height") or 0,
+                color_count=asset.get("color_count") or 0,
+                has_alpha=asset.get("has_alpha") or False,
+                validation_status="fail",
+                validation_message=result_msg,
+            )
+            failed_count += 1
+            checked += 1
+            continue
+        await db.update_asset_validation(
+            asset["id"],
+            width=result.width,
+            height=result.height,
+            color_count=result.color_count,
+            has_alpha=result.has_alpha,
+            validation_status="pass" if result.passed else "fail",
+            validation_message=result.message,
+        )
+        if result.passed:
+            passed_count += 1
+        else:
+            failed_count += 1
+        checked += 1
+
+    return {
+        "project": project,
+        "checked": checked,
+        "passed": passed_count,
+        "failed": failed_count,
+    }
+
+
 @app.post("/api/validate/all", dependencies=[Depends(require_api_key)])
 async def validate_all_assets(project: str | None = Query(default=None)) -> dict[str, Any]:
     """전체 에셋 재검증.
@@ -3057,7 +3477,7 @@ async def validate_all_assets(project: str | None = Query(default=None)) -> dict
     checked = 0
     failed = 0
     for asset in assets:
-        result = validate_asset(image_path=Path(asset["image_path"]))
+        result = _validate_asset_with_policy(asset)
         await db.update_asset_validation(
             asset["id"],
             width=result.width,
@@ -3079,7 +3499,7 @@ async def validate_asset_endpoint(asset_id: str) -> dict[str, Any]:
     asset = await db.get_asset(asset_id)
     if asset is None:
         raise HTTPException(status_code=404, detail="에셋을 찾을 수 없습니다.")
-    result = validate_asset(image_path=Path(asset["image_path"]))
+    result = _validate_asset_with_policy(asset)
     await db.update_asset_validation(
         asset_id,
         width=result.width,
@@ -3109,7 +3529,7 @@ async def batch_revalidate_failed(
     updated = 0
     still_fail = 0
     for asset in assets:
-        result = validate_asset(image_path=Path(asset["image_path"]))
+        result = _validate_asset_with_policy(asset)
         await db.update_asset_validation(
             asset["id"],
             width=result.width,
@@ -3154,7 +3574,7 @@ async def batch_regenerate_failed(
         cfg = float(metadata.get("cfg", 7.0))
         sampler = str(metadata.get("sampler", "DPM++ 2M"))
         negative_prompt = metadata.get("negative_prompt")
-        max_colors = int(metadata.get("max_colors", 32))
+        max_colors = _read_max_colors(metadata)
         max_retries = int(metadata.get("max_retries", 3))
         expected_size = metadata.get("expected_size")
         if expected_size is None:

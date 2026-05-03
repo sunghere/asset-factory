@@ -395,6 +395,7 @@ function CherryPick({ batchId }) {
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           <button className="btn" onClick={() => candidates.reload()} title="reload">↻ reload</button>
           <button className="btn" onClick={() => window.navigate('/queue')} title="queue">batch 목록</button>
+          <BatchOps batchId={batchId} meta={meta} onChanged={() => candidates.reload()}/>
           <label className="row" style={{ fontSize: 12 }}>
             <input
               type="checkbox"
@@ -900,6 +901,141 @@ function HelpDialog({ open, onClose, keymapEnabled = true, autoAdvance = true })
         <a href="/app/settings" onClick={(e) => { e.preventDefault(); onClose?.(); window.navigate('/settings'); }}>
           /settings 에서 변경
         </a>
+      </div>
+    </window.Dialog>
+  );
+}
+
+/* BatchOps — cancel / delete 버튼 + 2-step 확인 다이얼로그.
+   "취소": queued/processing → cancelled (history 보존).
+   "삭제": task + candidate row + 디스크 파일 모두 제거.
+     active 가 남아 있으면 409 (force 옵션 제공). */
+function BatchOps({ batchId, meta, onChanged }) {
+  const toasts = window.useToasts();
+  const [confirm, setConfirm] = useState(null); // 'cancel' | 'delete' | null
+  const [busy, setBusy] = useState(false);
+
+  const totalActive = Number(meta?.active || 0);
+
+  async function doCancel() {
+    setBusy(true);
+    try {
+      const r = await window.api.cancelBatch(batchId);
+      const n = (r.cancelled_queued || 0) + (r.cancelled_processing || 0);
+      toasts.push({
+        kind: 'success',
+        message: n > 0
+          ? `취소 완료 — ${n} task (queued ${r.cancelled_queued} / processing ${r.cancelled_processing})`
+          : '취소할 task 가 없었습니다 (이미 모두 종료됨).',
+        ttl: 5000,
+      });
+      onChanged?.();
+    } catch (e) {
+      toasts.push({ kind: 'error', message: '취소 실패: ' + (e.message || e), ttl: 6000 });
+    } finally {
+      setBusy(false);
+      setConfirm(null);
+    }
+  }
+
+  async function doDelete(force = false) {
+    setBusy(true);
+    try {
+      const r = await window.api.deleteBatch(batchId, { force });
+      toasts.push({
+        kind: 'success',
+        message: `삭제 완료 — task ${r.deleted_tasks}, candidate ${r.deleted_candidates}, 파일 ${r.unlinked_files}`,
+        ttl: 6000,
+      });
+      window.navigate('/queue');
+    } catch (e) {
+      // 409 → active 가 남음. 사용자에게 cancel-then-delete 흐름 유도.
+      if (e?.status === 409) {
+        const detail = e.body?.detail || {};
+        const active = detail.active ?? '?';
+        const ok = window.confirm(
+          `${active} 개의 task 가 아직 처리 중입니다. 먼저 '취소' 후 다시 시도하세요.\n` +
+          `그래도 강제 삭제할까요? (race window 동안 워커가 결과를 마저 저장할 수 있음)`
+        );
+        if (ok) {
+          await doDelete(true);
+          return;
+        }
+        toasts.push({ kind: 'info', message: '삭제 취소됨.' });
+      } else {
+        toasts.push({ kind: 'error', message: '삭제 실패: ' + (e.message || e), ttl: 6000 });
+      }
+    } finally {
+      setBusy(false);
+      setConfirm(null);
+    }
+  }
+
+  return (
+    <>
+      <button
+        className="btn"
+        disabled={busy}
+        onClick={() => setConfirm('cancel')}
+        title="진행중 task 를 cancelled 로 마킹 (디스크/DB 보존)"
+      >취소</button>
+      <button
+        className="btn"
+        disabled={busy}
+        onClick={() => setConfirm('delete')}
+        title="batch 의 task + candidate + 파일을 영구 삭제"
+        style={{ color: 'var(--accent-reject)' }}
+      >삭제</button>
+
+      {confirm === 'cancel' && (
+        <ConfirmDialog
+          title="batch 취소?"
+          body={
+            totalActive > 0
+              ? `${totalActive} 개의 진행중 task 를 cancelled 로 마킹합니다. 이미 done/failed 인 task 와 그동안 만들어진 candidate 는 그대로 보존됩니다.`
+              : '진행중 task 가 없습니다. 그래도 cancel 마킹을 시도할까요?'
+          }
+          confirmLabel="취소 실행"
+          danger={false}
+          onConfirm={doCancel}
+          onClose={() => setConfirm(null)}
+        />
+      )}
+      {confirm === 'delete' && (
+        <ConfirmDialog
+          title="batch 영구 삭제?"
+          body={
+            <>
+              이 batch 의 <b>모든 task / candidate row + 디스크 이미지</b> 를 삭제합니다.
+              {' '}되돌릴 수 없습니다.
+              {totalActive > 0 && (
+                <div style={{ marginTop: 8, color: 'var(--accent-warning, var(--accent-pick))' }}>
+                  진행중 task {totalActive} 개 — 먼저 '취소' 를 실행한 뒤 삭제하는 것을 권장합니다.
+                </div>
+              )}
+            </>
+          }
+          confirmLabel={`삭제 (${meta?.asset_key || batchId.slice(0, 12)})`}
+          danger={true}
+          onConfirm={() => doDelete(false)}
+          onClose={() => setConfirm(null)}
+        />
+      )}
+    </>
+  );
+}
+
+function ConfirmDialog({ title, body, confirmLabel, danger, onConfirm, onClose }) {
+  return (
+    <window.Dialog onClose={onClose} title={title}>
+      <div style={{ marginBottom: 14, lineHeight: 1.5 }}>{body}</div>
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+        <button className="btn" onClick={onClose}>닫기</button>
+        <button
+          className={`btn ${danger ? '' : 'btn-primary'}`}
+          style={danger ? { background: 'var(--accent-reject)', color: '#fff', borderColor: 'var(--accent-reject)' } : undefined}
+          onClick={onConfirm}
+        >{confirmLabel}</button>
       </div>
     </window.Dialog>
   );

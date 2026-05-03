@@ -30,24 +30,14 @@ read -r -d '' SPEC <<'JSON' || true
   "project": "__PROJECT__",
   "asset_key": "__ASSET_KEY__",
   "category": "character",
+  "workflow_category": "sprite",
+  "workflow_variants": ["pixel_alpha"],
+  "workflow_params_overrides": [{}],
   "prompts": [
     "pixel art, marine character idle pose, transparent background, clean lineart, full body"
   ],
-  "models": [
-    "pixelart_xl_v1.5",
-    "deliberate_v3"
-  ],
-  "loras": [
-    [
-      {"name": "marine_uniform_v2", "weight": 0.7},
-      {"name": "sad_face_v1", "weight": 0.5}
-    ]
-  ],
-  "seeds_per_combo": 25,
+  "seeds_per_combo": 100,
   "common": {
-    "steps": 28,
-    "cfg": 7.0,
-    "sampler": "DPM++ 2M Karras",
     "negative_prompt": "blurry, lowres, jpeg artifacts, watermark",
     "expected_size": 1024,
     "max_colors": 64
@@ -76,7 +66,7 @@ ETA=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(
 echo
 echo "============================================================"
 echo " batch_id        : $BATCH_ID"
-echo " expanded_count  : $EXPANDED   (목표 100, 2 모델 x 2 LoRA x 25 seed = 100)"
+echo " expanded_count  : $EXPANDED   (목표 100, sprite/pixel_alpha × 100 seed)"
 echo " estimated_eta_s : $ETA        (~ task당 6초 추정)"
 echo "------------------------------------------------------------"
 echo " cherry-pick URL : $AF_HOST/cherry-pick?batch=$BATCH_ID"
