@@ -3,12 +3,52 @@
 from __future__ import annotations
 
 import json
+import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import aiosqlite
+
+logger = logging.getLogger(__name__)
+
+# Project slug 검증 — auto-create 게이트 + UI picker 노출 조건.
+# 2-40자, 소문자 시작, [a-z0-9-] 만. CLAUDE.md/AGENTS.md 운영 규칙과 동기.
+PROJECT_SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{1,39}$")
+PROJECT_RESERVED_SLUGS = frozenset(
+    {"default", "system", "admin", "api", "null", "undefined", "_", "__pycache__"}
+)
+# 마이그레이션 호환을 위해 'default-project' 는 reserved 에서 제외.
+DEFAULT_PROJECT_SLUG = "default-project"
+DEFAULT_PROJECT_DISPLAY_NAME = "Default Project"
+
+
+def is_valid_project_slug(slug: str) -> bool:
+    """Slug 가 등록 가능한 형태인지 — auto-create 가 통과시킬지 결정."""
+    if not slug:
+        return False
+    if slug == DEFAULT_PROJECT_SLUG:
+        return True
+    if slug in PROJECT_RESERVED_SLUGS:
+        return False
+    return bool(PROJECT_SLUG_RE.match(slug))
+
+
+def suggest_project_slug(value: str) -> str:
+    """invalid slug 에 대한 suggestion — lowercase + 비허용 문자를 '-' 로 치환.
+
+    UI 의 inline validation hint 와 API 400 응답 'suggestion' 필드 양쪽이 사용.
+    """
+    lowered = (value or "").strip().lower()
+    cleaned = re.sub(r"[^a-z0-9-]", "-", lowered)
+    cleaned = re.sub(r"-+", "-", cleaned).strip("-")
+    if not cleaned:
+        return ""
+    if cleaned[0].isdigit():
+        cleaned = "p-" + cleaned
+    return cleaned[:40]
 
 
 def utc_now() -> str:
@@ -292,7 +332,295 @@ class Database:
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_candidates_picked_asset ON asset_candidates(picked_asset_id)"
             )
+            # Project registry — design doc §"데이터 모델".
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS projects (
+                    slug         TEXT PRIMARY KEY,
+                    display_name TEXT NOT NULL,
+                    description  TEXT,
+                    created_at   TEXT NOT NULL,
+                    archived_at  TEXT,
+                    purge_status TEXT
+                )
+                """
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_projects_archived ON projects(archived_at)"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_projects_purge_status "
+                "ON projects(purge_status) WHERE purge_status IS NOT NULL"
+            )
+            # 카운트 / 필터링 가속용 인덱스.
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tasks_project ON generation_tasks(project)"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tasks_project_status "
+                "ON generation_tasks(project, status)"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_candidates_project ON asset_candidates(project)"
+            )
             await conn.commit()
+            await self._backfill_projects_registry()
+
+    async def _backfill_projects_registry(self) -> None:
+        """기존 free-form project 값으로 projects 테이블 채우기 (T1: Quarantine).
+
+        - DISTINCT project 추출 → slug 검증 통과한 것만 INSERT OR IGNORE.
+        - default-project 는 항상 seed (legacy 호환 + 신규 빈 DB 초기 기본값).
+        - invalid slug 는 INSERT 안 함 (read-only 보존). picker 에 안 노출.
+        """
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            seen: set[str] = set()
+            for table in ("assets", "generation_tasks", "asset_candidates"):
+                cursor = await conn.execute(
+                    f"SELECT DISTINCT project FROM {table} WHERE project IS NOT NULL AND project <> ''"
+                )
+                async for row in cursor:
+                    seen.add(row[0])
+            now = utc_now()
+            valid: list[str] = sorted(s for s in seen if is_valid_project_slug(s))
+            invalid: list[str] = sorted(s for s in seen if not is_valid_project_slug(s))
+            for slug in valid:
+                await conn.execute(
+                    "INSERT OR IGNORE INTO projects(slug, display_name, created_at) VALUES (?, ?, ?)",
+                    (slug, slug, now),
+                )
+            await conn.execute(
+                "INSERT OR IGNORE INTO projects(slug, display_name, created_at) VALUES (?, ?, ?)",
+                (DEFAULT_PROJECT_SLUG, DEFAULT_PROJECT_DISPLAY_NAME, now),
+            )
+            await conn.commit()
+            if invalid:
+                preview = invalid[:10]
+                suffix = "..." if len(invalid) > 10 else ""
+                logger.warning(
+                    "PROJECT_QUARANTINE: %d legacy project values not migrated to registry "
+                    "(invalid slugs): %s%s. Their assets/tasks remain readable but are not "
+                    "picker-eligible. Use future rename PR or manual cleanup.",
+                    len(invalid),
+                    preview,
+                    suffix,
+                )
+
+    # --- Project CRUD helpers ---------------------------------------------
+
+    async def upsert_project_idempotent(self, slug: str) -> bool:
+        """Auto-create 게이트: slug 가 검증 통과 + projects 에 없으면 INSERT.
+
+        호출자가 ``is_valid_project_slug(slug)`` 를 이미 보장한 상태에서 호출한다
+        (서버 layer 의 ``ensure_project_writable`` Depends 가 책임).
+
+        Returns
+        -------
+        bool
+            INSERT 가 실제로 일어나면 True, 이미 존재하면 False.
+        """
+        async with aiosqlite.connect(self.db_path) as conn:
+            # BEGIN IMMEDIATE — Race: 동시 enqueue 두 클라이언트가 같은 신규 slug 를 보내도
+            # SQLite UNIQUE PRIMARY KEY + INSERT OR IGNORE 로 안전. design doc Q4.
+            await conn.execute("BEGIN IMMEDIATE")
+            cursor = await conn.execute(
+                "INSERT OR IGNORE INTO projects(slug, display_name, created_at) VALUES (?, ?, ?)",
+                (slug, slug, utc_now()),
+            )
+            await conn.commit()
+            return cursor.rowcount > 0
+
+    async def get_project(self, slug: str) -> dict[str, Any] | None:
+        """단건 조회 — registry row 만 반환 (counts 는 별도 helper)."""
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.execute(
+                "SELECT slug, display_name, description, created_at, archived_at, purge_status "
+                "FROM projects WHERE slug=?",
+                (slug,),
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def list_projects(self, *, include_archived: bool = True) -> list[dict[str, Any]]:
+        """등록된 모든 project. ``include_archived=False`` 시 archive 된 것 제외."""
+        query = (
+            "SELECT slug, display_name, description, created_at, archived_at, purge_status "
+            "FROM projects"
+        )
+        if not include_archived:
+            query += " WHERE archived_at IS NULL AND purge_status IS NULL"
+        query += " ORDER BY created_at DESC"
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.execute(query)
+            return [dict(row) async for row in cursor]
+
+    async def create_project(
+        self,
+        *,
+        slug: str,
+        display_name: str,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """명시적 등록 (POST /api/projects). slug 충돌 시 IntegrityError."""
+        now = utc_now()
+        async with aiosqlite.connect(self.db_path) as conn:
+            await conn.execute(
+                "INSERT INTO projects(slug, display_name, description, created_at) VALUES (?, ?, ?, ?)",
+                (slug, display_name, description, now),
+            )
+            await conn.commit()
+        return {
+            "slug": slug,
+            "display_name": display_name,
+            "description": description,
+            "created_at": now,
+            "archived_at": None,
+            "purge_status": None,
+        }
+
+    async def update_project(
+        self,
+        slug: str,
+        *,
+        display_name: str | None = None,
+        description: str | None = None,
+    ) -> dict[str, Any] | None:
+        """display_name / description 부분 갱신. 존재하지 않으면 None."""
+        if display_name is None and description is None:
+            return await self.get_project(slug)
+        sets: list[str] = []
+        params: list[Any] = []
+        if display_name is not None:
+            sets.append("display_name=?")
+            params.append(display_name)
+        if description is not None:
+            sets.append("description=?")
+            params.append(description)
+        params.append(slug)
+        async with aiosqlite.connect(self.db_path) as conn:
+            cursor = await conn.execute(
+                f"UPDATE projects SET {', '.join(sets)} WHERE slug=?", tuple(params)
+            )
+            await conn.commit()
+            if cursor.rowcount == 0:
+                return None
+        return await self.get_project(slug)
+
+    async def archive_project(self, slug: str) -> dict[str, Any] | None:
+        """archived_at 세팅 (idempotent — 이미 archived 면 그대로)."""
+        async with aiosqlite.connect(self.db_path) as conn:
+            await conn.execute("BEGIN IMMEDIATE")
+            cursor = await conn.execute(
+                "UPDATE projects SET archived_at=COALESCE(archived_at, ?) WHERE slug=?",
+                (utc_now(), slug),
+            )
+            await conn.commit()
+            if cursor.rowcount == 0:
+                return None
+        return await self.get_project(slug)
+
+    async def unarchive_project(self, slug: str) -> dict[str, Any] | None:
+        """archived_at 해제. purge_status 진행 중이면 호출자가 거부."""
+        async with aiosqlite.connect(self.db_path) as conn:
+            await conn.execute("BEGIN IMMEDIATE")
+            cursor = await conn.execute(
+                "UPDATE projects SET archived_at=NULL WHERE slug=?",
+                (slug,),
+            )
+            await conn.commit()
+            if cursor.rowcount == 0:
+                return None
+        return await self.get_project(slug)
+
+    async def set_project_purge_status(
+        self, slug: str, status: str | None
+    ) -> dict[str, Any] | None:
+        """purge_status 토글 (None | 'purging')."""
+        async with aiosqlite.connect(self.db_path) as conn:
+            await conn.execute("BEGIN IMMEDIATE")
+            cursor = await conn.execute(
+                "UPDATE projects SET purge_status=? WHERE slug=?",
+                (status, slug),
+            )
+            await conn.commit()
+            if cursor.rowcount == 0:
+                return None
+        return await self.get_project(slug)
+
+    async def delete_project_row(self, slug: str) -> bool:
+        """projects row 만 제거 (cascade DELETE 는 호출자 책임)."""
+        async with aiosqlite.connect(self.db_path) as conn:
+            cursor = await conn.execute("DELETE FROM projects WHERE slug=?", (slug,))
+            await conn.commit()
+            return cursor.rowcount > 0
+
+    async def project_counts(self, slug: str) -> dict[str, Any]:
+        """카운트 + last_active_at 계산 — /api/projects 응답 derive 헬퍼.
+
+        archived/purging 상태도 그대로 카운트한다 (read 는 정상 동작).
+        """
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.execute(
+                "SELECT COUNT(*) AS n FROM assets WHERE project=?", (slug,)
+            )
+            asset_count = (await cursor.fetchone())["n"]
+            cursor = await conn.execute(
+                "SELECT COUNT(DISTINCT batch_id) AS n FROM generation_tasks "
+                "WHERE project=? AND batch_id IS NOT NULL",
+                (slug,),
+            )
+            batch_count = (await cursor.fetchone())["n"]
+            cursor = await conn.execute(
+                "SELECT COUNT(*) AS n FROM asset_candidates WHERE project=?", (slug,)
+            )
+            candidate_count = (await cursor.fetchone())["n"]
+            cursor = await conn.execute(
+                "SELECT COUNT(*) AS n FROM generation_tasks "
+                "WHERE project=? AND status IN ('queued','running')",
+                (slug,),
+            )
+            active_task_count = (await cursor.fetchone())["n"]
+            cursor = await conn.execute(
+                "SELECT MAX(created_at) AS m FROM generation_tasks WHERE project=?",
+                (slug,),
+            )
+            last_active_at = (await cursor.fetchone())["m"]
+        return {
+            "asset_count": asset_count,
+            "batch_count": batch_count,
+            "candidate_count": candidate_count,
+            "active_task_count": active_task_count,
+            "last_active_at": last_active_at,
+        }
+
+    async def cascade_delete_project_data(self, slug: str) -> dict[str, int]:
+        """purge confirm 시 DB 삭제 (단일 트랜잭션). file unlink 는 호출자 (server) 책임.
+
+        AGENTS.md §8 (file↔DB 정합성) — DB row 먼저 정리 후 file unlink.
+        ``DELETE FROM projects`` 는 cascade 후 별도 transaction (server) 에서.
+        """
+        async with aiosqlite.connect(self.db_path) as conn:
+            await conn.execute("BEGIN IMMEDIATE")
+            cursor = await conn.execute(
+                "DELETE FROM asset_candidates WHERE project=?", (slug,)
+            )
+            candidates_deleted = cursor.rowcount
+            cursor = await conn.execute(
+                "DELETE FROM generation_tasks WHERE project=?", (slug,)
+            )
+            tasks_deleted = cursor.rowcount
+            cursor = await conn.execute("DELETE FROM assets WHERE project=?", (slug,))
+            assets_deleted = cursor.rowcount
+            await conn.commit()
+        return {
+            "assets": assets_deleted,
+            "tasks": tasks_deleted,
+            "candidates": candidates_deleted,
+        }
 
     async def create_job(
         self,
