@@ -36,7 +36,11 @@ from generator import (
 )
 from generator_comfyui import ComfyUIClient
 from lib import events as ev
-from models import Database
+from models import (
+    Database,
+    is_valid_project_slug,
+    suggest_project_slug,
+)
 from scanner import scan_directory
 from sd_backend import (
     A1111Backend,
@@ -2300,32 +2304,112 @@ async def sd_catalog_usage_batches(
     return {"count": len(items), "items": items}
 
 
-@app.get("/api/projects")
-async def list_projects() -> dict[str, Any]:
-    """specs 디렉토리의 프로젝트 스펙 목록.
+class ProjectCreateRequest(BaseModel):
+    """POST /api/projects 본문 — 명시적 등록."""
 
-    v0.2 스펙 §4 의 list-endpoint 규약에 맞춰 ``{"items": [...]}`` 래퍼로
-    반환한다. 각 항목은 ``{id, name, path}``. ``name`` 은 spec.json 내부의
-    ``name`` / ``project`` 필드 → 파일명(stem) 순으로 폴백한다.
+    slug: str = Field(min_length=1, max_length=64)
+    display_name: str = Field(min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+
+
+class ProjectPatchRequest(BaseModel):
+    """PATCH /api/projects/{slug} — display_name / description 부분 갱신."""
+
+    display_name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+
+
+def _slug_validation_error(slug: str) -> HTTPException:
+    """invalid slug → 400 with suggestion."""
+    return HTTPException(
+        status_code=400,
+        detail={
+            "error": "invalid_project_slug",
+            "detail": (
+                f"slug '{slug}' 가 형식 ^[a-z][a-z0-9-]{{1,39}}$ 또는 reserved word "
+                f"제약을 통과하지 못했습니다."
+            ),
+            "suggestion": suggest_project_slug(slug),
+        },
+    )
+
+
+async def _project_to_response(project_row: dict[str, Any]) -> dict[str, Any]:
+    """projects row + counts 결합 — /api/projects 응답 schema (T8).
+
+    AGENTS.md §6 (FE↔BE 계약) — frontend 가 의존하는 키들을 server 에서
+    명시 derive. 회귀 가드 테스트 ``test_projects_api_response_shape`` 가
+    이 키 셋을 hard assert.
     """
-    specs_dir = BASE_DIR / "specs"
-    items: list[dict[str, str]] = []
-    if specs_dir.exists():
-        for file_path in sorted(specs_dir.glob("*.json")):
-            display = file_path.stem
-            try:
-                data = json.loads(file_path.read_text(encoding="utf-8"))
-                display = str(data.get("name") or data.get("project") or file_path.stem)
-            except (json.JSONDecodeError, OSError):
-                pass
-            items.append(
-                {
-                    "id": file_path.stem,
-                    "name": display,
-                    "path": str(file_path.relative_to(BASE_DIR)),
-                }
-            )
+    counts = await db.project_counts(project_row["slug"])
+    return {
+        "slug": project_row["slug"],
+        "display_name": project_row["display_name"],
+        "description": project_row.get("description"),
+        "created_at": project_row["created_at"],
+        "archived_at": project_row.get("archived_at"),
+        "purge_status": project_row.get("purge_status"),
+        "asset_count": counts["asset_count"],
+        "batch_count": counts["batch_count"],
+        "candidate_count": counts["candidate_count"],
+        "active_task_count": counts["active_task_count"],
+        "last_active_at": counts["last_active_at"],
+    }
+
+
+@app.get("/api/projects")
+async def list_projects(include_archived: bool = Query(default=True)) -> dict[str, Any]:
+    """등록된 project 목록 (DB-backed).
+
+    v0.3 부터 spec-file 기반 동작은 deprecate. ``include_archived=false`` 시
+    archived/purging 제외. 응답 shape 는 ``_project_to_response`` 의 키 셋.
+    """
+    rows = await db.list_projects(include_archived=include_archived)
+    items = [await _project_to_response(row) for row in rows]
     return {"items": items}
+
+
+@app.post("/api/projects", dependencies=[Depends(require_api_key)])
+async def create_project(body: ProjectCreateRequest) -> dict[str, Any]:
+    """명시적 등록 — UI 의 '+ New Project' 모달에서 호출."""
+    if not is_valid_project_slug(body.slug):
+        raise _slug_validation_error(body.slug)
+    existing = await db.get_project(body.slug)
+    if existing is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "project_exists", "slug": body.slug},
+        )
+    await db.create_project(
+        slug=body.slug,
+        display_name=body.display_name,
+        description=body.description,
+    )
+    row = await db.get_project(body.slug)
+    assert row is not None
+    return await _project_to_response(row)
+
+
+@app.get("/api/projects/{slug}")
+async def get_project_detail(slug: str) -> dict[str, Any]:
+    """단건 상세 — spec 파일과 별개 (예전 ``/spec`` 핸들러는 그대로 유지)."""
+    row = await db.get_project(slug)
+    if row is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    return await _project_to_response(row)
+
+
+@app.patch("/api/projects/{slug}", dependencies=[Depends(require_api_key)])
+async def patch_project(slug: str, body: ProjectPatchRequest) -> dict[str, Any]:
+    """display_name / description 갱신."""
+    updated = await db.update_project(
+        slug,
+        display_name=body.display_name,
+        description=body.description,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    return await _project_to_response(updated)
 
 
 @app.get("/api/projects/{project_id}/spec")
