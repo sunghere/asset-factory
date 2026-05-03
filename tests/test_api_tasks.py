@@ -53,7 +53,7 @@ async def _seed_tasks(
         task_id = await db.enqueue_generation_task(
             {
                 "job_id": "job_t1",
-                "project": "p",
+                "project": "pp",
                 "asset_key": f"k{idx}",
                 "category": "sprite",
                 "prompt": "x",

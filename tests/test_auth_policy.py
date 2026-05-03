@@ -62,7 +62,7 @@ def test_legacy_generate_endpoint_returns_410(monkeypatch) -> None:
         r = client.post(
             "/api/generate",
             json={
-                "project": "p",
+                "project": "pp",
                 "asset_key": "k",
                 "category": "character",
                 "prompt": "x",
@@ -80,7 +80,7 @@ def test_legacy_generate_batch_endpoint_returns_410(monkeypatch) -> None:
     """/api/generate/batch 도 410 + successor=/api/batches."""
     monkeypatch.setattr(server, "api_key", None)
     with TestClient(server.app) as client:
-        r = client.post("/api/generate/batch", json={"project": "p", "spec": {}})
+        r = client.post("/api/generate/batch", json={"project": "pp", "spec": {}})
     assert r.status_code == 410
     assert "/api/batches" in r.headers.get("Link", "")
     body = r.json()["detail"]

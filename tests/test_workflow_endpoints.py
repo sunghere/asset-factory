@@ -389,7 +389,7 @@ def test_generate_endpoint_passes_workflow_params_json(isolated) -> None:  # noq
 def test_generate_endpoint_404_unknown_variant(isolated) -> None:  # noqa: ANN001
     with TestClient(server.app) as client:
         r = client.post("/api/workflows/generate", json={
-            "project": "p", "asset_key": "k",
+            "project": "pp", "asset_key": "k",
             "workflow_category": "sprite",
             "workflow_variant": "no_such",
             "prompt": "x",
@@ -401,7 +401,7 @@ def test_generate_endpoint_404_unknown_variant(isolated) -> None:  # noqa: ANN00
 def test_generate_endpoint_400_needs_conversion(isolated) -> None:  # noqa: ANN001
     with TestClient(server.app) as client:
         r = client.post("/api/workflows/generate", json={
-            "project": "p", "asset_key": "k",
+            "project": "pp", "asset_key": "k",
             "workflow_category": "pixel_bg",
             "workflow_variant": "sdxl",
             "prompt": "x",
@@ -414,7 +414,7 @@ def test_generate_endpoint_user_overrides_defaults(isolated) -> None:  # noqa: A
     """request.steps/cfg/sampler 가 variant.defaults 보다 우선."""
     with TestClient(server.app) as client:
         r = client.post("/api/workflows/generate", json={
-            "project": "p", "asset_key": "k",
+            "project": "pp", "asset_key": "k",
             "workflow_category": "sprite",
             "workflow_variant": "v",
             "prompt": "x",
@@ -725,7 +725,7 @@ def test_generate_bypass_mode_persists_flag(isolated) -> None:  # noqa: ANN001
     """approval_mode='bypass' 가 task 에 그대로 저장되고 응답에 echo."""
     with TestClient(server.app) as client:
         r = client.post("/api/workflows/generate", json={
-            "project": "tmp_sketch",
+            "project": "tmp-sketch",
             "asset_key": "a",
             "workflow_category": "sprite",
             "workflow_variant": "v",
@@ -763,7 +763,7 @@ def test_generate_subject_mode_returns_resolution(isolated) -> None:  # noqa: AN
     """subject 모드 — 응답에 prompt_resolution 노출, DB prompt 가 final_positive."""
     with TestClient(server.app) as client:
         r = client.post("/api/workflows/generate", json={
-            "project": "p", "asset_key": "k",
+            "project": "pp", "asset_key": "k",
             "workflow_category": "sprite",
             "workflow_variant": "v",
             "prompt": "",     # legacy 통째 입력 안 함
@@ -792,7 +792,7 @@ def test_generate_subject_mode_too_short_returns_400(isolated) -> None:  # noqa:
     """subject 모드 — min_chars=8 위반 시 HTTP 400 + code=subject_length_invalid."""
     with TestClient(server.app) as client:
         r = client.post("/api/workflows/generate", json={
-            "project": "p", "asset_key": "k",
+            "project": "pp", "asset_key": "k",
             "workflow_category": "sprite",
             "workflow_variant": "v",
             "subject": "short",   # < 8 chars
@@ -806,7 +806,7 @@ def test_generate_subject_mode_empty_returns_400(isolated) -> None:  # noqa: ANN
     """subject 모드 — required=True 인데 빈 입력 → HTTP 400 + code=subject_required."""
     with TestClient(server.app) as client:
         r = client.post("/api/workflows/generate", json={
-            "project": "p", "asset_key": "k",
+            "project": "pp", "asset_key": "k",
             "workflow_category": "sprite",
             "workflow_variant": "v",
             "subject": "",
@@ -820,7 +820,7 @@ def test_generate_subject_mode_with_legacy_variant_returns_400(isolated) -> None
     """prompt_mode=subject 인데 변형에 prompt_template 없음 → HTTP 400."""
     with TestClient(server.app) as client:
         r = client.post("/api/workflows/generate", json={
-            "project": "p", "asset_key": "k",
+            "project": "pp", "asset_key": "k",
             "workflow_category": "sprite",
             "workflow_variant": "legacy_var",   # template 없음
             "prompt": "x",
@@ -835,7 +835,7 @@ def test_generate_subject_mode_negative_appended(isolated) -> None:  # noqa: ANN
     """subject 모드 — user negative 가 base_negative 뒤에 추가만 (override X)."""
     with TestClient(server.app) as client:
         r = client.post("/api/workflows/generate", json={
-            "project": "p", "asset_key": "k",
+            "project": "pp", "asset_key": "k",
             "workflow_category": "sprite",
             "workflow_variant": "v",
             "subject": "1girl, silver hair, blue dress",
@@ -850,7 +850,7 @@ def test_generate_subject_mode_negative_appended(isolated) -> None:  # noqa: ANN
 def test_generate_subject_style_extra_appended(isolated) -> None:  # noqa: ANN001
     with TestClient(server.app) as client:
         r = client.post("/api/workflows/generate", json={
-            "project": "p", "asset_key": "k",
+            "project": "pp", "asset_key": "k",
             "workflow_category": "sprite",
             "workflow_variant": "v",
             "subject": "1girl, silver hair",
@@ -865,7 +865,7 @@ def test_generate_legacy_variant_falls_through(isolated) -> None:  # noqa: ANN00
     """prompt_template 없는 변형 — 자동 legacy 모드 (mode='legacy')."""
     with TestClient(server.app) as client:
         r = client.post("/api/workflows/generate", json={
-            "project": "p", "asset_key": "k",
+            "project": "pp", "asset_key": "k",
             "workflow_category": "sprite",
             "workflow_variant": "legacy_var",
             "prompt": "user-written full prompt with all keywords",
@@ -880,7 +880,7 @@ def test_get_job_returns_prompt_resolution(isolated) -> None:  # noqa: ANN001
     """/api/jobs/{id} 응답에 prompt_resolution 노출 (DB 에서 재조회)."""
     with TestClient(server.app) as client:
         r = client.post("/api/workflows/generate", json={
-            "project": "p", "asset_key": "k",
+            "project": "pp", "asset_key": "k",
             "workflow_category": "sprite",
             "workflow_variant": "v",
             "subject": "1girl, silver hair, blue dress",
@@ -899,7 +899,7 @@ def test_get_job_legacy_variant_prompt_resolution_legacy(isolated) -> None:  # n
     """legacy 변형 호출 시 /api/jobs/{id} 의 prompt_resolution.mode='legacy'."""
     with TestClient(server.app) as client:
         r = client.post("/api/workflows/generate", json={
-            "project": "p", "asset_key": "k",
+            "project": "pp", "asset_key": "k",
             "workflow_category": "sprite",
             "workflow_variant": "legacy_var",
             "prompt": "user prompt full",
@@ -1092,7 +1092,7 @@ def test_approve_from_bypass_candidate_preserves_approval_mode(
     import aiosqlite
 
     # candidate 파일 + DB 행
-    cand_dir = tmp_path / "candidates" / "tmp_sketch" / "k"
+    cand_dir = tmp_path / "candidates" / "tmp-sketch" / "k"
     cand_dir.mkdir(parents=True)
     cand_path = cand_dir / "slot_0.png"
     # 10x10 PNG (validate_asset 가 PIL 로 열어야 하므로 실제 PNG 필요)
@@ -1110,7 +1110,7 @@ def test_approve_from_bypass_candidate_preserves_approval_mode(
                 ) VALUES (?, ?, 0, 'job-bp', ?, 10, 10, 16, 'pass', NULL,
                           NULL, NULL, NULL, NULL, NULL, 0, 'bypass',
                           '2026-01-01T00:00:00')""",
-                ("tmp_sketch", "k", str(cand_path)),
+                ("tmp-sketch", "k", str(cand_path)),
             )
             await conn.commit()
             return int(cur.lastrowid)
@@ -1132,7 +1132,7 @@ def test_approve_from_bypass_candidate_preserves_approval_mode(
         async def _check() -> str | None:
             async with aiosqlite.connect(isolated.db_path) as conn:
                 cur = await conn.execute(
-                    "SELECT approval_mode FROM assets WHERE project='tmp_sketch'"
+                    "SELECT approval_mode FROM assets WHERE project='tmp-sketch'"
                 )
                 row = await cur.fetchone()
                 return row[0] if row else None
@@ -1141,10 +1141,10 @@ def test_approve_from_bypass_candidate_preserves_approval_mode(
             f"bypass candidate → asset 의 approval_mode 는 'bypass' 여야 함 (실제: {approval_mode})"
 
         # default list 에서는 안 보임
-        listing = client.get("/api/projects/tmp_sketch/assets").json()
+        listing = client.get("/api/projects/tmp-sketch/assets").json()
         assert listing == [], "bypass asset 은 기본 list 에서 제외돼야 함"
         listing_with = client.get(
-            "/api/projects/tmp_sketch/assets?include_bypassed=true"
+            "/api/projects/tmp-sketch/assets?include_bypassed=true"
         ).json()
         assert len(listing_with) == 1
     finally:
@@ -1171,7 +1171,7 @@ def test_export_excludes_bypass_and_reports_count(isolated, tmp_path) -> None:  
                 "INSERT INTO assets (id, job_id, project, asset_key, category, status, "
                 "image_path, width, height, color_count, has_alpha, validation_status, "
                 "approval_mode, created_at, updated_at) VALUES "
-                "('m1', NULL, 'p', 'm1', 'sprite', 'approved', ?, 64, 64, 16, 0, 'pass', "
+                "('m1', NULL, 'pp', 'm1', 'sprite', 'approved', ?, 64, 64, 16, 0, 'pass', "
                 "'manual', '2026-01-01T00:00:00', '2026-01-01T00:00:00')",
                 (str(manual_img),),
             )
@@ -1179,7 +1179,7 @@ def test_export_excludes_bypass_and_reports_count(isolated, tmp_path) -> None:  
                 "INSERT INTO assets (id, job_id, project, asset_key, category, status, "
                 "image_path, width, height, color_count, has_alpha, validation_status, "
                 "approval_mode, created_at, updated_at) VALUES "
-                "('b1', NULL, 'p', 'b1', 'sprite', 'approved', ?, 64, 64, 16, 0, 'pass', "
+                "('b1', NULL, 'pp', 'b1', 'sprite', 'approved', ?, 64, 64, 16, 0, 'pass', "
                 "'bypass', '2026-01-01T00:00:00', '2026-01-01T00:00:00')",
                 (str(bypass_img),),
             )
@@ -1199,7 +1199,7 @@ def test_export_excludes_bypass_and_reports_count(isolated, tmp_path) -> None:  
     try:
         with TestClient(server.app) as client:
             r = client.post("/api/export", json={
-                "project": "p",
+                "project": "pp",
                 "category": None,
                 "since": None,
                 "output_dir": str(out_dir),

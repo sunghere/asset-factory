@@ -1,0 +1,13 @@
+{
+  "name": "asset-factory",
+  "private": true,
+  "description": "Asset Factory — frontend devDependencies for Playwright e2e (no JS build step; SPA loads via static manifest).",
+  "scripts": {
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed",
+    "test:e2e:install": "playwright install --with-deps chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0"
+  }
+}

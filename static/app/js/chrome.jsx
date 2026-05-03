@@ -44,6 +44,7 @@ function SegProgress({ approved = 0, rejected = 0, total = 1 }) {
 
 const NAV_ITEMS = [
   { key: 'dashboard', icon: '⌂', label: '/dashboard', to: '/' },
+  { key: 'projects',  icon: '◊', label: '/projects',  to: '/projects' },
   { key: 'queue',     icon: '≡', label: '/queue',     to: '/queue' },
   { key: 'assets',    icon: '▦', label: '/assets',    to: '/assets' },
   { key: 'manual',    icon: '◉', label: '/manual',    to: '/manual' },

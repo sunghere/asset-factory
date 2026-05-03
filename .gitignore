@@ -30,3 +30,8 @@ pytest-cache-files-*/
 
 # 워크플로우 smoke 테스트 출력 PNG 등
 scripts/_out_smoke/
+
+# Playwright e2e 인프라
+node_modules/
+playwright-report/
+test-results/

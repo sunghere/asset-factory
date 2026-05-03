@@ -33,10 +33,15 @@ function _safeParseJson(text, fallback) {
 
 function Manual() {
   const toasts = window.useToasts();
-  const projects = window.useAsync(() => window.api.listProjects().catch(() => []), []);
+  const projects = window.useAsync(() => window.api.listProjects({ includeArchived: false }).catch(() => []), []);
   const catalog = window.useAsync(() => window.api.comfyuiCatalog().catch(() => null), []);
 
-  const [project, setProject] = useState('default-project');
+  const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const _initialProject = (() => {
+    try { return window.localStorage?.getItem('lastProjectSlug') || 'default-project'; }
+    catch { return 'default-project'; }
+  })();
+  const [project, setProject] = useState(_initialProject);
   const [assetKey, setAssetKey] = useState('');
   const [category, setCategory] = useState('character');
 
@@ -100,20 +105,24 @@ function Manual() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workflowCategories.join('|')]);
 
-  // 프로젝트 목록이 도착했는데 현재 state 값이 옵션에 없으면 첫 옵션으로 보정.
-  // 이전 버그: state default 가 'default-project' 인데 dropdown 옵션이 다른
-  // ID 들이라, 사용자가 dropdown 을 직접 클릭해 변경하지 않으면 submit 시
-  // payload.project='default-project' 로 새서 결과가 엉뚱한 프로젝트 (혹은
-  // 비어 있는 default) 에 저장된다.
+  // 프로젝트 목록이 도착했는데 현재 state slug 가 옵션에 없으면 첫 옵션으로 보정.
+  // (lastProjectSlug 가 archived 됐거나 purge 된 경우의 silent default 방지.)
   useEffect(() => {
     const items = projects.data?.items;
     if (!items?.length) return;
-    const ids = items.map((p) => typeof p === 'string' ? p : (p.id ?? p.name ?? String(p)));
-    if (!ids.includes(project)) {
-      setProject(ids[0]);
+    const slugs = items.map((p) => p.slug);
+    if (!slugs.includes(project)) {
+      setProject(slugs[0]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projects.data]);
+
+  // project 변경 → localStorage 마지막 선택 기억.
+  useEffect(() => {
+    if (!project) return;
+    try { window.localStorage?.setItem('lastProjectSlug', project); }
+    catch { /* storage off */ }
+  }, [project]);
 
   const variantsHere = variantsByCategory[workflowCategory] || [];
   const paramsParsed = _safeParseJson(paramsText, {});
@@ -216,17 +225,25 @@ function Manual() {
           <div className="form-grid">
             <label>
               <span>project</span>
-              {projects.data?.items?.length ? (
-                <select className="input" value={project} onChange={(e) => setProject(e.target.value)}>
-                  {projects.data.items.map((p) => {
-                    const id = typeof p === 'string' ? p : (p.id ?? p.name ?? String(p));
-                    const label = typeof p === 'string' ? p : (p.name ?? p.id ?? String(p));
-                    return <option key={id} value={id}>{label}</option>;
-                  })}
-                </select>
-              ) : (
-                <input className="input" value={project} onChange={(e) => setProject(e.target.value)}/>
-              )}
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                {projects.data?.items?.length ? (
+                  <select className="input" value={project} onChange={(e) => setProject(e.target.value)} style={{ flex: 1 }}>
+                    {projects.data.items.map((p) => (
+                      <option key={p.slug} value={p.slug}>{p.display_name || p.slug}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input className="input" value={project} onChange={(e) => setProject(e.target.value)} style={{ flex: 1 }}/>
+                )}
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => setNewProjectOpen(true)}
+                  data-testid="picker-new-project"
+                  style={{ padding: '4px 10px', fontSize: 12 }}
+                  title="새 프로젝트 생성"
+                >+ New</button>
+              </div>
             </label>
             <label>
               <span>category</span>
@@ -400,6 +417,17 @@ function Manual() {
             )}
           </div>
         </div>
+      )}
+      {window.NewProjectModal && (
+        <window.NewProjectModal
+          open={newProjectOpen}
+          onClose={() => setNewProjectOpen(false)}
+          onCreated={(p) => {
+            setProject(p.slug);
+            projects.reload();
+            toasts?.push?.({ kind: 'info', message: `Created ${p.slug}` });
+          }}
+        />
       )}
     </div>
   );

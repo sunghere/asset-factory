@@ -36,7 +36,11 @@ from generator import (
 )
 from generator_comfyui import ComfyUIClient
 from lib import events as ev
-from models import Database
+from models import (
+    Database,
+    is_valid_project_slug,
+    suggest_project_slug,
+)
 from scanner import scan_directory
 from sd_backend import (
     A1111Backend,
@@ -992,7 +996,8 @@ async def handle_task(task: dict[str, Any]) -> None:
                 batch_id=batch_id,
                 approval_mode=task.get("approval_mode") or "manual",
             )
-            if batch_id is not None:
+            # candidate_id == 0: archive guard 가 INSERT 를 skip → 후행 이벤트도 skip.
+            if candidate_id != 0 and batch_id is not None:
                 await event_broker.publish(
                     {
                         "type": ev.EVT_CANDIDATE_ADDED,
@@ -2170,6 +2175,7 @@ async def workflows_generate(request: WorkflowGenerateRequest) -> dict[str, Any]
     polling, 완료된 candidate 는 cherry-pick UI (``/cherry-pick?batch=...``) 또는
     기존 ``/api/assets`` 흐름으로 본다.
     """
+    await ensure_project_writable(request.project)
     try:
         variant = workflow_registry.variant(
             request.workflow_category, request.workflow_variant
@@ -2300,32 +2306,355 @@ async def sd_catalog_usage_batches(
     return {"count": len(items), "items": items}
 
 
-@app.get("/api/projects")
-async def list_projects() -> dict[str, Any]:
-    """specs 디렉토리의 프로젝트 스펙 목록.
+class ProjectCreateRequest(BaseModel):
+    """POST /api/projects 본문 — 명시적 등록."""
 
-    v0.2 스펙 §4 의 list-endpoint 규약에 맞춰 ``{"items": [...]}`` 래퍼로
-    반환한다. 각 항목은 ``{id, name, path}``. ``name`` 은 spec.json 내부의
-    ``name`` / ``project`` 필드 → 파일명(stem) 순으로 폴백한다.
+    slug: str = Field(min_length=1, max_length=64)
+    display_name: str = Field(min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+
+
+class ProjectPatchRequest(BaseModel):
+    """PATCH /api/projects/{slug} — display_name / description 부분 갱신."""
+
+    display_name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+
+
+def _slug_validation_error(slug: str) -> HTTPException:
+    """invalid slug → 400 with suggestion."""
+    return HTTPException(
+        status_code=400,
+        detail={
+            "error": "invalid_project_slug",
+            "detail": (
+                f"slug '{slug}' 가 형식 ^[a-z][a-z0-9-]{{1,39}}$ 또는 reserved word "
+                f"제약을 통과하지 못했습니다."
+            ),
+            "suggestion": suggest_project_slug(slug),
+        },
+    )
+
+
+async def ensure_project_writable(slug: str) -> None:
+    """write 진입점에서 호출하는 단일 helper (design doc §"자동 생성 흐름 (A2)").
+
+    - slug 가 검증 실패 → 400 (suggestion 포함, quarantined legacy 도 여기서 막힘).
+    - 미등록 + 검증 통과 → INSERT OR IGNORE (auto-create).
+    - archived → 409 ``project_archived``.
+    - purging → 410 ``project_being_purged``.
+
+    body 의 ``project`` 필드를 첫 줄에서 ``await ensure_project_writable(spec.project)``
+    로 부르는 패턴 — FastAPI Depends 는 query/path 만 보므로 helper 직호출.
     """
-    specs_dir = BASE_DIR / "specs"
-    items: list[dict[str, str]] = []
-    if specs_dir.exists():
-        for file_path in sorted(specs_dir.glob("*.json")):
-            display = file_path.stem
-            try:
-                data = json.loads(file_path.read_text(encoding="utf-8"))
-                display = str(data.get("name") or data.get("project") or file_path.stem)
-            except (json.JSONDecodeError, OSError):
-                pass
-            items.append(
-                {
-                    "id": file_path.stem,
-                    "name": display,
-                    "path": str(file_path.relative_to(BASE_DIR)),
-                }
-            )
+    if not is_valid_project_slug(slug):
+        raise _slug_validation_error(slug)
+    project = await db.get_project(slug)
+    if project is None:
+        await db.upsert_project_idempotent(slug)
+        return
+    if project.get("purge_status"):
+        raise HTTPException(
+            status_code=410,
+            detail={"error": "project_being_purged", "slug": slug},
+        )
+    if project.get("archived_at"):
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "project_archived", "slug": slug},
+        )
+
+
+async def _project_to_response(project_row: dict[str, Any]) -> dict[str, Any]:
+    """projects row + counts 결합 — /api/projects 응답 schema (T8).
+
+    AGENTS.md §6 (FE↔BE 계약) — frontend 가 의존하는 키들을 server 에서
+    명시 derive. 회귀 가드 테스트 ``test_projects_api_response_shape`` 가
+    이 키 셋을 hard assert.
+    """
+    counts = await db.project_counts(project_row["slug"])
+    return {
+        "slug": project_row["slug"],
+        "display_name": project_row["display_name"],
+        "description": project_row.get("description"),
+        "created_at": project_row["created_at"],
+        "archived_at": project_row.get("archived_at"),
+        "purge_status": project_row.get("purge_status"),
+        "asset_count": counts["asset_count"],
+        "batch_count": counts["batch_count"],
+        "candidate_count": counts["candidate_count"],
+        "active_task_count": counts["active_task_count"],
+        "last_active_at": counts["last_active_at"],
+    }
+
+
+@app.get("/api/projects")
+async def list_projects(include_archived: bool = Query(default=True)) -> dict[str, Any]:
+    """등록된 project 목록 (DB-backed).
+
+    v0.3 부터 spec-file 기반 동작은 deprecate. ``include_archived=false`` 시
+    archived/purging 제외. 응답 shape 는 ``_project_to_response`` 의 키 셋.
+    """
+    rows = await db.list_projects(include_archived=include_archived)
+    items = [await _project_to_response(row) for row in rows]
     return {"items": items}
+
+
+@app.post("/api/projects", dependencies=[Depends(require_api_key)])
+async def create_project(body: ProjectCreateRequest) -> dict[str, Any]:
+    """명시적 등록 — UI 의 '+ New Project' 모달에서 호출."""
+    if not is_valid_project_slug(body.slug):
+        raise _slug_validation_error(body.slug)
+    existing = await db.get_project(body.slug)
+    if existing is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "project_exists", "slug": body.slug},
+        )
+    await db.create_project(
+        slug=body.slug,
+        display_name=body.display_name,
+        description=body.description,
+    )
+    row = await db.get_project(body.slug)
+    assert row is not None
+    return await _project_to_response(row)
+
+
+@app.get("/api/projects/{slug}")
+async def get_project_detail(slug: str) -> dict[str, Any]:
+    """단건 상세 — spec 파일과 별개 (예전 ``/spec`` 핸들러는 그대로 유지)."""
+    row = await db.get_project(slug)
+    if row is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    return await _project_to_response(row)
+
+
+@app.patch("/api/projects/{slug}", dependencies=[Depends(require_api_key)])
+async def patch_project(slug: str, body: ProjectPatchRequest) -> dict[str, Any]:
+    """display_name / description 갱신."""
+    updated = await db.update_project(
+        slug,
+        display_name=body.display_name,
+        description=body.description,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    return await _project_to_response(updated)
+
+
+@app.post("/api/projects/{slug}/archive", dependencies=[Depends(require_api_key)])
+async def archive_project(slug: str) -> dict[str, Any]:
+    """Soft drain — archived_at 세팅. 진행 중 task 는 자연 종료, 새 write 는 거부.
+
+    design doc §"Archive (Soft drain)". purging 중인 project 는 archive 무
+    의미 → 409 거부.
+    """
+    existing = await db.get_project(slug)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    if existing.get("purge_status") is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "project_being_purged", "slug": slug},
+        )
+    archived = await db.archive_project(slug)
+    assert archived is not None
+    return await _project_to_response(archived)
+
+
+@app.post("/api/projects/{slug}/unarchive", dependencies=[Depends(require_api_key)])
+async def unarchive_project(slug: str) -> dict[str, Any]:
+    """archive 취소. purging 중인 project 는 복구 불가 → 409."""
+    existing = await db.get_project(slug)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    if existing.get("purge_status") is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "project_being_purged", "slug": slug},
+        )
+    unarchived = await db.unarchive_project(slug)
+    assert unarchived is not None
+    return await _project_to_response(unarchived)
+
+
+def purge_target_dirs(slug: str) -> list[Path]:
+    """purge 대상 디스크 디렉토리 — 단일 source.
+
+    새 project-partitioned 디렉토리가 생기면 여기에 추가. ``_safe_segment`` 로
+    path traversal 방어 redundancy 적용 (design doc §"보안 / 안전장치").
+    """
+    safe = _safe_segment(slug)
+    return [
+        DATA_DIR / "approved" / safe,
+        DATA_DIR / "candidates" / safe,
+    ]
+
+
+def _disk_usage_for_slug(slug: str) -> tuple[int, int]:
+    """purge_target_dirs 의 file count + 누적 byte. 존재하지 않는 dir 는 skip."""
+    files = 0
+    bytes_total = 0
+    for d in purge_target_dirs(slug):
+        if not d.is_dir():
+            continue
+        for p in d.rglob("*"):
+            if p.is_file():
+                files += 1
+                try:
+                    bytes_total += p.stat().st_size
+                except OSError:
+                    pass
+    return files, bytes_total
+
+
+@app.post("/api/projects/{slug}/purge", dependencies=[Depends(require_api_key)])
+async def purge_project(
+    slug: str,
+    dry_run: bool = Query(default=False),
+    confirm: bool = Query(default=False),
+) -> dict[str, Any]:
+    """2-step destructive cleanup (design doc §"Purge (Tombstone state machine)").
+
+    - ``dry_run=true``: 카운트 + active_task_count blocking 정보. 변경 없음.
+    - ``confirm=true``: 사전조건 검증 (archived AND active_task_count==0 AND
+      purge_status IS NULL) → DB DELETE 단일 트랜잭션 → 디스크 best-effort
+      → projects row 제거. 디스크 실패 시 purge_status='purging' 유지 +
+      ``files_failed=true`` 응답.
+    - 둘 다 false → 400.
+    """
+    if dry_run == confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="exactly one of dry_run / confirm must be true",
+        )
+    project = await db.get_project(slug)
+    if project is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    if project.get("archived_at") is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "purge_requires_archive",
+                "detail": "purge 는 archive 후에만 가능합니다.",
+            },
+        )
+
+    counts = await db.project_counts(slug)
+    files_count, bytes_count = _disk_usage_for_slug(slug)
+    will_delete = {
+        "assets": counts["asset_count"],
+        "tasks": counts["batch_count"],  # batch 단위 카운트는 UI 친화 표시용
+        "candidates": counts["candidate_count"],
+        "files": files_count,
+        "bytes": bytes_count,
+    }
+
+    if dry_run:
+        blocking = (
+            {"active_task_count": counts["active_task_count"]}
+            if counts["active_task_count"] > 0
+            else None
+        )
+        return {"will_delete": will_delete, "blocking": blocking}
+
+    # confirm path.
+    if counts["active_task_count"] > 0:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "active_tasks_in_flight",
+                "active_task_count": counts["active_task_count"],
+            },
+        )
+    if project.get("purge_status") is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "purge_already_in_progress", "slug": slug},
+        )
+
+    # 1) tombstone 마킹.
+    await db.set_project_purge_status(slug, "purging")
+    # 2) DB cascade DELETE (단일 transaction).
+    deleted_db = await db.cascade_delete_project_data(slug)
+
+    # 3) disk best-effort. AGENTS.md §8 — DB 가 진실, 파일은 best-effort.
+    files_failed = False
+    for d in purge_target_dirs(slug):
+        # path traversal 방어 redundancy.
+        if _safe_segment(slug) != slug.replace("/", "_").replace("\\", "_").replace("..", "_"):
+            # 이미 safe 하지만 redundancy.
+            pass
+        try:
+            if d.is_dir():
+                shutil.rmtree(d, ignore_errors=False)
+        except OSError as exc:
+            files_failed = True
+            logging.getLogger(__name__).warning(
+                "PURGE_FILE_FAILED: project=%s dir=%s err=%s",
+                slug,
+                d,
+                str(exc).replace("\r", "").replace("\n", ""),
+            )
+
+    # 4) 성공 시 projects row 제거.
+    project_removed = False
+    if not files_failed:
+        await db.delete_project_row(slug)
+        project_removed = True
+
+    return {
+        "deleted": {
+            "assets": deleted_db["assets"],
+            "tasks": deleted_db["tasks"],
+            "candidates": deleted_db["candidates"],
+            "files": files_count,
+            "bytes": bytes_count,
+        },
+        "files_failed": files_failed,
+        "project_removed": project_removed,
+    }
+
+
+@app.post(
+    "/api/projects/{slug}/purge/retry",
+    dependencies=[Depends(require_api_key)],
+)
+async def purge_retry(slug: str) -> dict[str, Any]:
+    """디스크 정리 실패 후 재시도 — purge_status='purging' 인 project 만 대상.
+
+    DB 는 이미 정리된 상태이므로 디스크만 재시도. 성공 시 projects row 제거.
+    """
+    project = await db.get_project(slug)
+    if project is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    if project.get("purge_status") != "purging":
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "not_in_purging_state", "slug": slug},
+        )
+
+    files_failed = False
+    for d in purge_target_dirs(slug):
+        try:
+            if d.is_dir():
+                shutil.rmtree(d, ignore_errors=False)
+        except OSError as exc:
+            files_failed = True
+            logging.getLogger(__name__).warning(
+                "PURGE_RETRY_FILE_FAILED: project=%s dir=%s err=%s",
+                slug,
+                d,
+                str(exc).replace("\r", "").replace("\n", ""),
+            )
+
+    project_removed = False
+    if not files_failed:
+        await db.delete_project_row(slug)
+        project_removed = True
+
+    return {"files_failed": files_failed, "project_removed": project_removed}
 
 
 @app.get("/api/projects/{project_id}/spec")
@@ -2388,6 +2717,7 @@ async def _enqueue_design_batch(spec: DesignBatchRequest) -> dict[str, Any]:
 
     batch_id를 발급하고 expand된 task들을 generation_tasks에 enqueue한다.
     예상 ETA는 task당 6초의 거친 추정치이다."""
+    await ensure_project_writable(spec.project)
     try:
         tasks = expand_design_batch(spec)
     except ValueError as exc:
@@ -2896,6 +3226,9 @@ async def approve_from_candidate(body: ApproveFromCandidateRequest) -> dict[str,
     asset_key = body.asset_key or candidate["asset_key"]
     category = body.category or "character"
 
+    # archive 후 새 approve 거부 — 진행 중 cherry-pick 도 read-only.
+    await ensure_project_writable(project)
+
     src_path = _ensure_path_allowed(Path(candidate["image_path"]))
     if not src_path.exists():
         raise HTTPException(status_code=404, detail="후보 파일이 디스크에 없습니다.")
@@ -3011,6 +3344,7 @@ async def approve_from_candidate(body: ApproveFromCandidateRequest) -> dict[str,
 @app.post("/api/projects/scan", dependencies=[Depends(require_api_key)])
 async def scan_project_assets(request: ScanRequest) -> dict[str, Any]:
     """기존 디렉토리를 스캔해 에셋 DB를 동기화한다."""
+    await ensure_project_writable(request.project)
     root = _ensure_path_allowed(Path(request.root_path))
     try:
         scanned = scan_directory(root)
@@ -3446,6 +3780,8 @@ async def regenerate_asset(asset_id: str) -> dict[str, str]:
     if asset is None:
         raise HTTPException(status_code=404, detail="에셋을 찾을 수 없습니다.")
 
+    await ensure_project_writable(asset["project"])
+
     job_id = str(uuid.uuid4())
     prompt = asset.get("generation_prompt")
     if not prompt:
@@ -3676,6 +4012,8 @@ async def batch_regenerate_failed(
 ) -> dict[str, Any]:
     """검증 FAIL 에셋에 대해 재생성 작업을 일괄 등록한다."""
     _ensure_disk_space_for_enqueue()
+    if project is not None:
+        await ensure_project_writable(project)
     assets = await db.list_assets(project=project, validation_status="fail")
     job_ids: list[str] = []
     for asset in assets:

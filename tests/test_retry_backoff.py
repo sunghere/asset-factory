@@ -34,7 +34,7 @@ def _enqueue_one(db: Database) -> dict:
         await db.enqueue_generation_task(
             {
                 "job_id": "job1",
-                "project": "p",
+                "project": "pp",
                 "asset_key": "k",
                 "category": "sprite",
                 "prompt": "x",
