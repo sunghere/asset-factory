@@ -2443,6 +2443,42 @@ async def patch_project(slug: str, body: ProjectPatchRequest) -> dict[str, Any]:
     return await _project_to_response(updated)
 
 
+@app.post("/api/projects/{slug}/archive", dependencies=[Depends(require_api_key)])
+async def archive_project(slug: str) -> dict[str, Any]:
+    """Soft drain — archived_at 세팅. 진행 중 task 는 자연 종료, 새 write 는 거부.
+
+    design doc §"Archive (Soft drain)". purging 중인 project 는 archive 무
+    의미 → 409 거부.
+    """
+    existing = await db.get_project(slug)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    if existing.get("purge_status") is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "project_being_purged", "slug": slug},
+        )
+    archived = await db.archive_project(slug)
+    assert archived is not None
+    return await _project_to_response(archived)
+
+
+@app.post("/api/projects/{slug}/unarchive", dependencies=[Depends(require_api_key)])
+async def unarchive_project(slug: str) -> dict[str, Any]:
+    """archive 취소. purging 중인 project 는 복구 불가 → 409."""
+    existing = await db.get_project(slug)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    if existing.get("purge_status") is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "project_being_purged", "slug": slug},
+        )
+    unarchived = await db.unarchive_project(slug)
+    assert unarchived is not None
+    return await _project_to_response(unarchived)
+
+
 @app.get("/api/projects/{project_id}/spec")
 async def get_project_spec(project_id: str) -> dict[str, Any]:
     """프로젝트 스펙 파일을 반환한다."""
