@@ -2167,6 +2167,12 @@ async def workflows_generate(request: WorkflowGenerateRequest) -> dict[str, Any]
     job_type = "workflow_single" if request.candidates_total == 1 else "workflow_design"
     await db.create_job(job_id=job_id, job_type=job_type, payload=request.model_dump())
 
+    # 모든 워크플로우 호출에 batch_id 를 부여 — /api/batches 히스토리에 manual
+    # 요청도 함께 노출되고, candidates_total=1 이어도 handle_task 가 candidate
+    # path 로 처리하여 cherry-pick 에서 검토 가능. (handle_task §line 904
+    # 분기: batch_id != None & candidate_slot None → slot=task.id 자동 부여)
+    batch_id = f"btc_{uuid.uuid4().hex[:16]}"
+
     candidates_total = int(request.candidates_total)
     base_seed = request.seed
 
@@ -2191,11 +2197,25 @@ async def workflows_generate(request: WorkflowGenerateRequest) -> dict[str, Any]
             max_retries=request.max_retries,
             approval_mode=request.approval_mode,
         )
-        await db.enqueue_generation_task({"job_id": job_id, **task})
+        await db.enqueue_generation_task({
+            "job_id": job_id, "batch_id": batch_id, **task,
+        })
     await db.mark_job_running(job_id)
     await event_broker.publish({"type": ev.EVT_JOB_CREATED, "job_id": job_id})
+    # Batches 화면이 SSE 로 즉시 갱신되도록 design_batch_created 도 발행 —
+    # batch_id 가 부여된 이상 design batch 와 동일한 가시성을 가진다.
+    await event_broker.publish(
+        {
+            "type": ev.EVT_DESIGN_BATCH_CREATED,
+            "batch_id": batch_id,
+            "job_id": job_id,
+            "asset_key": request.asset_key,
+            "expanded_count": candidates_total,
+        }
+    )
     return {
         "job_id": job_id,
+        "batch_id": batch_id,
         "workflow_category": request.workflow_category,
         "workflow_variant": request.workflow_variant,
         "candidates_total": candidates_total,

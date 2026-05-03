@@ -91,13 +91,29 @@ function Manual() {
         : workflowCategories[0];
       setWorkflowCategory(target);
       const vs = variantsByCategory[target] || [];
-      const primary = vs.find((v) => v.variantName === pf.workflow_variant)
+      const primary = vs.find((v) => v.variantName === pf.variant_name)
+        || vs.find((v) => v.variantName === pf.workflow_variant)
         || vs.find((v) => /pixel_alpha|primary/i.test(v.variantName))
         || vs[0];
       if (primary) setWorkflowVariant(primary.variantName);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workflowCategories.join('|')]);
+
+  // 프로젝트 목록이 도착했는데 현재 state 값이 옵션에 없으면 첫 옵션으로 보정.
+  // 이전 버그: state default 가 'default-project' 인데 dropdown 옵션이 다른
+  // ID 들이라, 사용자가 dropdown 을 직접 클릭해 변경하지 않으면 submit 시
+  // payload.project='default-project' 로 새서 결과가 엉뚱한 프로젝트 (혹은
+  // 비어 있는 default) 에 저장된다.
+  useEffect(() => {
+    const items = projects.data?.items;
+    if (!items?.length) return;
+    const ids = items.map((p) => typeof p === 'string' ? p : (p.id ?? p.name ?? String(p)));
+    if (!ids.includes(project)) {
+      setProject(ids[0]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projects.data]);
 
   const variantsHere = variantsByCategory[workflowCategory] || [];
   const paramsParsed = _safeParseJson(paramsText, {});
@@ -342,6 +358,8 @@ function Manual() {
         <div className="panel-card" style={{ marginTop: 14 }}>
           <h3>결과</h3>
           <dl className="kvlist">
+            <dt>batch_id</dt>
+            <dd style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{result.batch_id}</dd>
             <dt>job_id</dt>
             <dd style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{result.job_id}</dd>
             <dt>workflow</dt>
@@ -365,15 +383,22 @@ function Manual() {
               </>
             )}
           </dl>
-          {jobStatus?.status === 'done' && (
-            <div style={{ marginTop: 12 }}>
-              <a className="btn btn-primary"
-                 href="/app/cherry-pick"
-                 onClick={(e) => { e.preventDefault(); window.navigate('/cherry-pick'); }}>
-                cherry-pick 큐에서 보기
+          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            {result.batch_id && (
+              <a className="btn"
+                 href={`/app/batches/${result.batch_id}`}
+                 onClick={(e) => { e.preventDefault(); window.navigate(`/batches/${result.batch_id}`); }}>
+                batch 상세
               </a>
-            </div>
-          )}
+            )}
+            {result.batch_id && jobStatus?.status === 'done' && (
+              <a className="btn btn-primary"
+                 href={`/app/cherry-pick/${result.batch_id}`}
+                 onClick={(e) => { e.preventDefault(); window.navigate(`/cherry-pick/${result.batch_id}`); }}>
+                cherry-pick 열기
+              </a>
+            )}
+          </div>
         </div>
       )}
     </div>

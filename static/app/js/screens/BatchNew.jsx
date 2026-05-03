@@ -119,6 +119,18 @@ function BatchNew() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workflowCategories.join('|')]);
 
+  // 프로젝트 옵션이 도착했는데 현재 state 가 없는 ID 면 첫 옵션으로 보정.
+  // (state default 'default-project' 가 옵션에 없을 때 silent default 방지.)
+  useEffect(() => {
+    const items = projects.data?.items;
+    if (!items?.length) return;
+    const ids = items.map((p) => typeof p === 'string' ? p : (p.id ?? p.name ?? String(p)));
+    if (!ids.includes(project)) {
+      setProject(ids[0]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projects.data]);
+
   const variantsHere = variantsByCategory[workflowCategory] || [];
 
   const seedList = useMemo(() => {
