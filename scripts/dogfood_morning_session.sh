@@ -35,11 +35,11 @@ fi
 
 # (asset_key, prompt_keyword, seeds_per_combo) — 100장(이상적), 20장 fallback 혼합
 declare -a SCENARIOS=(
-  "marine_v2_idle|marine character idle pose|25"   # 2x2x25 = 100장
-  "marine_v2_walk|marine character walking|10"     # 2x2x10 =  40장
-  "soldier_idle|soldier idle pose|10"              # 2x2x10 =  40장
-  "scout_run|scout running pose|5"                 # 2x2x5  =  20장 (fallback)
-  "engineer_repair|engineer repairing|5"           # 2x2x5  =  20장 (fallback)
+  "marine_v2_idle|marine character idle pose|100"   # 100장
+  "marine_v2_walk|marine character walking|40"      #  40장
+  "soldier_idle|soldier idle pose|40"               #  40장
+  "scout_run|scout running pose|20"                 #  20장 (fallback)
+  "engineer_repair|engineer repairing|20"           #  20장 (fallback)
 )
 
 enqueue_one() {
@@ -50,17 +50,12 @@ enqueue_one() {
   "project": "$PROJECT",
   "asset_key": "$asset_key",
   "category": "character",
+  "workflow_category": "sprite",
+  "workflow_variants": ["pixel_alpha"],
+  "workflow_params_overrides": [{}],
   "prompts": ["pixel art, $prompt_kw, transparent background, clean lineart, full body"],
-  "models": ["pixelart_xl_v1.5", "deliberate_v3"],
-  "loras": [
-    [
-      {"name": "marine_uniform_v2", "weight": 0.7},
-      {"name": "sad_face_v1", "weight": 0.5}
-    ]
-  ],
   "seeds_per_combo": $seeds,
   "common": {
-    "steps": 28, "cfg": 7.0, "sampler": "DPM++ 2M Karras",
     "negative_prompt": "blurry, lowres, jpeg artifacts, watermark",
     "expected_size": 1024, "max_colors": 64
   }
@@ -83,7 +78,7 @@ echo
 TOTAL=0
 for row in "${SCENARIOS[@]}"; do
   IFS='|' read -r ak kw seeds <<<"$row"
-  combos=$((2 * 2 * seeds))
+  combos=$seeds
   TOTAL=$((TOTAL + combos))
   echo "[morning-session] enqueue $ak ($combos장)"
   enqueue_one "$ak" "$kw" "$seeds"
