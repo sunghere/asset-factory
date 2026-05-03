@@ -8,6 +8,7 @@
   ],
   "screens": [
     "/static/app/js/screens/Dashboard.jsx",
+    "/static/app/js/screens/Projects.jsx",
     "/static/app/js/screens/Queue.jsx",
     "/static/app/js/screens/CherryPick.jsx",
     "/static/app/js/screens/Assets.jsx",

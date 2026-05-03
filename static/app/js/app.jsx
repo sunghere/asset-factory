@@ -18,6 +18,7 @@ function LegacyRedirect({ to }) {
 
 const ROUTES = [
   { pattern: '/',                       nav: 'dashboard', render: () => <window.Dashboard/> },
+  { pattern: '/projects',               nav: 'projects',  render: () => <window.Projects/> },
   { pattern: '/queue',                  nav: 'queue',     render: () => <window.Queue/> },
   { pattern: '/cherry-pick/:batchId',   nav: 'queue',     render: ({ batchId }) => <window.CherryPick batchId={batchId}/> },
   { pattern: '/assets',                 nav: 'assets',    render: () => <window.Assets/> },

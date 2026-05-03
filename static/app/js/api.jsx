@@ -79,8 +79,35 @@ const api = {
     return request('GET', `/api/sd/catalog/usage/batches?${qs.toString()}`);
   },
 
-  // Projects
-  listProjects: () => request('GET', '/api/projects'),
+  // Projects (DB-backed registry — v0.3+).
+  // Response items keys: slug, display_name, description, created_at,
+  // archived_at, purge_status, asset_count, batch_count, candidate_count,
+  // active_task_count, last_active_at. UI 는 이 키들에만 의존 (AGENTS.md §6).
+  listProjects: ({ includeArchived = true } = {}) =>
+    request('GET', `/api/projects?include_archived=${includeArchived ? 'true' : 'false'}`),
+  getProject: (slug) => request('GET', `/api/projects/${encodeURIComponent(slug)}`),
+  createProject: ({ slug, displayName, description }) =>
+    request('POST', '/api/projects', {
+      body: { slug, display_name: displayName, description: description || null },
+    }),
+  patchProject: (slug, { displayName, description }) =>
+    request('PATCH', `/api/projects/${encodeURIComponent(slug)}`, {
+      body: {
+        display_name: displayName ?? null,
+        description: description ?? null,
+      },
+    }),
+  archiveProject: (slug) =>
+    request('POST', `/api/projects/${encodeURIComponent(slug)}/archive`),
+  unarchiveProject: (slug) =>
+    request('POST', `/api/projects/${encodeURIComponent(slug)}/unarchive`),
+  purgeProjectDryRun: (slug) =>
+    request('POST', `/api/projects/${encodeURIComponent(slug)}/purge?dry_run=true`),
+  purgeProjectConfirm: (slug) =>
+    request('POST', `/api/projects/${encodeURIComponent(slug)}/purge?confirm=true`),
+  purgeProjectRetry: (slug) =>
+    request('POST', `/api/projects/${encodeURIComponent(slug)}/purge/retry`),
+  // 기존 spec-file 핸들러 (legacy 화면용 — 새 화면은 listProjects 만 사용).
   getProjectSpec: (id) => request('GET', `/api/projects/${encodeURIComponent(id)}/spec`),
 
   // Batches
