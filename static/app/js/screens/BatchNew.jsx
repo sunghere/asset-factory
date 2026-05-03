@@ -41,12 +41,18 @@ function _safeParseJson(text, fallback) {
 
 function BatchNew() {
   const toasts = window.useToasts();
-  const projects = window.useAsync(() => window.api.listProjects().catch(() => []), []);
+  const projects = window.useAsync(() => window.api.listProjects({ includeArchived: false }).catch(() => []), []);
   const catalog = window.useAsync(() => window.api.comfyuiCatalog().catch(() => null), []);
 
   const [step, setStep] = useState(1);
+  const [newProjectOpen, setNewProjectOpen] = useState(false);
 
-  const [project, setProject] = useState('default-project');
+  // 진입 시 마지막 사용한 slug 우선 (localStorage). 없으면 default-project.
+  const _initialProject = (() => {
+    try { return window.localStorage?.getItem('lastProjectSlug') || 'default-project'; }
+    catch { return 'default-project'; }
+  })();
+  const [project, setProject] = useState(_initialProject);
   const [assetKey, setAssetKey] = useState('');
   const [category, setCategory] = useState('character');
 
@@ -119,17 +125,24 @@ function BatchNew() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workflowCategories.join('|')]);
 
-  // 프로젝트 옵션이 도착했는데 현재 state 가 없는 ID 면 첫 옵션으로 보정.
-  // (state default 'default-project' 가 옵션에 없을 때 silent default 방지.)
+  // 프로젝트 옵션이 도착했는데 현재 state 가 없는 slug 면 첫 옵션으로 보정.
+  // (lastProjectSlug 가 archived 됐거나 purge 된 경우의 silent default 방지.)
   useEffect(() => {
     const items = projects.data?.items;
     if (!items?.length) return;
-    const ids = items.map((p) => typeof p === 'string' ? p : (p.id ?? p.name ?? String(p)));
-    if (!ids.includes(project)) {
-      setProject(ids[0]);
+    const slugs = items.map((p) => p.slug);
+    if (!slugs.includes(project)) {
+      setProject(slugs[0]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projects.data]);
+
+  // project 변경 시 localStorage 에 마지막 선택 기억 — 다음 진입 시 자동 선택.
+  useEffect(() => {
+    if (!project) return;
+    try { window.localStorage?.setItem('lastProjectSlug', project); }
+    catch { /* storage off */ }
+  }, [project]);
 
   const variantsHere = variantsByCategory[workflowCategory] || [];
 
@@ -271,17 +284,25 @@ function BatchNew() {
           <div className="form-grid">
             <label>
               <span>project</span>
-              {projects.data?.items?.length ? (
-                <select className="input" value={project} onChange={(e) => setProject(e.target.value)}>
-                  {projects.data.items.map((p) => {
-                    const id = typeof p === 'string' ? p : (p.id ?? p.name ?? String(p));
-                    const label = typeof p === 'string' ? p : (p.name ?? p.id ?? String(p));
-                    return <option key={id} value={id}>{label}</option>;
-                  })}
-                </select>
-              ) : (
-                <input className="input" value={project} onChange={(e) => setProject(e.target.value)}/>
-              )}
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                {projects.data?.items?.length ? (
+                  <select className="input" value={project} onChange={(e) => setProject(e.target.value)} style={{ flex: 1 }}>
+                    {projects.data.items.map((p) => (
+                      <option key={p.slug} value={p.slug}>{p.display_name || p.slug}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input className="input" value={project} onChange={(e) => setProject(e.target.value)} style={{ flex: 1 }}/>
+                )}
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => setNewProjectOpen(true)}
+                  data-testid="picker-new-project"
+                  style={{ padding: '4px 10px', fontSize: 12 }}
+                  title="새 프로젝트 생성"
+                >+ New</button>
+              </div>
             </label>
             <label>
               <span>category (asset)</span>
@@ -535,6 +556,17 @@ function BatchNew() {
             </button>
           </div>
         </div>
+      )}
+      {window.NewProjectModal && (
+        <window.NewProjectModal
+          open={newProjectOpen}
+          onClose={() => setNewProjectOpen(false)}
+          onCreated={(p) => {
+            setProject(p.slug);
+            projects.reload();
+            toasts?.push?.({ kind: 'info', message: `Created ${p.slug}` });
+          }}
+        />
       )}
     </div>
   );

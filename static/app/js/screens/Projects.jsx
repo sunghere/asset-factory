@@ -541,3 +541,4 @@ function Projects() {
 }
 
 window.Projects = Projects;
+window.NewProjectModal = NewProjectModal;
