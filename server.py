@@ -2587,9 +2587,14 @@ async def delete_batch_api(
                 unlinked += 1
         except OSError:
             failed_unlink_count += 1
+            # CRLF stripping: batch_id 는 URL path 에서, path_str 는 DB 에서
+            # 오는 잠재적 untrusted 입력. raw 그대로 logger 에 흘리면 CRLF
+            # 인젝션으로 가짜 로그 라인이 만들어질 수 있어 newline 류 escape.
+            _safe_bid = batch_id.replace('\r', '').replace('\n', '')
+            _safe_path = path_str.replace('\r', '').replace('\n', '')
             logging.getLogger(__name__).warning(
                 "delete_batch: unlink 실패 batch_id=%s path=%s",
-                batch_id, path_str, exc_info=True,
+                _safe_bid, _safe_path, exc_info=True,
             )
 
     await event_broker.publish(
