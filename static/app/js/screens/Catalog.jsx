@@ -198,20 +198,29 @@ function CatalogSection({ section, query, usage, selected, onSelect }) {
           gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
           gap: 10,
         }}>
-          {filtered.map((it) => (
-            <CatalogCard
-              key={it.id || it.name}
-              item={it}
-              kind={section.kind}
-              showFamily={section.showFamily}
-              active={
-                selected
-                && selected.kind === section.kind
-                && (selected.item.id === it.id || selected.item.name === it.name)
-              }
-              onSelect={() => onSelect(section.kind, it)}
-            />
-          ))}
+          {filtered.map((it) => {
+            // workflow row 는 id (e.g. "sprite:pixel_alpha") 만 있고 name 이
+            // undefined. model/lora row 는 name 이 있고 id 가 없을 수 있다.
+            // 양쪽 모두 안전하게 비교하려면 한 키를 골라 정의된 값일 때만 매칭.
+            const itKey = it.id ?? it.name;
+            const selKey = selected?.item ? (selected.item.id ?? selected.item.name) : null;
+            const isActive = !!(
+              selected
+              && selected.kind === section.kind
+              && itKey != null
+              && itKey === selKey
+            );
+            return (
+              <CatalogCard
+                key={itKey}
+                item={it}
+                kind={section.kind}
+                showFamily={section.showFamily}
+                active={isActive}
+                onSelect={() => onSelect(section.kind, it)}
+              />
+            );
+          })}
         </div>
       )}
     </section>
